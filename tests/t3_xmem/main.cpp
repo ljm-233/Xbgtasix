@@ -15,7 +15,7 @@
 #include <thread>
 #include <vector>
 
-#include "xbshim/trace.h"
+#include "xbgtasix/trace.h"
 
 // 与 src/xmem/xmem.cpp 的定义逐字一致（没有公开头文件可用，只能手动对齐）
 struct XMemVirtualQueryInfo {
@@ -52,7 +52,7 @@ void ok(bool cond, const char* what) {
     ++g_checks;
     if (!cond) {
         ++g_fail;
-        xbshim::logf("[t3] FAIL %s", what);
+        xbgtasix::logf("[t3] FAIL %s", what);
     }
 }
 
@@ -102,7 +102,7 @@ void test_align_matrix() {
             XMemFree(p);
         }
     }
-    xbshim::logf("[t3] align matrix done");
+    xbgtasix::logf("[t3] align matrix done");
 }
 
 // ---- 2. 二次释放 / 野指针 / nullptr ----
@@ -117,7 +117,7 @@ void test_bad_free() {
     const Stats after = stats();
     ok(after.TotalBytes == before.TotalBytes && after.AllocationCount == before.AllocationCount,
        "badfree: stats unchanged");
-    xbshim::logf("[t3] bad free done");
+    xbgtasix::logf("[t3] bad free done");
 }
 
 // ---- 3. 碎片化 churn ----
@@ -162,7 +162,7 @@ void test_churn(unsigned iterations) {
     for (auto& e : live) XMemFree(e.first);
     const Stats s = stats();
     ok(s.TotalBytes == 0 && s.AllocationCount == 0, "churn: no leak after free-all");
-    xbshim::logf("[t3] churn %u iters, %llu bytes touched, live stats: total=%llu count=%llu",
+    xbgtasix::logf("[t3] churn %u iters, %llu bytes touched, live stats: total=%llu count=%llu",
                  iterations, bytes, static_cast<unsigned long long>(s.TotalBytes),
                  static_cast<unsigned long long>(s.AllocationCount));
 }
@@ -191,7 +191,7 @@ void test_large() {
        "large: query covers pointer");
 
     XMemFree(p);
-    xbshim::logf("[t3] large 64MB done");
+    xbgtasix::logf("[t3] large 64MB done");
 }
 
 // ---- 5. 多线程 ----
@@ -223,7 +223,7 @@ void test_threads(int n_threads, int per_thread) {
     ok(errors.load() == 0, "threads: no errors");
     const Stats s = stats();
     ok(s.TotalBytes == 0 && s.AllocationCount == 0, "threads: no leak");
-    xbshim::logf("[t3] %d threads x %d allocs done", n_threads, per_thread);
+    xbgtasix::logf("[t3] %d threads x %d allocs done", n_threads, per_thread);
 }
 
 // ---- 6. 区域粒度（主机 64KB 页） ----
@@ -236,7 +236,7 @@ void test_region_granularity() {
     ok(XMemVirtualQuery(p, &info), "gran: query");
     ok((info.RegionSize % 65536) == 0, "gran: RegionSize multiple of 64KB");
     ok((reinterpret_cast<uintptr_t>(info.BaseAddress) % 65536) == 0, "gran: BaseAddress 64KB aligned");
-    xbshim::logf("[t3] gran: base=%p region=%zu state=0x%lx", info.BaseAddress, info.RegionSize,
+    xbgtasix::logf("[t3] gran: base=%p region=%zu state=0x%lx", info.BaseAddress, info.RegionSize,
                  static_cast<unsigned long>(info.State));
     XMemFree(p);
 }
@@ -250,7 +250,7 @@ void test_query_after_free() {
     XMemVirtualQueryInfo info{};
     const bool got = XMemVirtualQuery(p, &info);
     ok(!got || info.State == MEM_FREE, "qaf: freed region is MEM_FREE or query fails");
-    xbshim::logf("[t3] query-after-free: got=%d state=0x%lx", got ? 1 : 0,
+    xbgtasix::logf("[t3] query-after-free: got=%d state=0x%lx", got ? 1 : 0,
                  static_cast<unsigned long>(info.State));
 }
 
@@ -266,8 +266,8 @@ double now_ms() {
 int main(int argc, char** argv) {
     unsigned churn = 100000;
     if (argc > 1) churn = static_cast<unsigned>(std::atoi(argv[1]));
-    xbshim::logf("[t3] start, churn=%u, poison=%s", churn,
-                 GetEnvironmentVariableA("XBSHIM_XMEM_POISON", nullptr, 0) ? "on" : "off");
+    xbgtasix::logf("[t3] start, churn=%u, poison=%s", churn,
+                 GetEnvironmentVariableA("XBGTASIX_XMEM_POISON", nullptr, 0) ? "on" : "off");
 
     const double t0 = now_ms();
     const Stats begin = stats();
@@ -285,9 +285,9 @@ int main(int argc, char** argv) {
     ok(end.TotalBytes == 0 && end.AllocationCount == 0, "end: no leak");
     const double dt = now_ms() - t0;
 
-    xbshim::logf("[t3] peak=%llu B, total allocations=%llu, elapsed=%.0f ms",
+    xbgtasix::logf("[t3] peak=%llu B, total allocations=%llu, elapsed=%.0f ms",
                  static_cast<unsigned long long>(end.PeakBytes),
                  static_cast<unsigned long long>(end.Reserved[0]), dt);
-    xbshim::logf("[t3] %d checks, %d failures -> %s", g_checks, g_fail, g_fail ? "FAIL" : "PASS");
+    xbgtasix::logf("[t3] %d checks, %d failures -> %s", g_checks, g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
 }

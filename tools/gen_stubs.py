@@ -2,7 +2,7 @@
 """从 .lib / 符号表生成"全量导出但全部抛异常"的 shim 桩。
 
 用途：拿到 Microsoft GDK 的导入库（xgameruntime.lib 等）后，一条命令生成
-      .def + C 源，覆盖该库的全部导出名。之后按 xbshim.log 的命中顺序填实现。
+      .def + C 源，覆盖该库的全部导出名。之后按 xbgtasix.log 的命中顺序填实现。
 
 用法：
     python gen_stubs.py <file.lib> --dll xgameruntime --out out/
@@ -91,7 +91,7 @@ def clean(symbols):
 
 
 def ident(name, index):
-    return "xbshim_stub_%04d" % index
+    return "xbgtasix_stub_%04d" % index
 
 
 def main():
@@ -135,7 +135,7 @@ def main():
 
     with open(base + "_stubs.cpp", "w", encoding="utf-8") as f:
         f.write('// 自动生成 —— 不要手改。重新运行 gen_stubs.py 覆盖。\n')
-        f.write('#include "xbshim/trace.h"\n\n')
+        f.write('#include "xbgtasix/trace.h"\n\n')
         f.write('extern "C" {\n')
         for i, sym in enumerate(syms):
             label = sym.replace('"', '\\"')

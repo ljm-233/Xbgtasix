@@ -13,7 +13,7 @@
 #include <cstring>
 #include <vector>
 
-#include "xbshim/trace.h"
+#include "xbgtasix/trace.h"
 
 extern "C" {
 HRESULT WINAPI XGameRuntimeInitialize(void);
@@ -35,7 +35,7 @@ int g_fail = 0;
 
 void check(HRESULT hr, const char* what) {
     if (FAILED(hr)) {
-        xbshim::logf("[t2] FAIL %s hr=0x%08lx", what, static_cast<unsigned long>(hr));
+        xbgtasix::logf("[t2] FAIL %s hr=0x%08lx", what, static_cast<unsigned long>(hr));
         ++g_fail;
     }
 }
@@ -44,7 +44,7 @@ std::vector<unsigned char> load(const char* path) {
     std::vector<unsigned char> out;
     FILE* f = nullptr;
     if (fopen_s(&f, path, "rb") != 0 || !f) {
-        xbshim::logf("[t2] cannot open %s", path);
+        xbgtasix::logf("[t2] cannot open %s", path);
         return out;
     }
     fseek(f, 0, SEEK_END);
@@ -150,7 +150,7 @@ struct Renderer {
         ID3DBlob* err = nullptr;
         check(D3D12SerializeVersionedRootSignature(&rs, &sig, &err), "SerializeVersionedRootSignature");
         if (err) {
-            xbshim::logf("[t2] rs error: %s", static_cast<const char*>(err->GetBufferPointer()));
+            xbgtasix::logf("[t2] rs error: %s", static_cast<const char*>(err->GetBufferPointer()));
             err->Release();
         }
         if (!sig) return false;
@@ -164,7 +164,7 @@ struct Renderer {
         auto vs = load("quad.vs.cso");
         auto ps = load("quad.ps.cso");
         if (vs.empty() || ps.empty()) {
-            xbshim::logf("[t2] 缺 .cso");
+            xbgtasix::logf("[t2] 缺 .cso");
             return false;
         }
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
@@ -476,7 +476,7 @@ struct Renderer {
         unsigned char* px = nullptr;
         D3D12_RANGE rr{0, kReadbackBytes};
         if (FAILED(readback->Map(0, &rr, reinterpret_cast<void**>(&px))) || !px) {
-            xbshim::logf("[t2] readback Map failed");
+            xbgtasix::logf("[t2] readback Map failed");
             return false;
         }
         const UINT row = kSize / 2, col = kSize / 2;
@@ -492,7 +492,7 @@ struct Renderer {
 }  // namespace
 
 int main() {
-    xbshim::logf("[t2] start, L4 texture + CBV + depth, %ux%u", kSize, kSize);
+    xbgtasix::logf("[t2] start, L4 texture + CBV + depth, %ux%u", kSize, kSize);
     check(XGameRuntimeInitialize(), "XGameRuntimeInitialize");
 
     Renderer r;
@@ -500,22 +500,22 @@ int main() {
     if (r.init()) {
         unsigned char a[4] = {0, 0, 0, 0}, b[4] = {0, 0, 0, 0};
         if (r.draw_and_read(1.0f, 1.0f, 1.0f, a) && r.draw_and_read(0.5f, 0.5f, 0.5f, b)) {
-            xbshim::logf("[t2] tint=1.0 -> (%u,%u,%u,%u)", a[0], a[1], a[2], a[3]);
-            xbshim::logf("[t2] tint=0.5 -> (%u,%u,%u,%u)", b[0], b[1], b[2], b[3]);
+            xbgtasix::logf("[t2] tint=1.0 -> (%u,%u,%u,%u)", a[0], a[1], a[2], a[3]);
+            xbgtasix::logf("[t2] tint=0.5 -> (%u,%u,%u,%u)", b[0], b[1], b[2], b[3]);
 
             const bool drawn = a[3] == 255 && a[0] + a[1] + a[2] > 30;
             const bool halved = std::abs(int(a[0]) - 2 * int(b[0])) <= 4 &&
                                 std::abs(int(a[1]) - 2 * int(b[1])) <= 4 &&
                                 std::abs(int(a[2]) - 2 * int(b[2])) <= 4;
             if (drawn && halved) {
-                xbshim::logf("[t2] PASS: 纹理采样 + CBV 调制 + 深度都生效");
+                xbgtasix::logf("[t2] PASS: 纹理采样 + CBV 调制 + 深度都生效");
                 rc = 0;
             } else {
-                xbshim::logf("[t2] FAIL drawn=%d halved=%d", drawn ? 1 : 0, halved ? 1 : 0);
+                xbgtasix::logf("[t2] FAIL drawn=%d halved=%d", drawn ? 1 : 0, halved ? 1 : 0);
             }
         }
     }
     r.release();
-    xbshim::logf("[t2] done rc=%d failures=%d", rc, g_fail);
+    xbgtasix::logf("[t2] done rc=%d failures=%d", rc, g_fail);
     return rc;
 }

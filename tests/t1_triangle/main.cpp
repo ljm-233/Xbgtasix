@@ -11,7 +11,7 @@
 #include <cstring>
 #include <vector>
 
-#include "xbshim/trace.h"
+#include "xbgtasix/trace.h"
 
 extern "C" {
 HRESULT WINAPI XGameRuntimeInitialize(void);
@@ -32,7 +32,7 @@ int g_fail = 0;
 
 void check(HRESULT hr, const char* what) {
     if (FAILED(hr)) {
-        xbshim::logf("[t1] FAIL %s hr=0x%08lx", what, static_cast<unsigned long>(hr));
+        xbgtasix::logf("[t1] FAIL %s hr=0x%08lx", what, static_cast<unsigned long>(hr));
         ++g_fail;
     }
 }
@@ -41,7 +41,7 @@ std::vector<unsigned char> load(const char* path) {
     std::vector<unsigned char> out;
     FILE* f = nullptr;
     if (fopen_s(&f, path, "rb") != 0 || !f) {
-        xbshim::logf("[t1] cannot open %s", path);
+        xbgtasix::logf("[t1] cannot open %s", path);
         return out;
     }
     fseek(f, 0, SEEK_END);
@@ -59,7 +59,7 @@ std::vector<unsigned char> load(const char* path) {
 
 int main(int argc, char** argv) {
     const bool keep = (argc > 1 && std::strcmp(argv[1], "--keep") == 0);
-    xbshim::logf("[t1] start, offscreen %ux%u", kSize, kSize);
+    xbgtasix::logf("[t1] start, offscreen %ux%u", kSize, kSize);
 
     check(XGameRuntimeInitialize(), "XGameRuntimeInitialize");
 
@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
     ID3DBlob* err = nullptr;
     check(D3D12SerializeVersionedRootSignature(&rs, &sig, &err), "D3D12SerializeVersionedRootSignature");
     if (err) {
-        xbshim::logf("[t1] rs error: %s", static_cast<const char*>(err->GetBufferPointer()));
+        xbgtasix::logf("[t1] rs error: %s", static_cast<const char*>(err->GetBufferPointer()));
         err->Release();
         err = nullptr;
     }
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     auto vs = load("triangle.vs.cso");
     auto ps = load("triangle.ps.cso");
     if (vs.empty() || ps.empty()) {
-        xbshim::logf("[t1] 缺少 .cso（dxc 没跑？看 build.sh）");
+        xbgtasix::logf("[t1] 缺少 .cso（dxc 没跑？看 build.sh）");
         return 1;
     }
 
@@ -271,16 +271,16 @@ int main(int argc, char** argv) {
         const UINT row = kSize / 2, col = kSize / 2;
         const unsigned char* p = px + row * kRowPitch + col * 4;
         const unsigned char clear_r = static_cast<unsigned char>(kClear[0] * 255.0f + 0.5f);
-        xbshim::logf("[t1] center pixel RGBA = (%u,%u,%u,%u), clear R = %u",
+        xbgtasix::logf("[t1] center pixel RGBA = (%u,%u,%u,%u), clear R = %u",
                      p[0], p[1], p[2], p[3], clear_r);
         const bool drew = (std::abs(static_cast<int>(p[0]) - clear_r) > 4) ||
                           (std::abs(static_cast<int>(p[1]) - clear_r) > 4) ||
                           (std::abs(static_cast<int>(p[2]) - clear_r) > 4);
         if (drew && p[3] == 255) {
-            xbshim::logf("[t1] PASS: 三角形画上去了");
+            xbgtasix::logf("[t1] PASS: 三角形画上去了");
             rc = 0;
         } else {
-            xbshim::logf("[t1] FAIL: 中心像素仍是清屏色（draw 没生效）");
+            xbgtasix::logf("[t1] FAIL: 中心像素仍是清屏色（draw 没生效）");
         }
         D3D12_RANGE written{0, 0};
         readback->Unmap(0, &written);
@@ -298,6 +298,6 @@ int main(int argc, char** argv) {
         if (root) root->Release();
         dev->Release();
     }
-    xbshim::logf("[t1] done rc=%d failures=%d", rc, g_fail);
+    xbgtasix::logf("[t1] done rc=%d failures=%d", rc, g_fail);
     return rc;
 }

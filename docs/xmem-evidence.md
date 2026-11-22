@@ -30,7 +30,7 @@
 这两条只能靠两种方式消掉：
 
 1. 拿到 NDA 版 GDK，把 `xmem.h` 原文抄进 `src/xmem/xmem.cpp`（改动很小，只有 `alignment_from` 和四个函数签名）
-2. 等真程序跑起来，从调用现场反推（tracer 已经会把每次调用记进 `xbshim.log`）
+2. 等真程序跑起来，从调用现场反推（tracer 已经会把每次调用记进 `xbgtasix.log`）
 
 ## 一条实测发现（值得记下来）
 

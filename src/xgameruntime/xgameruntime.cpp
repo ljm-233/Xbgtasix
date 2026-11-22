@@ -12,25 +12,25 @@
 #include "XTaskQueue.h"
 #include "XUser.h"
 
-#include "xbshim/trace.h"
+#include "xbgtasix/trace.h"
 
 extern "C" {
 
 // ---- 生命周期 ----
 
 STDAPI XGameRuntimeInitialize() {
-    xbshim::logf("[xgamert] XGameRuntimeInitialize()");
+    xbgtasix::logf("[xgamert] XGameRuntimeInitialize()");
     return S_OK;
 }
 
 STDAPI XGameRuntimeInitializeWithOptions(const XGameRuntimeOptions* options) {
-    xbshim::logf("[xgamert] XGameRuntimeInitializeWithOptions(source=%d)",
+    xbgtasix::logf("[xgamert] XGameRuntimeInitializeWithOptions(source=%d)",
                  options ? static_cast<int>(options->gameConfigSource) : -1);
     return XGameRuntimeInitialize();
 }
 
 STDAPI_(void) XGameRuntimeUninitialize() {
-    xbshim::logf("[xgamert] XGameRuntimeUninitialize()");
+    xbgtasix::logf("[xgamert] XGameRuntimeUninitialize()");
 }
 
 // ---- 任务队列（GDK 全线异步 API 的基础）----
@@ -38,7 +38,7 @@ STDAPI_(void) XGameRuntimeUninitialize() {
 STDAPI XTaskQueueCreate(XTaskQueueDispatchMode workDispatchMode,
                         XTaskQueueDispatchMode completionDispatchMode,
                         XTaskQueueHandle* queue) noexcept {
-    xbshim::logf("[xgamert] XTaskQueueCreate(work=%u, completion=%u)",
+    xbgtasix::logf("[xgamert] XTaskQueueCreate(work=%u, completion=%u)",
                  static_cast<unsigned>(workDispatchMode),
                  static_cast<unsigned>(completionDispatchMode));
     if (queue) *queue = nullptr;
@@ -81,7 +81,7 @@ STDAPI XStoreQueryProductForCurrentGameAsync(const XStoreContextHandle storeCont
 
 STDAPI_(XSystemDeviceType) XSystemGetDeviceType() noexcept {
     // 让分支走 PC 路径，比抛异常有用：主机专用分支本就不该在 PC 上执行
-    xbshim::logf("[xgamert] XSystemGetDeviceType() -> Pc");
+    xbgtasix::logf("[xgamert] XSystemGetDeviceType() -> Pc");
     return XSystemDeviceType::Pc;
 }
 
