@@ -173,6 +173,12 @@ echo "== t14_vram.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t14_vram.exe"
 
+echo "== t15_budget.exe"
+"$CXX" "${FLAGS[@]}" tests/t15_budget/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t15_budget.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
