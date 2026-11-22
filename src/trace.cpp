@@ -6,27 +6,54 @@
 
 #include <mutex>
 #include <set>
+#include <cstring>
 #include <string>
 
 namespace xbgtasix {
 namespace {
 
 std::mutex g_mu;
-FILE* g_file = nullptr;
 std::set<std::string> g_seen;
 char g_root[MAX_PATH] = {0};
 
+// 用 Win32 句柄 + FILE_APPEND_DATA 打开：每次 WriteFile 一整行，
+// 在这一个句柄上原子追加（fprintf 走 stdio 缓冲，多模块并发时会切碎行）。
+// exe 目录不可写时（Program Files / Game Pass 安装目录）回落到 %LOCALAPPDATA%。
+HANDLE g_handle = INVALID_HANDLE_VALUE;
+bool g_open_failed = false;
+
+bool try_open(const char* path) {
+    g_handle = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    return g_handle != INVALID_HANDLE_VALUE;
+}
+
 void ensure_open() {
-    if (g_file) return;
+    if (g_handle != INVALID_HANDLE_VALUE || g_open_failed) return;
     char path[MAX_PATH] = {0};
     DWORD n = GetEnvironmentVariableA("XBGTASIX_LOG", path, MAX_PATH);
-    if (n == 0) {
-        char exe[MAX_PATH] = {0};
-        GetModuleFileNameA(nullptr, exe, MAX_PATH);
-        if (char* slash = strrchr(exe, '\\')) *(slash + 1) = 0;
-        _snprintf(path, MAX_PATH, "%sxbgtasix.log", exe);
+    if (n > 0) {
+        if (try_open(path)) return;
+        g_open_failed = true;
+        return;
     }
-    g_file = fopen(path, "a");
+    char exe[MAX_PATH] = {0};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    if (char* slash = strrchr(exe, '\\')) *(slash + 1) = 0;
+    _snprintf(path, MAX_PATH, "%sxbgtasix.log", exe);
+    if (try_open(path)) return;
+
+    char base[MAX_PATH] = {0};
+    const DWORD bn = GetEnvironmentVariableA("XBGTASIX_PLS_ROOT", base, MAX_PATH);
+    if (bn > 0) {
+        _snprintf(path, MAX_PATH, "%s\\xbgtasix.log", base);
+    } else if (GetEnvironmentVariableA("LOCALAPPDATA", base, MAX_PATH) > 0) {
+        _snprintf(path, MAX_PATH, "%s\\Xbgtasix\\xbgtasix.log", base);
+        // 目录可能不存在：逐级建一次，失败就放弃落盘（stderr 仍有输出）
+        std::string d = std::string(base) + "\\Xbgtasix";
+        CreateDirectoryA(d.c_str(), nullptr);
+    }
+    if (!try_open(path)) g_open_failed = true;
 }
 
 }  // namespace
@@ -39,20 +66,26 @@ UnimplMode unimpl_mode() {
 }
 
 void logf(const char* fmt, ...) {
-    std::lock_guard<std::mutex> lock(g_mu);
-    ensure_open();
+    // 先在锁外把整行格式化好，再在锁内一次 WriteFile：
+    // 原来持锁 fprintf+fflush，stderr 若接的是无人读的管道会整段卡死
+    char line[2048];
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vsnprintf(line, sizeof(line), fmt, ap);
     va_end(ap);
+    const size_t len = strlen(line);
+
+    fwrite(line, 1, len, stderr);
     fputc('\n', stderr);
-    fflush(stderr);
-    if (g_file) {
-        va_start(ap, fmt);
-        vfprintf(g_file, fmt, ap);
-        va_end(ap);
-        fputc('\n', g_file);
-        fflush(g_file);
+    fflush(stderr);   // stderr 本来就不该在锁内 flush
+
+    std::lock_guard<std::mutex> lock(g_mu);
+    ensure_open();
+    if (g_handle != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        char buf[2064];
+        const int n = _snprintf(buf, sizeof(buf), "%s\n", line);
+        WriteFile(g_handle, buf, static_cast<DWORD>(n > 0 ? n : 0), &written, nullptr);
     }
 }
 
