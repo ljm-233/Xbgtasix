@@ -117,7 +117,7 @@ Mat4 perspective(float fov_y, float aspect, float zn, float zf) {
 // ---------------- OBJ 载入 ----------------
 
 struct Mesh {
-    std::vector<float> verts;   // pos(3) + uv(2)
+    std::vector<float> verts;   // pos(3) + uv(2) + nrm(3)
     std::vector<unsigned> idx;
     float center[3] = {0, 0, 0};
     float radius = 1.0f;
@@ -173,7 +173,7 @@ bool load_obj(const char* path, Mesh& out) {
                     auto it = map.find(key);
                     unsigned index;
                     if (it == map.end()) {
-                        index = static_cast<unsigned>(out.verts.size() / 5);
+                        index = static_cast<unsigned>(out.verts.size() / 8);
                         float px = v[s] * 3 + 0 < pos.size() ? pos[v[s] * 3 + 0] : 0.0f;
                         float py = v[s] * 3 + 1 < pos.size() ? pos[v[s] * 3 + 1] : 0.0f;
                         float pz = v[s] * 3 + 2 < pos.size() ? pos[v[s] * 3 + 2] : 0.0f;
@@ -181,6 +181,7 @@ bool load_obj(const char* path, Mesh& out) {
                         float w = t[s] * 2 + 1 < uv.size() ? uv[t[s] * 2 + 1] : 0.0f;
                         out.verts.push_back(px); out.verts.push_back(py); out.verts.push_back(pz);
                         out.verts.push_back(u);  out.verts.push_back(w);
+                        out.verts.push_back(0.0f); out.verts.push_back(0.0f); out.verts.push_back(0.0f);
                         map[key] = index;
                     } else {
                         index = it->second;
@@ -192,6 +193,33 @@ bool load_obj(const char* path, Mesh& out) {
     }
     fclose(f);
 
+    // 逐面法线累加到顶点，再归一化
+    for (size_t i = 0; i + 2 < out.idx.size(); i += 3) {
+        const size_t a = out.idx[i] * 8, b = out.idx[i + 1] * 8, c = out.idx[i + 2] * 8;
+        const float ux = out.verts[b] - out.verts[a], uy = out.verts[b + 1] - out.verts[a + 1],
+                    uz = out.verts[b + 2] - out.verts[a + 2];
+        const float vx = out.verts[c] - out.verts[a], vy = out.verts[c + 1] - out.verts[a + 1],
+                    vz = out.verts[c + 2] - out.verts[a + 2];
+        const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        for (size_t k : {a, b, c}) {
+            out.verts[k + 5] += nx;
+            out.verts[k + 6] += ny;
+            out.verts[k + 7] += nz;
+        }
+    }
+    for (size_t i = 0; i < out.verts.size(); i += 8) {
+        const float len = std::sqrt(out.verts[i + 5] * out.verts[i + 5] +
+                                    out.verts[i + 6] * out.verts[i + 6] +
+                                    out.verts[i + 7] * out.verts[i + 7]);
+        if (len > 1e-6f) {
+            out.verts[i + 5] /= len;
+            out.verts[i + 6] /= len;
+            out.verts[i + 7] /= len;
+        } else {
+            out.verts[i + 5] = 0; out.verts[i + 6] = 1; out.verts[i + 7] = 0;
+        }
+    }
+
     if (out.verts.empty() || out.idx.empty()) {
         xbgtasix::logf("[t8] OBJ 里没有几何数据");
         return false;
@@ -199,7 +227,7 @@ bool load_obj(const char* path, Mesh& out) {
 
     // 归一化：算 bbox 中心与半径，让模型落在单位球内
     float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
-    for (size_t i = 0; i < out.verts.size(); i += 5) {
+    for (size_t i = 0; i < out.verts.size(); i += 8) {
         for (int k = 0; k < 3; ++k) {
             mn[k] = out.verts[i + k] < mn[k] ? out.verts[i + k] : mn[k];
             mx[k] = out.verts[i + k] > mx[k] ? out.verts[i + k] : mx[k];
@@ -207,7 +235,7 @@ bool load_obj(const char* path, Mesh& out) {
     }
     for (int k = 0; k < 3; ++k) out.center[k] = (mn[k] + mx[k]) * 0.5f;
     float r = 0.0f;
-    for (size_t i = 0; i < out.verts.size(); i += 5) {
+    for (size_t i = 0; i < out.verts.size(); i += 8) {
         float d = 0.0f;
         for (int k = 0; k < 3; ++k) {
             const float t = out.verts[i + k] - out.center[k];
@@ -216,7 +244,7 @@ bool load_obj(const char* path, Mesh& out) {
         r = std::sqrt(d) > r ? std::sqrt(d) : r;
     }
     out.radius = r > 1e-6f ? r : 1.0f;
-    xbgtasix::logf("[t8] OBJ: %u 顶点, %u 三角形, 半径 %.3f", static_cast<unsigned>(out.verts.size() / 5),
+    xbgtasix::logf("[t8] OBJ: %u 顶点, %u 三角形, 半径 %.3f", static_cast<unsigned>(out.verts.size() / 8),
                    out.triangles(), out.radius);
     return true;
 }
@@ -461,15 +489,16 @@ int main(int argc, char** argv) {
     xbgtasix::logf("[t8] VS=%zu B (%.4s)  PS=%zu B (%.4s)", vs.size(),
                    reinterpret_cast<const char*>(vs.data()), ps.size(),
                    reinterpret_cast<const char*>(ps.data()));
-    D3D12_INPUT_ELEMENT_DESC layout[2]{};
+    D3D12_INPUT_ELEMENT_DESC layout[3]{};
     layout[0] = {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0};
     layout[1] = {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0};
+    layout[2] = {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0};
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature = root;
     pd.VS = {vs.data(), vs.size()};
     pd.PS = {ps.data(), ps.size()};
-    pd.InputLayout = {layout, 2};
+    pd.InputLayout = {layout, mode == 4 ? 0 : 3};
     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     pd.RasterizerState.FrontCounterClockwise = FALSE;
@@ -749,9 +778,9 @@ int main(int argc, char** argv) {
                        mesh.idx[0], mesh.idx[1], mesh.idx[2], mesh.idx[3], mesh.idx[4], mesh.idx[5]);
         UINT degenerate = 0;
         for (size_t t = 0; t + 2 < mesh.idx.size(); t += 3) {
-            const float* a = &mesh.verts[mesh.idx[t] * 5];
-            const float* b = &mesh.verts[mesh.idx[t + 1] * 5];
-            const float* c = &mesh.verts[mesh.idx[t + 2] * 5];
+            const float* a = &mesh.verts[mesh.idx[t] * 8];
+            const float* b = &mesh.verts[mesh.idx[t + 1] * 8];
+            const float* c = &mesh.verts[mesh.idx[t + 2] * 8];
             const float ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
             const float vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
             const float cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
@@ -763,7 +792,7 @@ int main(int argc, char** argv) {
     // 诊断：全部顶点的 NDC 包围盒 + 前 3 个顶点
     {
         float mn[3] = {1e9f, 1e9f, 1e9f}, mx[3] = {-1e9f, -1e9f, -1e9f};
-        for (size_t i = 0; i < mesh.verts.size(); i += 5) {
+        for (size_t i = 0; i < mesh.verts.size(); i += 8) {
             float p[4] = {mesh.verts[i], mesh.verts[i + 1], mesh.verts[i + 2], 1.0f}, o[4] = {0, 0, 0, 0};
             for (int r = 0; r < 4; ++r)
                 for (int c = 0; c < 4; ++c) o[c] += p[r] * mvp_m.m[r][c];
@@ -780,7 +809,7 @@ int main(int argc, char** argv) {
 
     // 诊断：把前 3 个顶点投到 NDC 看看落在哪
     for (int vi = 0; vi < 3; ++vi) {
-        const float* v = &mesh.verts[vi * 5];
+        const float* v = &mesh.verts[vi * 8];
         float p[4] = {v[0], v[1], v[2], 1.0f}, o[4] = {0, 0, 0, 0};
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c) o[c] += p[r] * mvp_m.m[r][c];
@@ -804,7 +833,7 @@ int main(int argc, char** argv) {
     list->SetDescriptorHeaps(1, &heap);
     list->SetGraphicsRootConstantBufferView(0, cb->GetGPUVirtualAddress());
     list->SetGraphicsRootDescriptorTable(1, heap->GetGPUDescriptorHandleForHeapStart());
-    D3D12_VERTEX_BUFFER_VIEW vbv{vb->GetGPUVirtualAddress(), vb_bytes, 20};
+    D3D12_VERTEX_BUFFER_VIEW vbv{vb->GetGPUVirtualAddress(), vb_bytes, 32};
     D3D12_INDEX_BUFFER_VIEW ibv{ib->GetGPUVirtualAddress(), ib_bytes, DXGI_FORMAT_R32_UINT};
     list->IASetVertexBuffers(0, 1, &vbv);
     list->IASetIndexBuffer(&ibv);

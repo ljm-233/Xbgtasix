@@ -17,12 +17,14 @@ struct VSIn
 {
     float3 pos : POSITION;
     float2 uv  : TEXCOORD0;
+    float3 nrm : NORMAL;
 };
 
 struct VSOut
 {
     float4 pos : SV_Position;
     float2 uv  : TEXCOORD0;
+    float3 nrm : TEXCOORD1;
 };
 
 VSOut VSMain(VSIn input)
@@ -39,7 +41,8 @@ VSOut VSMain(VSIn input)
 #else
     o.pos = mul(float4(input.pos, 1.0), g_mvp);
 #endif
-    o.uv = input.uv;
+    o.uv  = input.uv;
+    o.nrm = input.nrm;
     return o;
 }
 
@@ -49,6 +52,10 @@ float4 PSMain(VSOut input) : SV_Target
     return float4(input.uv, 0.0, 1.0);
 #else
     float4 c = g_tex.Sample(g_smp, input.uv);
-    return float4(c.rgb * 0.95, 1.0);
+    // 半兰伯特：固定光方向，避免无光照时看不出体积
+    const float3 L = normalize(float3(0.35, 0.75, 0.55));
+    const float ndl = saturate(dot(normalize(input.nrm), L));
+    const float shade = 0.45 + 0.55 * ndl;
+    return float4(c.rgb * shade, 1.0);
 #endif
 }
