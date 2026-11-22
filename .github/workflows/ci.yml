@@ -31,56 +31,62 @@ jobs:
       - run: python tools/check_docs.py
 
   windows-build:
-    name: Windows 构建 + 全套测试（需要 GDK，缺则跳过）
+    name: Windows 构建 + 测试
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
-      - name: 检查 GDK 头文件是否就位
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 MinGW 与 Vulkan SDK（dxc）
+        shell: bash
+        run: |
+          choco install mingw --no-progress -y
+          choco install vulkan-sdk --no-progress -y
+          echo "/c/ProgramData/mingw64/mingw64/bin" >> "$GITHUB_PATH"
+
+      - name: 检测 GDK 是否可用
         id: gdk
         shell: bash
         run: |
-          if [ -d ../gdk/include_clean ] && [ -f ../gdk/lib/xgameruntime.lib ]; then
+          if [ -f "../gdk/include_clean/XTaskQueue.h" ]; then
             echo "have=1" >> "$GITHUB_OUTPUT"
           else
             echo "have=0" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 没有 GDK —— 明确标记"未覆盖"，不假装通过
-        if: steps.gdk.outputs.have == '0'
+      # 一个脚本干完：先跑无 GDK 依赖的 xmem 子集，有 GDK 再跑全套。
+      # 两种情况都会**真的编译真代码、真的跑断言**，不会空转。
+      - name: 构建 + 测试（tools/ci_build.sh）
+        shell: bash
+        run: ./tools/ci_build.sh
+
+      - name: 覆盖率说明
         shell: bash
         run: |
-          echo "::warning::未找到 ../gdk/include_clean 与 ../gdk/lib/xgameruntime.lib，构建步骤未执行"
           {
-            echo "### windows-build: 未覆盖（缺 GDK）"
+            echo "### windows-build 覆盖范围"
             echo ""
-            echo "微软 GDK 头/库不入库，runner 上不存在 \`../gdk/\`。"
-            echo "本 job 因此**没有编译过任何 C++**，不能当作构建通过。"
-            echo "要真正验证：把 GDK 解到仓库旁的 \`../gdk/\`（见 docs/publish.md）。"
+            if [ "${{ steps.gdk.outputs.have }}" = "1" ]; then
+              echo "- ✅ GDK 可用：三个 shim + 全套 32 项测试"
+            else
+              echo "- ⚠️ 未找到 GDK：跑了 xmem.dll + t3_xmem（93 条断言）+ 工具自检 + 文档链接"
+              echo "- 微软 GDK 头/库不入库，所以公开 CI 上默认**没有**编译 xgameruntime/"
+              echo "  d3d12_xs，也**没有**跑渲染类测试。这不是完整通过。"
+              echo "- 要覆盖完整层：把 GDK 解到仓库旁 \`../gdk/\`，或设 \`GDK_INC\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 安装 MinGW 与 Vulkan SDK（dxc）
-        if: steps.gdk.outputs.have == '1'
-        shell: bash
-        run: |
-          choco install mingw --no-progress -y
-          choco install vulkan-sdk --no-progress -y
-
-      - name: 构建
-        if: steps.gdk.outputs.have == '1'
-        shell: bash
-        run: bash ./build.sh
-
-      - name: 全套测试
-        if: steps.gdk.outputs.have == '1'
-        shell: bash
-        run: bash ./tools/run_suite.sh
-
       - name: 上传测试报告
-        if: steps.gdk.outputs.have == '1'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: suite-report
-          path: build/suite/
+          name: ci-logs
+          path: |
+            build/suite/
+            build/ci_*.log
+            build/xbgtasix.log
           if-no-files-found: ignore
