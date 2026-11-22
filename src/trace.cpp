@@ -34,8 +34,9 @@ void ensure_open() {
     DWORD n = GetEnvironmentVariableA("XBGTASIX_LOG", path, MAX_PATH);
     if (n > 0) {
         if (try_open(path)) return;
-        g_open_failed = true;
-        return;
+        // 显式路径打不开时不能直接放弃：调用方（启动器）可能给了个相对/不可写路径。
+        // 继续走下面的回落链，至少还能落一份日志。
+        fprintf(stderr, "[xbgtasix] 警告：XBGTASIX_LOG=%s 打不开，改用回落路径\n", path);
     }
     char exe[MAX_PATH] = {0};
     GetModuleFileNameA(nullptr, exe, MAX_PATH);

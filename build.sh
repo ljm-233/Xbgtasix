@@ -278,6 +278,12 @@ echo "== t29_perf.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t29_perf.exe"
 
+echo "== t30_fakegame.exe"
+"$CXX" "${FLAGS[@]}" tests/t30_fakegame/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t30_fakegame.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
