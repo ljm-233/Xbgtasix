@@ -24,7 +24,7 @@
 | **bindless：98 槽动态索引 + 64K 大堆（L5）** | ✅ | `t4_bindless`，索引 97 命中绿色 |
 | **mesh shader 管线（L6）** | ✅ | `t5_mesh`，`MeshShaderTier=10`，DispatchMesh 出图 |
 | **光追 DXR（L7）** | ✅ | `t6_rt`，`RaytracingTier=11`（1.1），BLAS+TLAS+SBT，命中绿/未命中蓝 |
-| **模型查看器（L8）** | ✅ | `t8_model`：OBJ+PNG → 我们的管线，占屏 26.9%，输出 PNG |
+| **模型查看器（L8）** | ✅ | `t8_model`：OBJ+PNG → 我们的管线，逐顶点法线 + 半兰伯特，输出 PNG |
 | `d3d12_xs` 导出面 | ✅ | 4 手写 + 14 原生转发 = 18 |
 | `xgameruntime` 导出面 | ✅ | 10 手写 + 482 生成桩 = 492 |
 | 游戏 exe | ❌ 缺失 | 泄露包内没有 `game_scarlett_master.exe` |
@@ -124,6 +124,7 @@ Xbgtasix/
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK
+  tools/render_gallery.sh      批量渲染导出的 OBJ -> PNG
   tools/packaging/             针对游戏数据包的探针与统计（rpf9_probe / shader_stats / pe_surface）
   docs/                        证据表与结论
 ```
