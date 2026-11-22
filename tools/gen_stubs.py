@@ -97,6 +97,46 @@ def ident(name, index):
     return "xbgtasix_stub_%04d" % index
 
 
+def build_rettype_index(header_dir):
+    """扫 GDK 头文件，得到 {函数名: 返回类型种类}。
+
+    桩必须按真实返回类型给默认值：
+      HRESULT -> E_NOTIMPL（return 0 = S_OK 反而更糟：调用方会去消费没填的出参）
+      bool    -> false
+      void    -> 不返回
+      其他    -> 0
+    这是子代理 stub-auditor 的结论：269/322 是 HRESULT。
+    """
+    import glob
+    import os
+    import re
+    idx = {}
+    pat = re.compile(r"STDAPI_?\(?\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+    pat2 = re.compile(r"\b(HRESULT|bool|void|int32_t|uint32_t|size_t|uint64_t)\s+STDAPICALLTYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+    if not header_dir or not os.path.isdir(header_dir):
+        return idx
+    for path in glob.glob(os.path.join(header_dir, "*.h")):
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for m in pat.finditer(text):
+            ret, name = m.group(1), m.group(2)
+            kind = "hresult"
+            if ret == "bool":
+                kind = "bool"
+            elif ret == "void":
+                kind = "void"
+            elif ret:
+                kind = "other"
+            idx.setdefault(name, kind)
+        for m in pat2.finditer(text):
+            ret, name = m.group(1), m.group(2)
+            idx.setdefault(name, "other" if ret not in ("HRESULT", "bool", "void")
+                           else ("hresult" if ret == "HRESULT" else ret))
+    return idx
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("lib", nargs="?")
@@ -115,6 +155,9 @@ def main():
         raise SystemExit("需要 <file.lib> 或 --symbols")
 
     syms = clean(raw)
+    rettype_index = build_rettype_index(os.environ.get("GDK_INC") or
+                                        os.path.join(os.path.dirname(os.path.dirname(
+                                            os.path.abspath(__file__))), "..", "gdk", "include_clean"))
     if not syms:
         raise SystemExit("符号为空")
     excluded = {s.strip() for s in args.exclude.split(",") if s.strip()}
@@ -142,12 +185,20 @@ def main():
         f.write('extern "C" {\n')
         for i, sym in enumerate(syms):
             label = sym.replace('"', '\\"')
-            # 返回类型必须给一个"安全默认值"，不能是 void：
-            # 调用方会读 EAX/RAX，void 桩给的是栈垃圾 -> 不崩溃但行为随机。
-            # 返回 0 的含义按真实类型看是：HRESULT=S_OK / bool=false / 指针=NULL，
-            # 这三种都不会让调用方拿着野指针去解引用。
-            f.write('uintptr_t %s(void) { XB_UNIMPL("%s"); return 0; }\n'
-                    % (ident(sym, i), label))
+            kind = rettype_index.get(sym, "hresult")
+            if kind == "void":
+                f.write('void %s(void) { XB_UNIMPL("%s"); }\n' % (ident(sym, i), label))
+            elif kind == "bool":
+                f.write('bool %s(void) { XB_UNIMPL("%s"); return false; }\n'
+                        % (ident(sym, i), label))
+            elif kind == "other":
+                f.write('uintptr_t %s(void) { XB_UNIMPL("%s"); return 0; }\n'
+                        % (ident(sym, i), label))
+            else:
+                # HRESULT：必须给失败码。返回 0 等于 S_OK，会让调用方
+                # 去读我们根本没填的 _Out_ 参数（子代理审计结论）
+                f.write('long %s(void) { XB_UNIMPL("%s"); return (long)0x80004001; }\n'
+                        % (ident(sym, i), label))
         f.write('}  // extern "C"\n')
 
     print("%s: %d 个导出 -> %s.def / %s_stubs.cpp" % (args.dll, len(syms), base, base))

@@ -31,6 +31,7 @@
 #include "XGameSaveFiles.h"
 #include "XGameActivation.h"
 #include "XGameRuntimeFeature.h"
+#include "XGameUI.h"
 #include "XPackage.h"
 #include "XPersistentLocalStorage.h"
 #include "XTaskQueue.h"
@@ -1018,6 +1019,187 @@ STDAPI_(bool) XGameActivationUnregisterForEvent(XTaskQueueRegistrationToken toke
         }
     }
     return true;   // 注销未注册的 token 也返回 true（GDK 语义：不报错）
+}
+
+// ---- UI（把主机弹窗降级成"立即完成"，绝不挂起） ----
+//
+// 铁律：*Async 必须让 XAsyncBlock 完成。返回 E_NOTIMPL 却不完成，
+// 调用方的 XAsyncGetStatus(wait=true) 会重试 5000 次（我们 5 秒后返回 E_PENDING），
+// 引擎若轮询或断言 S_OK 就等于永久卡死。
+
+struct UiPending {
+    XGameUiMessageDialogButton button = XGameUiMessageDialogButton::First;
+    std::string text;
+    std::string completion_uri;
+};
+
+std::mutex g_ui_mu;
+std::unordered_map<XAsyncBlock*, UiPending> g_ui_pending;
+XGameUiNotificationPositionHint g_ui_notif_pos = XGameUiNotificationPositionHint::TopRight;
+
+STDAPI XGameUiSetUiCallbacks(const XGameUiUiCallbacks* callbacks,
+                            bool useSystemUiIfAvailable) noexcept {
+    (void)callbacks;
+    (void)useSystemUiIfAvailable;
+    // 不接管 UI：保持"立即完成"策略，避免注册回调后等一个永不到来的响应
+    xbgtasix::logf("[xgamert] SetUiCallbacks：忽略（本实现不走系统 UI）");
+    return S_OK;
+}
+
+STDAPI XGameUiSetNotificationPositionHint(XGameUiNotificationPositionHint position) noexcept {
+    g_ui_notif_pos = position;
+    return S_OK;
+}
+
+STDAPI XGameUiShowErrorDialogAsync(XAsyncBlock* async, HRESULT errorCode,
+                                   const char* context) noexcept {
+    if (!async) return E_INVALIDARG;
+    xbgtasix::logf("[xgamert] UI 错误框: hr=0x%08lx %s", static_cast<unsigned long>(errorCode),
+                   context ? context : "");
+    complete_async(async, S_OK);
+    return S_OK;
+}
+
+STDAPI XGameUiShowErrorDialogResult(XAsyncBlock* async) noexcept {
+    if (!async) return E_INVALIDARG;
+    return is_async_done(async) ? async_status(async) : E_PENDING;
+}
+
+STDAPI XGameUiShowMessageDialogAsync(XAsyncBlock* async, const char* titleText,
+                                     const char* contentText, const char* firstButtonText,
+                                     const char* secondButtonText, const char* thirdButtonText,
+                                     XGameUiMessageDialogButton defaultButton,
+                                     XGameUiMessageDialogButton cancelButton) noexcept {
+    (void)thirdButtonText;
+    (void)cancelButton;
+    if (!async) return E_INVALIDARG;
+    xbgtasix::logf("[xgamert] UI 消息框: %s / %s [%s][%s] -> 默认按钮 %u",
+                   titleText ? titleText : "", contentText ? contentText : "",
+                   firstButtonText ? firstButtonText : "", secondButtonText ? secondButtonText : "",
+                   static_cast<unsigned>(defaultButton));
+    {
+        std::lock_guard<std::mutex> lock(g_ui_mu);
+        g_ui_pending[async].button = defaultButton;
+    }
+    complete_async(async, S_OK);
+    return S_OK;
+}
+
+STDAPI XGameUiShowMessageDialogResult(XAsyncBlock* async,
+                                      XGameUiMessageDialogButton* resultButton) noexcept {
+    if (!async || !resultButton) return E_INVALIDARG;
+    if (!is_async_done(async)) return E_PENDING;
+    std::lock_guard<std::mutex> lock(g_ui_mu);
+    auto it = g_ui_pending.find(async);
+    if (it == g_ui_pending.end()) return E_UNEXPECTED;
+    *resultButton = it->second.button;
+    g_ui_pending.erase(it);
+    return S_OK;
+}
+
+STDAPI XGameUiShowTextEntryAsync(XAsyncBlock* async, const char* titleText,
+                                 const char* descriptionText, const char* defaultText,
+                                 XGameUiTextEntryInputScope inputScope,
+                                 uint32_t maxTextLength) noexcept {
+    (void)titleText;
+    (void)descriptionText;
+    (void)inputScope;
+    (void)maxTextLength;
+    if (!async) return E_INVALIDARG;
+    {
+        std::lock_guard<std::mutex> lock(g_ui_mu);
+        g_ui_pending[async].text = defaultText ? defaultText : "";
+    }
+    complete_async(async, S_OK);
+    return S_OK;
+}
+
+STDAPI XGameUiShowTextEntryResultSize(XAsyncBlock* async, uint32_t* resultSize) noexcept {
+    if (!async || !resultSize) return E_INVALIDARG;
+    if (!is_async_done(async)) return E_PENDING;
+    std::lock_guard<std::mutex> lock(g_ui_mu);
+    auto it = g_ui_pending.find(async);
+    if (it == g_ui_pending.end()) return E_UNEXPECTED;
+    *resultSize = static_cast<uint32_t>(it->second.text.size() + 1);
+    return S_OK;
+}
+
+STDAPI XGameUiShowTextEntryResult(XAsyncBlock* async, uint32_t resultSize, char* resultText,
+                                  uint32_t* resultUsed) noexcept {
+    if (!async || !resultText) return E_INVALIDARG;
+    if (!is_async_done(async)) return E_PENDING;
+    std::lock_guard<std::mutex> lock(g_ui_mu);
+    auto it = g_ui_pending.find(async);
+    if (it == g_ui_pending.end()) return E_UNEXPECTED;
+    const uint32_t need = static_cast<uint32_t>(it->second.text.size() + 1);
+    if (resultSize < need) return E_NOT_SUFFICIENT_BUFFER;
+    std::memcpy(resultText, it->second.text.c_str(), need);
+    if (resultUsed) *resultUsed = need;
+    g_ui_pending.erase(it);
+    return S_OK;
+}
+
+static HRESULT web_auth_impl(XAsyncBlock* async, const char* completionUri) {
+    if (!async) return E_INVALIDARG;
+    xbgtasix::logf("[xgamert] UI Web 认证：视为已通过（离线无浏览器交互）");
+    {
+        std::lock_guard<std::mutex> lock(g_ui_mu);
+        g_ui_pending[async].completion_uri = completionUri ? completionUri : "";
+    }
+    complete_async(async, S_OK);
+    return S_OK;
+}
+
+STDAPI XGameUiShowWebAuthenticationAsync(XAsyncBlock* async, XUserHandle requestingUser,
+                                         const char* requestUri,
+                                         const char* completionUri) noexcept {
+    (void)requestingUser;
+    xbgtasix::logf("[xgamert] WebAuth 请求: %s", requestUri ? requestUri : "");
+    return web_auth_impl(async, completionUri);
+}
+
+STDAPI XGameUiShowWebAuthenticationWithOptionsAsync(XAsyncBlock* async, XUserHandle requestingUser,
+                                                    const char* requestUri,
+                                                    const char* completionUri,
+                                                    XGameUiWebAuthenticationOptions options) noexcept {
+    (void)requestingUser;
+    (void)options;
+    xbgtasix::logf("[xgamert] WebAuth(带选项) 请求: %s", requestUri ? requestUri : "");
+    return web_auth_impl(async, completionUri);
+}
+
+STDAPI XGameUiShowWebAuthenticationResultSize(XAsyncBlock* async, size_t* bufferSize) noexcept {
+    if (!async || !bufferSize) return E_INVALIDARG;
+    if (!is_async_done(async)) return E_PENDING;
+    std::lock_guard<std::mutex> lock(g_ui_mu);
+    auto it = g_ui_pending.find(async);
+    if (it == g_ui_pending.end()) return E_UNEXPECTED;
+    // 结构体 + 结尾的 completionUri + 结束符
+    *bufferSize = sizeof(XGameUiWebAuthenticationResultData) + it->second.completion_uri.size() + 1;
+    return S_OK;
+}
+
+STDAPI XGameUiShowWebAuthenticationResult(XAsyncBlock* async, size_t bufferSize, void* buffer,
+                                          XGameUiWebAuthenticationResultData** ptrToBuffer,
+                                          size_t* bufferUsed) noexcept {
+    if (!async || !buffer) return E_INVALIDARG;
+    if (!is_async_done(async)) return E_PENDING;
+    std::lock_guard<std::mutex> lock(g_ui_mu);
+    auto it = g_ui_pending.find(async);
+    if (it == g_ui_pending.end()) return E_UNEXPECTED;
+    const size_t uriBytes = it->second.completion_uri.size() + 1;
+    const size_t need = sizeof(XGameUiWebAuthenticationResultData) + uriBytes;
+    if (bufferSize < need) return E_NOT_SUFFICIENT_BUFFER;
+    auto* data = static_cast<XGameUiWebAuthenticationResultData*>(buffer);
+    char* uri = reinterpret_cast<char*>(data + 1);
+    std::memcpy(uri, it->second.completion_uri.c_str(), uriBytes);
+    data->responseStatus = S_OK;
+    data->responseCompletionUriSize = uriBytes;
+    data->responseCompletionUri = uri;          // 指向 buffer 内部
+    if (ptrToBuffer) *ptrToBuffer = data;       // 同样指向 buffer 内部
+    if (bufferUsed) *bufferUsed = need;
+    g_ui_pending.erase(it);
+    return S_OK;
 }
 
 // ---- 系统信息 ----
