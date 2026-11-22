@@ -28,13 +28,20 @@ fi
 BRANCH=${BRANCH:-main}
 
 set +x
-URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+# token 不拼进 URL：GIT_ASKPASS 让 git 主动来问，凭据只经 stdin/管道传递，
+# 不会出现在进程参数（ps 可见）或认证失败的 stderr 里
+ASKPASS=$(mktemp -t askpass.XXXXXX)
+trap 'rm -f "$ASKPASS"' EXIT
+printf '#!/bin/sh\ncase "$1" in *Username*) echo x-access-token ;; *) echo "$GITHUB_TOKEN" ;; esac\n' \
+  > "$ASKPASS"
+chmod +x "$ASKPASS"
+URL="https://github.com/${REPO}.git"
 
 echo "== 将要推送到 github.com/${REPO}（分支 ${BRANCH}）"
 git log --oneline -1
 echo
 
-if ! git push "$URL" "HEAD:${BRANCH}"; then
+if ! GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git push "$URL" "HEAD:${BRANCH}"; then
   echo
   echo "推送失败。常见原因："
   echo "  - token 权限不足（fine-grained 需要该仓库的 Contents: Read and write）"

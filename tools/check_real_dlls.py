@@ -138,9 +138,10 @@ def main():
     import ctypes
     print("\n== 动态加载（让 Windows 加载器解析导入表）")
     ok = fail = 0
+    _dir_handles = []   # 必须持有：被 GC 掉会关闭目录句柄，动态加载时好时坏
     if hasattr(os, "add_dll_directory"):
-        os.add_dll_directory(os.path.abspath(shim))
-        os.add_dll_directory(os.path.abspath(a.pkg))
+        _dir_handles.append(os.add_dll_directory(os.path.abspath(shim)))
+        _dir_handles.append(os.add_dll_directory(os.path.abspath(a.pkg)))
     for fn in dlls:
         try:
             ctypes.WinDLL(os.path.join(a.pkg, fn))

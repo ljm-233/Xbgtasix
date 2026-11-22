@@ -157,7 +157,8 @@ def main():
                 })
                 blob_cache[obj] = created["sha"]
                 total_blobs += 1
-            tree_items.append({"path": path, "mode": "100644", "type": "blob",
+            mode = next((e["mode"] for e in entries if e["path"] == path), "100644")
+            tree_items.append({"path": path, "mode": mode, "type": "blob",   # 保留可执行位
                                "sha": blob_cache[obj]})
 
         tree = api("POST", "/repos/%s/git/trees" % a.repo, {"tree": tree_items})

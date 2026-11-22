@@ -33,9 +33,13 @@ size_t alignment_from(uint64_t attributes) {
     return kPageGranularity;
 }
 
+// 记录放在旁路表里，不在内存里留 Header：
+// 反过来做（header 前置于返回指针）会为了对齐多提交整整一页，
+// 导致 1 字节分配实占 128 KB（审查发现的严重项）。
 struct Header {
     void* raw;
-    size_t size;
+    size_t size;          // 请求字节
+    size_t committed;     // 实际提交字节
     uint64_t attributes;
 };
 
@@ -88,12 +92,13 @@ __declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) 
         xbgtasix::logf("[xmem] XMemAlloc size overflow: %zu", size);
         return nullptr;
     }
-    // 多要 align + header 用于手动对齐。
-    // [事实] 主机上一个分配就是"整数个 64 KB 物理页"，所以这里把整段向上取整到 64 KB
-    //        并**全部提交**。否则 VirtualQuery 会只看得到 ptr 之后那几页（实测 4096），
-    //        与主机口径不符。代价是 1 字节的分配也要占 64 KB —— 这也是主机上的真实代价。
-    const size_t total = size + align + sizeof(Header);
-    const size_t committed = (total + kPageGranularity - 1) / kPageGranularity * kPageGranularity;
+    // [事实] 主机上一个分配就是"整数个 64 KB 物理页"，所以把请求向上取整到 64 KB 并全部提交，
+    //        与主机口径一致。VirtualAlloc 本身保证 64 KB 粒度对齐，所以 align<=64KB 时不需要额外余量；
+    //        只有请求更大对齐（如 2 MB 大页）时才多要一段用于手动对齐。
+    const size_t need = (size + kPageGranularity - 1) / kPageGranularity * kPageGranularity;
+    const size_t committed = align > kPageGranularity
+        ? (need + align + kPageGranularity - 1) / kPageGranularity * kPageGranularity
+        : need;
 
     auto* raw = static_cast<uint8_t*>(
         VirtualAlloc(nullptr, committed, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
@@ -101,22 +106,23 @@ __declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) 
         xbgtasix::logf("[xmem] VirtualAlloc(%zu, align=%zu) failed: %lu", size, align, GetLastError());
         return nullptr;
     }
-    const uintptr_t base = reinterpret_cast<uintptr_t>(raw) + sizeof(Header);
-    const uintptr_t aligned = (base + (align - 1)) & ~static_cast<uintptr_t>(align - 1);
-    auto* slot = reinterpret_cast<Header*>(aligned - sizeof(Header));
-    slot->raw = raw;
-    slot->size = size;
-    slot->attributes = attributes;
+    uint8_t* aligned = raw;
+    if (align > kPageGranularity) {
+        const uintptr_t a = (reinterpret_cast<uintptr_t>(raw) + (align - 1)) &
+                            ~static_cast<uintptr_t>(align - 1);
+        aligned = reinterpret_cast<uint8_t*>(a);
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_mu);
-        g_allocs[reinterpret_cast<void*>(aligned)] = *slot;
-        g_live_bytes += size;
+        g_allocs[aligned] = Header{raw, size, committed, attributes};
+        // 统计口径是**提交字节**，不是请求字节：按请求字节算会让预算类断言系统性高估可用内存
+        g_live_bytes += committed;
         ++g_live_count;
         ++g_total_allocs;
         if (g_live_bytes > g_peak_bytes) g_peak_bytes = g_live_bytes;
     }
-    return reinterpret_cast<void*>(aligned);
+    return aligned;
 }
 
 // [推断] 二次释放/野指针在主机上是 undefined；我们选择"忽略 + 记日志"，
@@ -124,17 +130,23 @@ __declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) 
 __declspec(dllexport) void __cdecl XMemFree(void* ptr) {
     if (!ptr) return;
     Header h{};
+    bool unknown = false;
     {
         std::lock_guard<std::mutex> lock(g_mu);
         auto it = g_allocs.find(ptr);
         if (it == g_allocs.end()) {
-            xbgtasix::logf("[xmem] XMemFree of unknown pointer %p (ignored)", ptr);
-            return;
+            unknown = true;
+        } else {
+            h = it->second;
+            g_allocs.erase(it);
+            g_live_bytes -= h.committed;
+            --g_live_count;
         }
-        h = it->second;
-        g_allocs.erase(it);
-        g_live_bytes -= h.size;
-        --g_live_count;
+    }
+    // 日志与释放都在锁外：持锁写 stderr，若 stderr 是无人读的管道会整段卡死
+    if (unknown) {
+        xbgtasix::logf("[xmem] XMemFree of unknown pointer %p (ignored)", ptr);
+        return;
     }
     if (poison_enabled()) std::memset(ptr, 0xDD, h.size);
     VirtualFree(h.raw, 0, MEM_RELEASE);
@@ -144,6 +156,21 @@ __declspec(dllexport) void __cdecl XMemFree(void* ptr) {
 //        PAGE_READWRITE 这类保护概念，Protect 只对调试有意义。
 __declspec(dllexport) bool __cdecl XMemVirtualQuery(void* ptr, XMemVirtualQueryInfo* info) {
     if (!ptr || !info) return false;
+    // 先查自己的表：主机语义里 BaseAddress 就是分配返回的指针，
+    // RegionSize 是这次分配的大小（不是内核合并后的整段空闲区）。
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_allocs.find(ptr);
+        if (it != g_allocs.end()) {
+            info->BaseAddress = ptr;
+            info->RegionSize = it->second.committed;
+            info->State = MEM_COMMIT;
+            info->Protect = PAGE_READWRITE;
+            info->Type = MEM_PRIVATE;
+            info->CommittedBytes = it->second.committed;
+            return true;
+        }
+    }
     MEMORY_BASIC_INFORMATION mbi{};
     if (!VirtualQuery(ptr, &mbi, sizeof(mbi))) return false;
     info->BaseAddress = mbi.BaseAddress;

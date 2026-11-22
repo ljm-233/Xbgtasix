@@ -364,31 +364,7 @@ int main() {
           "CreateCommittedResource(readback)");
     if (!rb) return 1;
 
-    // ---- 画一帧，索引 97 -> 97 % 3 = 1 -> 绿 ----
-    check(alloc->Reset(), "Allocator::Reset");
-    check(list->Reset(alloc, pso), "List::Reset");
-    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    D3D12_VIEWPORT vp{0, 0, 64.0f, 64.0f, 0, 1};
-    D3D12_RECT sc{0, 0, 64, 64};
-    list->RSSetViewports(1, &vp);
-    list->RSSetScissorRects(1, &sc);
-    list->SetPipelineState(pso);
-    list->SetGraphicsRootSignature(root);
-    list->SetDescriptorHeaps(1, &heap);
-    list->SetGraphicsRootDescriptorTable(1, heap->GetGPUDescriptorHandleForHeapStart());
-    const UINT idx = 97;
-    list->SetGraphicsRoot32BitConstant(0, idx, 0);
-    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    list->DrawInstanced(4, 1, 0, 0);
-
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = color;
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    list->ResourceBarrier(1, &b);
-
+    // 每次探测都要把 RT 拷到 readback 缓冲
     D3D12_TEXTURE_COPY_LOCATION dst{};
     dst.pResource = rb;
     dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -401,31 +377,96 @@ int main() {
     src.pResource = color;
     src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     src.SubresourceIndex = 0;
-    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    check(list->Close(), "List::Close");
-    ID3D12CommandList* lists[] = {list};
-    queue->ExecuteCommandLists(1, lists);
+
+    // ---- 画一帧，索引 97 -> 97 % 3 = 1 -> 绿 ----
+    check(alloc->Reset(), "Allocator::Reset");
+    check(list->Reset(alloc, pso), "List::Reset");
+    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    D3D12_VIEWPORT vp{0, 0, 64.0f, 64.0f, 0, 1};
+    D3D12_RECT sc{0, 0, 64, 64};
+    list->RSSetViewports(1, &vp);
+    list->RSSetScissorRects(1, &sc);
+    list->SetPipelineState(pso);
+    list->SetGraphicsRootSignature(root);
+    list->SetDescriptorHeaps(1, &heap);
+    list->SetGraphicsRootDescriptorTable(1, heap->GetGPUDescriptorHandleForHeapStart());
+    // 审查发现：只测 index=97 的话，"整张表都指向同一槽"或"步长错一位"都能 PASS。
+    // 这里按 i%3 的映射多点采样：0->红 1->绿 2->蓝 95->蓝 96->红 97->绿
+    struct Probe { UINT idx; unsigned char r, g, b; const char* name; };
+    const Probe probes[] = {
+        {0,  255, 0,   0,   "槽0=红"},
+        {1,  0,   255, 0,   "槽1=绿"},
+        {2,  0,   0,   255, "槽2=蓝"},
+        {95, 0,   0,   255, "槽95=蓝（末尾轮换）"},
+        {96, 255, 0,   0,   "槽96=红"},
+        {97, 0,   255, 0,   "槽97=绿（最后一槽）"},
+    };
+    // 让 GPU 先空下来：Allocator::Reset 要求引用它的命令列表已执行完，
+    // 否则返回 E_FAIL（上一段录制留下的列表还没跑完）
     ++fv;
     queue->Signal(fence, fv);
     if (fence->GetCompletedValue() < fv) {
         fence->SetEventOnCompletion(fv, ev);
         WaitForSingleObject(ev, 10000);
     }
-
-    unsigned char* px = nullptr;
-    D3D12_RANGE rr{0, rb_bytes};
     int rc = 1;
-    if (SUCCEEDED(rb->Map(0, &rr, reinterpret_cast<void**>(&px))) && px) {
-        const unsigned char* p = px + 32 * rb_row + 32 * 4;
-        xbgtasix::logf("[t4] 中心像素 RGBA = (%u,%u,%u,%u)，期望绿 (0,255,0,255)", p[0], p[1], p[2], p[3]);
-        if (p[0] < 8 && p[1] > 200 && p[2] < 8 && p[3] > 240) {
-            xbgtasix::logf("[t4] PASS: 98 槽描述符表的动态索引生效");
-            rc = 0;
-        } else {
-            xbgtasix::logf("[t4] FAIL: 索引选错了描述符");
+    int probe_ok = 0;
+    for (const Probe& pr : probes) {
+        // 列表可能还处在打开状态（上一段录制），Reset 会失败；先无条件 Close 一次
+        list->Close();
+        check(alloc->Reset(), "Allocator::Reset(probe)");
+        check(list->Reset(alloc, pso), "List::Reset(probe)");
+        list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        list->RSSetViewports(1, &vp);
+        list->RSSetScissorRects(1, &sc);
+        list->SetPipelineState(pso);
+        list->SetGraphicsRootSignature(root);
+        list->SetDescriptorHeaps(1, &heap);
+        list->SetGraphicsRootDescriptorTable(1, heap->GetGPUDescriptorHandleForHeapStart());
+        list->SetGraphicsRoot32BitConstant(0, pr.idx, 0);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        list->DrawInstanced(4, 1, 0, 0);
+
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = color;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        list->ResourceBarrier(1, &b);
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        check(list->Close(), "List::Close(probe)");
+        ID3D12CommandList* cl[] = {list};
+        queue->ExecuteCommandLists(1, cl);
+        ++fv;
+        queue->Signal(fence, fv);
+        if (fence->GetCompletedValue() < fv) {
+            fence->SetEventOnCompletion(fv, ev);
+            WaitForSingleObject(ev, 10000);
         }
-        D3D12_RANGE w{0, 0};
-        rb->Unmap(0, &w);
+
+        unsigned char* px = nullptr;
+        D3D12_RANGE rr{0, rb_bytes};
+        bool hit = false;
+        if (SUCCEEDED(rb->Map(0, &rr, reinterpret_cast<void**>(&px))) && px) {
+            const unsigned char* q = px + 32 * rb_row + 32 * 4;
+            hit = std::abs(int(q[0]) - int(pr.r)) < 8 && std::abs(int(q[1]) - int(pr.g)) < 8 &&
+                  std::abs(int(q[2]) - int(pr.b)) < 8 && q[3] > 240;
+            xbgtasix::logf("[t4] idx=%-3u 期望(%3u,%3u,%3u) 实际(%3u,%3u,%3u,%3u) %s %s",
+                           pr.idx, pr.r, pr.g, pr.b, q[0], q[1], q[2], q[3],
+                           hit ? "OK" : "不符", pr.name);
+            D3D12_RANGE w{0, 0};
+            rb->Unmap(0, &w);
+        }
+        if (hit) ++probe_ok;
+    }
+    if (probe_ok == static_cast<int>(sizeof(probes) / sizeof(probes[0]))) {
+        xbgtasix::logf("[t4] PASS: 98 槽描述符表多点采样全部命中（%d/%d）", probe_ok,
+                       static_cast<int>(sizeof(probes) / sizeof(probes[0])));
+        rc = 0;
+    } else {
+        xbgtasix::logf("[t4] FAIL: 只有 %d/%d 个槽取到了正确贴图", probe_ok,
+                       static_cast<int>(sizeof(probes) / sizeof(probes[0])));
     }
 
     for (int i = 0; i < 3; ++i) if (tex[i]) tex[i]->Release();

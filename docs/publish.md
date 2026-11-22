@@ -57,10 +57,10 @@ bundle 自带全部提交历史，和直接 clone 等价。
 ## 推送前自查（已在本机执行过）
 
 ```bash
-git ls-files | wc -l          # 67 个文件
+git ls-files | wc -l          # 85 个文件
 git ls-files -z | xargs -0 ls -la | sort -k5 -rn | head   # 最大 80 KB
 git ls-files | grep -icE '\.(dll|exe|rpf|ttpf|pfx)$|keys' # 0
-du -sh .git                   # 1.7 MB
+du -sh .git                   # 2.7 MB
 ```
 
 - 入库内容：源码、测试、工具、文档
@@ -85,7 +85,7 @@ du -sh .git                   # 1.7 MB
 |---|---|---|
 | `python-tools` | 用合成样本自检 5 个 Python 工具 | 无（纯标准库） |
 | `docs-links` | 检查 md 里的相对链接 | 无 |
-| `windows-build` | 构建 + 跑 15 个测试 | 需要 GDK 头/库，缺则打印说明后跳过 |
+| `windows-build` | 构建 + 跑 21 项测试 | 需要 GDK 头/库，缺则打印说明后跳过 |
 
 `windows-build` 设为 `continue-on-error`：因为 GDK 头不能入库，绝大多数 CI 环境都会走"跳过"分支，
 这属于预期行为，不应该让 CI 变红。

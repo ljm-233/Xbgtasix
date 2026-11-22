@@ -48,6 +48,15 @@ run_one() {
   total=$((total + 1))
   local t0=$(date +%s%N)
   local out rc
+  case "$1" in
+    t8_model.exe)   [ -f "$MODEL" ] || { total=$((total+1)); skip=$((skip+1));
+                      printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$1" SKIP 0 "缺少模型样本（XBGTASIX_MODEL）";
+                      return 0; } ;;
+    t10_integration.exe|t11_storage.exe|t19_save.exe|t18_package.exe)
+                    [ -f "$CFG" ] || { total=$((total+1)); skip=$((skip+1));
+                      printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$1" SKIP 0 "缺少 MicrosoftGame.Config";
+                      return 0; } ;;
+  esac
   out=$(cd "$BIN" && timeout 300 "./$@" 2>&1); rc=$?
   local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
   local key

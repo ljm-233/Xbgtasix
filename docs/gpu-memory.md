@@ -30,7 +30,7 @@ GTA6 的资源是 **224.96 GB**，而这块卡只有 **7 GB 预算** —— 比�
    CPU 用 `VirtualAlloc`（我们已实现），GPU 用 `CreateReservedResource` + `MakeResident`。
 3. **budget 会浮动**：WDDM 会按系统负载调低预算，游戏必须监听
    `IDXGIAdapter3::RegisterVideoMemoryBudgetChangeNotificationEvent` 并做降级。
-   我们还没实现这个 —— 这是真实的适配缺口。
+   已实现并验证（见下文 t15_budget）。
 
 ## 预算变化通知 + 降级（t15_budget 实测）
 

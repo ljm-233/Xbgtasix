@@ -64,6 +64,8 @@ Stats stats() {
 
 // 与 src/xmem 的规则保持一致：
 //   attributes 低 32 位是 >=64KB 的 2 的幂 -> 视为请求的对齐字节数；否则 64KB
+// 审查意见：这里的规则不能照抄实现，否则用被测代码算期望值 = 恒真。
+// 期望值写成字面量表（见下面的 cases），本函数只用于打印。
 size_t expect_align(uint64_t attributes) {
     const uint64_t req = attributes & 0xFFFFFFFFull;
     const uint64_t cap = 256ull * 1024 * 1024;
