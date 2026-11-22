@@ -123,14 +123,18 @@ int main() {
     if (!swap) return 2;
 
     // 先把 back buffer 全放掉，否则 ResizeBuffers 会失败（BufferCount 不匹配）
-    auto release_buffers = [&](ID3D12Resource** bufs, ID3D12DescriptorHeap* heap) {
+    // 注意：这里同时把 heap 指针置空，避免调用方再释放一次（双重 Release 会崩）
+    auto release_buffers = [&](ID3D12Resource** bufs, ID3D12DescriptorHeap** heap) {
         for (int i = 0; i < 2; ++i) {
             if (bufs[i]) {
                 bufs[i]->Release();
                 bufs[i] = nullptr;
             }
         }
-        if (heap) heap->Release();
+        if (heap && *heap) {
+            (*heap)->Release();
+            *heap = nullptr;
+        }
     };
 
     ID3D12DescriptorHeap* rtv_heap = nullptr;
@@ -144,8 +148,7 @@ int main() {
     ok(bufs[0] && bufs[1], "GetBuffer(0/1)");
 
     // 模拟"用户把窗口拉大" -> 必须 ResizeBuffers 重建
-    release_buffers(bufs, rtv_heap);
-    if (rtv_heap) { rtv_heap->Release(); rtv_heap = nullptr; }
+    release_buffers(bufs, &rtv_heap);   // 内部会把 rtv_heap 置空
     HRESULT hr = swap->ResizeBuffers(0, 480, 360, DXGI_FORMAT_UNKNOWN, 0);
     ok(SUCCEEDED(hr), "ResizeBuffers(480x360)");
 
@@ -228,7 +231,7 @@ int main() {
         }
     }
 
-    release_buffers(bufs, rtv_heap);
+    release_buffers(bufs, &rtv_heap);
     swap->Release();
     if (factory) factory->Release();
     if (queue) queue->Release();
