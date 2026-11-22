@@ -136,6 +136,12 @@ echo "== t8_model.exe"
     -ldxgi -ldxguid -ld3d12 -lole32 -lwindowscodecs \
     -o "$OUT/t8_model.exe"
 
+echo "== t9_async.exe"
+"$CXX" "${FLAGS[@]}" tests/t9_async/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t9_async.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
