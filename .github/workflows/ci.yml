@@ -81,7 +81,7 @@ jobs:
           {
             echo "### windows-build 覆盖范围"
             echo ""
-            if [ "${{ steps.gdk.outputs.have }}" = "1" ]; then
+            if [ -f "build/gdk/include_clean/XTaskQueue.h" ]; then   # 用文件判断，别用 step output
               echo "- ✅ GDK 可用：三个 shim + 全套 32 项测试"
             else
               echo "- ⚠️ 未找到 GDK：跑了 xmem.dll + t3_xmem（93 条断言）+ 工具自检 + 文档链接"
