@@ -82,6 +82,41 @@ descriptor heap + 根签名的描述符表数组，不能按"每个资源一个 
 3. **描述符容量要按 bindless 设计**：p99 = 98 个槽，需要 GPU 可见的大堆 + 索引式访问。
 4. **计算占比高**：CS 吃掉 40.8% 的字节码，说明有大量 GPU 驱动的后处理/剔除/降噪。
 
+
+## 导出样本的质量（实测）
+
+导出 80 条（CS/PS/VS 混合）与 3,660 条（覆盖到 NGG 区间，index 3443 起）后抽样验证：
+
+| 检查 | 结果 |
+|---|---|
+| SPIR-V 校验（`spirv-val --target-env vulkan1.2`） | 80/80 通过；NGG 抽样 25/25 通过 |
+| SPIR-V 版本 | 1.5，入口点类型正确（Fragment / GLCompute / MeshEXT） |
+| HLSL 形态 | **寄存器级转写**，不是语义化反编译 |
+| 字节码容器 | 明文，`PS\x00\x09` 头含 PSO hash、驱动版本（930.048.020） |
+
+HLSL 的真实形态（像素着色器）：
+
+```hlsl
+Texture2D<float4> Tex_0 : register(t0); // slot=0xD off=0x0 dw=128
+void PSMain(float4 pos : SV_Position, out float4 mrt0 : SV_Target0)
+{
+    float v[64]; uint s[64]; // RDNA2 Wave32 VGPR / SGPR register file
+    s12 = exec_lo;
+    v[4..7] = Tex_s24.SampleLevel(Samp_s20, float2(v2, v3), 0); // image_sample dmask=0xf
+    ...
+```
+
+mesh shader（NGG）能正确识别成 `[outputtopology("triangle")]` + `MSMain`，
+但函数体同样是寄存器级转写。
+
+**怎么理解这个质量**：它保住语义、可被重新编译，但**不是可读源码**。
+所以"自动翻译"足以支撑"能编译、能跑"，不足以支撑"能改"。
+
+## 与 shim 的对应
+
+`tests/t4_bindless` 用 98 槽描述符表 + 动态索引验证了语料里 p99=98 的绑定需求，
+顺带确认 65,536 个描述符的 GPU 可见堆能建出来。
+
 ## 局限
 
 - 只统计了 `PS\x00\x09` 缓存里的着色器；SGD5 着色器组（`--extract-sgd5`）另外算

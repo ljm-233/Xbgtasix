@@ -1,210 +1,83 @@
-# RPF9 可读性调查（结论：目录解不开）
+# RPF9 资源包：能读到什么，读不到什么
 
-决定项目上限的一个问题：**能不能读出 RPF9 里的文件目录**。三条独立证据指向同一个结论。
-
-## 证据 1：专杀工具自己承认解不开目录
-
-`rpf9-explorer 1.0`（专门为 RPF9 写的工具）的 README 原文：
-
-> **RPF9 support is partial. The original archive directory is not decoded**, and the app cannot
-> rebuild a complete RPF9 archive.
-
-> If an RPF9 archive has few results, **Scan entire archive** searches the full file for supported
-> payloads and saves a local index. **It does not decode the original directory.**
-
-也就是说它靠"在全文件里扫描可识别的载荷特征"（纹身、模型、音频）来凑出内容列表，
-而不是解析目录表。这直接否定了"用第三方工具列目录"这条路。
-
-## 证据 2：文件里没有明文目录，也没有明文着色器
-
-| 检查 | 对象 | 结果 |
-|---|---|---|
-| `DXBC` / `DXIL` / `SHDR` / `RDEF` 魔数 | `shaders.rpf`（411 MB 全文件） | **全部 0 次** |
-| 末尾若干长度区间的可读字符串 | `common.rpf` / `shaders.rpf` | 只有零散噪声，没有路径/文件名 |
-| 熵 / 可打印字符占比 | 四个包 | 熵 6.4–7.8，可打印 0.25–0.33（纯文本应为 ≈4.5 / ≈0.99） |
-
-## 证据 3：载荷里有明文，但只在少数位置
-
-在 `audio.rpf` 前 210 MB 扫到 34 个 Bink 特征（`BIK`/`BK2`），`textures.rpf` 前 105 MB 扫到 6 个。
-随机数据里 4 字节特征在 210 MB 中的期望命中约 0.05 次，所以这些是**真实载荷**。
-
-但同时 `OggS` / `RIFF` / `DDS` / `PNG` 全是 0 —— 说明大部分内容不是裸格式，
-而是压缩或加密后的块，只有少数容器头落在明文里。
-
-## 结论
-
-**RPF9 的目录表（TOC）无法从公开渠道解出**，与社区说法一致（密钥在缺失的
-`game_scarlett_master.exe` 里）。这意味着：
-
-1. 我们**无法重建游戏期望的虚拟文件系统** —— 没有路径到偏移的映射
-2. 所以即使 shim 做到完美，游戏也会在"读第一个资源"处停住
-3. `Xbgtasix` 当前的能力上限就是 **L0–L4 的 API 层 + 一套可断言的测试**，
-   这部分是通用的、可复用的，不依赖任何游戏文件
-
-## 还有什么能做
-
-- **载荷雕刻（carving）**：按已知魔数扫描，能把 Bink 视频、部分贴图抠出来看。适合研究，
-  但拼不回原始目录结构，也不能让程序跑起来
-- **反向工程 RPF9 目录格式**：需要大量样本 + 已知明文对比。没有密钥的情况下，
-  只能靠"同一文件不同版本形态"做差分 —— 成本极高，收益是"能看资产"，不是"能跑游戏"
-- **把项目转成通用 GDK 兼容层**：这是唯一不依赖这条死路的产出方向
-
-
-## 结构探测（工具：tools/packaging/rpf9_probe.py）
-
-对五个包扫头部与零填充区，得到一个可复核的布局模型：
-
-| 文件 | f1 | f2 | f3 | 第一个零填充起点 | f1 == 起点 |
-|---|---|---|---|---|---|
-| script.rpf | 608 | 576 | 128 | 608 | 是 |
-| shaders.rpf | 34368 | 34336 | 160 | 34368 | 是 |
-| textures.rpf | 1936 | 1728 | 544 | 1936 | 是 |
-| appdata0.rpf | 864 | 832 | 64 | 1360 | 否 (+496) |
-| common.rpf | 38272 | 34080 | 14864 | 39968 | 否 (+1696) |
-
-```
-0x00  64 B   头部：magic(0x52504639) + f1 + f2 + f3
-0x40  ?      目录区（高熵，无压缩容器特征）
-f1    ...    零填充或一小段附加数据
-0x1000 ...   载荷区（4 KB 对齐）
-```
-
-- `magic = 0x52504639`，小端写作字节 `39 46 50 52` —— 确认是 RPF9
-- `f1` 在三个包里精确等于"零填充起点"，说明它是**目录区的结束偏移**
-- `f2 = f1 - 32` 在 appdata0 / script / shaders 成立（common 与 textures 不成立）→ 疑似 32 字节 MAC
-- 目录区（0x40..f1）**熵 7.4–7.6、无 zlib 流** → 加密，不是压缩
-- 载荷区按 4 KB 对齐；audio.rpf 里能扫到明文 Bink 头 → 载荷侧并非全部加密
-
-结论不变但更精确：**目录区加密，载荷是"部分明文 + 部分自定义压缩"**。
-所以能雕刻出载荷，拿不到名字与路径。
-
-
-## 公开进展（2026-11 检索）
-
-比我们独立探测走得更远的两个开源工具：
-
-**PercyStar**（rpatty-dev，Rust）v1.3.2 changelog 原文：
-
-> **9FPR Header Parser:** Directly parses `entry_count` (+0x24), `data_offset` (+0x04), and
-> `names_len` (+0x0C) in the RPF9 64-byte header
-
-> … and proved **static-key fixed-IV 9FPR TOC encryption** across 4 archives
-
-> **500 lifted PS_0x09 RDNA2 -> SPIR-V 1.5 shaders** validated … (500/500 vkCreateShaderModule)
-
-还提供 `--dump-textures`（20 种 DXGI 格式 + Scarlett RDNA2 4KB/64KB 反 swizzle）
-和 `data.rpf` 内的 GXT 文本表查看。
-
-**SixNG**（holdmysocks）：
-
-> sixng audio … finds the sound banks by scanning the archive: 7,160 banks, 1.6 M streams …
-> **Stream names are 29-bit hashes and are not recovered**
-
-它能导出 navmesh、道路图（63,808 节点）、音频（Opus 无损转封装），
-但明确说明**名字无法还原**。
-
-用公开字段重新读我们的包（`tools/packaging/rpf9_probe.py` 的读数）：
-
-| 文件 | data_offset | names_len | entry_count@0x24 | TOC 长度 | 每条约 |
-|---|---|---|---|---|---|
-| appdata0.rpf | 864 | 64 | 2 | 800 | 400.00 |
-| script.rpf | 608 | 128 | 2 | 544 | 272.00 |
-| common.rpf | 38272 | 14864 | 418 | 38208 | 91.41 |
-| shaders.rpf | 34368 | 160 | 3 | 34304 | 11434.67 |
-| textures.rpf | 1936 | 544 | 22 | 1872 | 85.09 |
-| data.rpf | 69728 | 22640 | 699 | 69664 | 99.66 |
-| navmeshes.rpf | 1920 | 1152 | 29 | 1856 | 64.00 |
-
-`navmeshes.rpf` 正好 64.00 B/条，其余不是整数 → 记录**变长**（内嵌名字）。
-`entry_count` 看起来是**顶层条目数**，不是递归总数。
-
-## 结论修订
-
-之前写"目录无法解出"要收紧为：
-
-- 目录区确实是加密的（我们独立验证过：熵 7.994、16 字节对齐、零重复块）
-- 但**加密方案已被公开证明是"静态密钥 + 固定 IV"**，不是每份 exe 一个密钥
-- 名字/路径仍未公开还原（SixNG 明说哈希不可逆，PercyStar 靠扫描）
-- 所以：内容可拿（贴图、音频、navmesh、文本表、甚至着色器），**文件名仍是缺口**
-
-
-
-## 实测：PercyStar 1.3.6 能解出目录（含真名）
-
-之前写"名字不可还原"是错的，实测推翻：
-
-```
-> PercyStar.exe --dump-textures .../textures.rpf out/ 40
-Found 1354 TXDs in .../textures.rpf -> dumping PNGs...
-DONE: Exported 40 PNGs (bcpack=0, fail=0)
-```
-
-导出的文件名全是**真实资源名**，不是哈希：
-
-```
-ffx_armor01_light01.png .. ffx_armor03_heavy02.png
-cheatcode_overlays_fisheye.png / _rewind.png / _square.png / _tv_alpha.png
-pistol_glass_crack_decals.png / shotgun_glass_crack_decals.png
-hiresdecal.png / cracktempered.png / defnormbroken.png
-```
-
-导出的图内容与名字吻合（`pistol_glass_crack_decals` 就是子弹打裂玻璃的裂纹贴图，
-512×512），说明不是"猜出来的名字"，而是**从目录里读出来的**。
-
-结论修正为：
-
-| 项 | 之前判断 | 实测 |
-|---|---|---|
-| 目录 TOC | 加密，不可解 | 加密但可解（PercyStar 已实现，静态密钥+固定 IV） |
-| 文件名 | 不可还原 | **可还原**，至少贴图/TXD 层面 |
-| 贴图载荷 | 部分明文 | 可解码（20 种 DXGI 格式 + Scarlett RDNA2 反 swizzle） |
-| 音频名 | SixNG 说不可还原 | 那只是音频流的 29 位哈希，不代表整个目录 |
-
-`textures.rpf` 里能枚举出 **1354 个 TXD**，逐个导出 PNG，0 失败。
-
-
-## 更正更正：PercyStar 并不解目录
-
-上一条写"PercyStar 能解出目录（含真名）"，也不对。它自己的 README 明确写：
-
-> **Zero Circumvention / Zero Keys:** Contains **no** decryption routines, encryption keys, hashes,
-> DRM bypasses, or access-control workarounds. **Encrypted data is skipped untouched.**
-
-旁证：
-- 它的脚本清单里是 `scripts/rpf9_carve.py`（**carver**，不是 parser）
-- 面板只报 "Found 1354 **TXDs**"——如果解了目录，应该能列出**所有**条目，而不是只有 TXD
-- 它用"Whole-Folder & Single-Archive Scanning"、`scan_cache_v8.tsv`
-
-所以正确的模型是：
+结论先行：
 
 | 层 | 状态 |
 |---|---|
-| 目录 TOC | **仍然加密，公开工具不解** |
-| 载荷 | 部分明文/已知压缩（TXd、shader 容器、Bink、Opus…），靠特征扫描定位 |
-| 名字 | 只在**载荷自带名字**时可得（TXd 内嵌纹理名）；音频流是 29 位哈希，拿不到 |
+| 目录表（TOC，含文件名） | **加密，公开工具不解** |
+| 载荷（贴图、着色器、视频、音频…） | **可扫描定位，多数可解码** |
+| 名字 | 仅当载荷内部自带名字时可得（贴图有，音频流是哈希） |
 
-也就是说：贴图带名字 ≠ 目录解开了，名字是从 TXd 负载里读的。
+对项目的影响：**不阻塞"让游戏跑"**（游戏自己带 TOC 解码器），只阻塞我们的工具链。
 
-**但这不阻塞"让游戏跑"**：游戏自己的代码里有 TOC 解码器（缺的是那个 exe）。
-TOC 加密只阻塞**我们的工具链**，不阻塞游戏。
+---
 
-## 着色器实测（同一工具，`--disasm-shaders`）
+## 一、TOC 是加密的（我们独立验证的三条证据）
+
+### 1. 头字段与布局
+
+`magic = 0x52504639`，小端写作 `39 46 50 52`，即 `9FPR` → RPF9。
+64 字节头的字段位置由公开工具 PercyStar 的发布说明给出：
 
 ```
-Loaded PS\x00\x09 (0x65F41EDD, drv 930.048.020): 21522 shaders, 25471 Gfx PSOs, 2693 Compute PSOs
-Stage totals: PS=9535 VS=1343 CS=3082 NGG/Mesh=7498 RT_BVH64=64
-Wrote shaders_index.csv + 3 shaders (.asm/.hlsl/.spv)
++0x04  data_offset    目录区结束 / 数据区开始
++0x0C  names_len
++0x24  entry_count    顶层条目数
 ```
 
-- 着色器容器（`PS\x00\x09`）**是明文的**，可完整枚举
-- 阶段分布说明游戏大量使用 **mesh shader（NGG）** 与 **硬件光追（BVH64）**
-- 输出包含 AMD GFX10.3 汇编、lift 出来的 HLSL SM 6.6、以及 SPIR-V 1.5
-- 索引 CSV 列：`stage, pso_hash, code_off, code_size, insns, bindings, has_rt, has_ngg, numthreads`
+实测五个包：
 
-结论：**着色器墙不存在**——数据可读、可反汇编、可 lift。
+| 文件 | data_offset | names_len | entry_count | 目录区长度 |
+|---|---|---|---|---|
+| appdata0.rpf | 864 | 64 | 2 | 800 |
+| script.rpf | 608 | 128 | 2 | 544 |
+| common.rpf | 38272 | 14864 | 418 | 38208 |
+| shaders.rpf | 34368 | 160 | 3 | 34304 |
+| navmeshes.rpf | 1920 | 1152 | 29 | 1856 |
 
-## 对项目定位的影响
+`navmeshes.rpf` 正好 64.00 B/条，其余不是整数 → 记录**变长**（内嵌名字）。
 
-原始目标（让泄露版跑在 PC 上）在缺 exe + 目录加密的双重约束下不可达。
-可交付的部分是一个**通用的 Xbox GDK 兼容层骨架**：加载、内存、D3D12 入口、测试。
-它的价值不依赖那个游戏，也不受 DMCA 影响。
+### 2. 目录区是高熵且 16 字节对齐
+
+```
+common.rpf   TOC 长度=34016  16 的倍数? 是  块数=2126  重复块=0
+             字节熵=7.994 bits/byte（随机=8.0）
+```
+
+长度是 16 的倍数 + 熵接近 8.0 + 零重复块 → **AES 一类的现代分组密码**，
+不是压缩。同时 16–4096 偏移范围内没有任何可解 zlib 流，排除了"只是压缩"。
+
+### 3. 所有公开工具都绕开目录
+
+- `rpf9-explorer` README：**"The original archive directory is not decoded"**，
+  它靠 "Scan entire archive" 在全文里找可识别载荷
+- PercyStar README：**"Zero Circumvention / Zero Keys … Encrypted data is skipped untouched"**，
+  配套脚本是 `rpf9_carve.py`（carver 而非 parser），面板只报 "Found 1354 TXDs" 而不是全部条目
+- SixNG 对音频明说：**"Stream names are 29-bit hashes and are not recovered"**
+
+## 二、载荷是可读的
+
+| 类型 | 证据 |
+|---|---|
+| 贴图（TXd） | PercyStar `--dump-textures` 在 `textures.rpf` 枚举出 **1354 个 TXD**，导出 PNG 0 失败；文件名是真实资源名（`ffx_armor01_light01`、`pistol_glass_crack_decals`…），图像内容与名字吻合 |
+| 着色器 | 容器 `PS\x00\x09` 明文，**21,522 条**可完整枚举与反汇编（见 [shader-corpus.md](shader-corpus.md)） |
+| 视频 | `audio.rpf` 前 210 MB 扫到 34 个 Bink 特征（随机期望 0.05 次） |
+| 音频 | SixNG 扫出 7,160 个音库 / 1.6 M 流（Opus 可转封装，名字是哈希） |
+| 导航 | SixNG 解出 navmesh 与道路图（63,808 节点） |
+
+贴图带名字 ≠ 目录解开了：**名字来自 TXd 载荷内部**。
+
+## 三、结论修正记录（保留过程，避免重复踩坑）
+
+1. 最初判断"目录加密、一切不可读"——对 TOC 正确，对载荷过于悲观
+2. 看到 PercyStar 导出带名字的贴图后，误判为"目录可解"——错，那是载荷内嵌名
+3. 读到 PercyStar 的 "Zero Keys / Encrypted data is skipped untouched" 与 `rpf9_carve.py` 后回到正确判断
+
+教训：**"能导出带名字的资源"和"能解目录"是两件事**，判断前先看工具的导入方式和它的自我声明。
+
+## 四、复现方式
+
+```bash
+python tools/packaging/rpf9_probe.py <archive.rpf>          # 头字段 + 熵图 + 零填充 + 魔数 + zlib 探测
+PercyStar.exe --dump-textures <archive.rpf> <out> 40        # 贴图（需自备工具）
+```
