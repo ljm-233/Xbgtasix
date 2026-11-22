@@ -1,10 +1,14 @@
-; xgameruntime.dll: 手写实现（签名来自 GDK 真头文件）的导出清单。
-; 生成桩（src/generated/xgameruntime_exports.inc，来自 GDK 导入库）会在构建时追加到后面。
+; xgameruntime.dll: 手写实现的导出清单（签名来自 GDK 真头文件）。
+; 生成桩（src/generated/xgameruntime_exports.inc）在构建时追加到后面，这里列过的会被排除。
 XGameRuntimeInitialize
 XGameRuntimeInitializeWithOptions
 XGameRuntimeUninitialize
 XTaskQueueCreate
+XTaskQueueSubmitCallback
+XTaskQueueTerminate
+XTaskQueueCloseHandle
 XUserAddAsync
+XUserAddResult
 XUserGetId
 XUserCloseHandle
 XStoreQueryProductForCurrentGameAsync
