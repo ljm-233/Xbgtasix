@@ -229,6 +229,12 @@ echo "== t21_user.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t21_user.exe"
 
+echo "== t22_extras.exe"
+"$CXX" "${FLAGS[@]}" tests/t22_extras/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t22_extras.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
