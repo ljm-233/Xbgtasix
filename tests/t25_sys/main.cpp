@@ -14,6 +14,9 @@
 
 #include "XDisplay.h"
 #include "XSystem.h"
+#include "XAccessibility.h"
+#include "XError.h"
+#include "XLauncher.h"
 #include "XThread.h"
 
 #include "xbgtasix/trace.h"
@@ -25,7 +28,6 @@
 // 只用到这两个运行时入口；手写声明只为减少头文件依赖，签名与 XGameRuntime.h /
 // XAsync.h 一致（HRESULT WINAPI，bool 走 C++ bool）。
 extern "C" HRESULT WINAPI XGameRuntimeInitialize(void);
-extern "C" HRESULT WINAPI XAsyncGetStatus(void* async_block, bool wait);
 
 // XAsyncBlock 的逐字镜像（XAsync.h:39）：queue, context, callback, internal。
 // 本模块目前 0 个 *Async，但下面的导出面探针要在"以后有人加了异步却不让它完成"时炸出来。
@@ -234,6 +236,25 @@ int main(int argc, char** argv) {
         } else {
             ok(true, "跳过 *Async 探针（静态链接，无 DLL 导出表）");
         }
+    }
+
+
+    // ---- XLaunch / XClosedCaption / XError（追加）----
+    {
+        // 空 URI 必须拒绝，而不是把空串交给 ShellExecute
+        ok(XLaunchUri(nullptr, "") == E_INVALIDARG, "XLaunchUri(空串) = E_INVALIDARG");
+        ok(XLaunchUri(nullptr, nullptr) == E_INVALIDARG, "XLaunchUri(nullptr) = E_INVALIDARG");
+
+        ok(SUCCEEDED(XClosedCaptionSetEnabled(true)), "ClosedCaptionSetEnabled(true)");
+        XClosedCaptionProperties props;
+        std::memset(&props, 0xCC, sizeof(props));
+        const HRESULT ccr = XClosedCaptionGetProperties(&props);
+        ok(SUCCEEDED(ccr), "ClosedCaptionGetProperties");
+        ok(props.Enabled == true, "属性里的 Enabled 被填写（非 0xCC 残值）");
+
+        XErrorSetCallback(nullptr, nullptr);   // 不应崩溃
+        XErrorSetOptions(XErrorOptions::None, XErrorOptions::None);
+        ok(true, "XError 设置回调/选项不崩溃");
     }
 
     xbgtasix::logf("[t25] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");
