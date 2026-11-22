@@ -16,6 +16,7 @@ if [ "${1:-}" = "--only" ]; then ONLY=${2:-}; fi
 
 BIN=build
 CFG=${XBGTASIX_CONFIG:-"D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK/MicrosoftGame.Config"}
+PKG=${XBGTASIX_PKG:-"D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK"}
 MODEL=${XBGTASIX_MODEL:-"D:/GTA6/out_models2/pantscargo_mr1_002_disheveled_mw_long_full_dr.obj"}
 TEX=${XBGTASIX_TEXTURE:-"D:/GTA6/out_tex_all/blank_midgrey.png"}
 # Windows 原生调用拿不了 MSYS 的 /d/... 路径，统一转成 D:/... 形式
@@ -106,9 +107,9 @@ run_one t18 t18_package.exe "$CFG"
 run_one t19 t19_save.exe "$CFG"
 run_one t20 t20_taskqueue2.exe
 run_one t21 t21_user.exe
+run_one t22 t22_extras.exe "$CFG" "$PKG"
 run_one t15 t15_budget.exe
 
-PKG=${XBGTASIX_PKG:-"D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK"}
 if [ -d "$PKG" ]; then
   run_py t16 tools/check_real_dlls.py "$PKG"
 else
