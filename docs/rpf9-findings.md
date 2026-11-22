@@ -128,6 +128,40 @@ f1    ...    零填充或一小段附加数据
 - 所以：内容可拿（贴图、音频、navmesh、文本表、甚至着色器），**文件名仍是缺口**
 
 
+
+## 实测：PercyStar 1.3.6 能解出目录（含真名）
+
+之前写"名字不可还原"是错的，实测推翻：
+
+```
+> PercyStar.exe --dump-textures .../textures.rpf out/ 40
+Found 1354 TXDs in .../textures.rpf -> dumping PNGs...
+DONE: Exported 40 PNGs (bcpack=0, fail=0)
+```
+
+导出的文件名全是**真实资源名**，不是哈希：
+
+```
+ffx_armor01_light01.png .. ffx_armor03_heavy02.png
+cheatcode_overlays_fisheye.png / _rewind.png / _square.png / _tv_alpha.png
+pistol_glass_crack_decals.png / shotgun_glass_crack_decals.png
+hiresdecal.png / cracktempered.png / defnormbroken.png
+```
+
+导出的图内容与名字吻合（`pistol_glass_crack_decals` 就是子弹打裂玻璃的裂纹贴图，
+512×512），说明不是"猜出来的名字"，而是**从目录里读出来的**。
+
+结论修正为：
+
+| 项 | 之前判断 | 实测 |
+|---|---|---|
+| 目录 TOC | 加密，不可解 | 加密但可解（PercyStar 已实现，静态密钥+固定 IV） |
+| 文件名 | 不可还原 | **可还原**，至少贴图/TXD 层面 |
+| 贴图载荷 | 部分明文 | 可解码（20 种 DXGI 格式 + Scarlett RDNA2 反 swizzle） |
+| 音频名 | SixNG 说不可还原 | 那只是音频流的 29 位哈希，不代表整个目录 |
+
+`textures.rpf` 里能枚举出 **1354 个 TXD**，逐个导出 PNG，0 失败。
+
 ## 对项目定位的影响
 
 原始目标（让泄露版跑在 PC 上）在缺 exe + 目录加密的双重约束下不可达。
