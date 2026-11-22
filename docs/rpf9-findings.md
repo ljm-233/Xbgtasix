@@ -162,6 +162,47 @@ hiresdecal.png / cracktempered.png / defnormbroken.png
 
 `textures.rpf` 里能枚举出 **1354 个 TXD**，逐个导出 PNG，0 失败。
 
+
+## 更正更正：PercyStar 并不解目录
+
+上一条写"PercyStar 能解出目录（含真名）"，也不对。它自己的 README 明确写：
+
+> **Zero Circumvention / Zero Keys:** Contains **no** decryption routines, encryption keys, hashes,
+> DRM bypasses, or access-control workarounds. **Encrypted data is skipped untouched.**
+
+旁证：
+- 它的脚本清单里是 `scripts/rpf9_carve.py`（**carver**，不是 parser）
+- 面板只报 "Found 1354 **TXDs**"——如果解了目录，应该能列出**所有**条目，而不是只有 TXD
+- 它用"Whole-Folder & Single-Archive Scanning"、`scan_cache_v8.tsv`
+
+所以正确的模型是：
+
+| 层 | 状态 |
+|---|---|
+| 目录 TOC | **仍然加密，公开工具不解** |
+| 载荷 | 部分明文/已知压缩（TXd、shader 容器、Bink、Opus…），靠特征扫描定位 |
+| 名字 | 只在**载荷自带名字**时可得（TXd 内嵌纹理名）；音频流是 29 位哈希，拿不到 |
+
+也就是说：贴图带名字 ≠ 目录解开了，名字是从 TXd 负载里读的。
+
+**但这不阻塞"让游戏跑"**：游戏自己的代码里有 TOC 解码器（缺的是那个 exe）。
+TOC 加密只阻塞**我们的工具链**，不阻塞游戏。
+
+## 着色器实测（同一工具，`--disasm-shaders`）
+
+```
+Loaded PS\x00\x09 (0x65F41EDD, drv 930.048.020): 21522 shaders, 25471 Gfx PSOs, 2693 Compute PSOs
+Stage totals: PS=9535 VS=1343 CS=3082 NGG/Mesh=7498 RT_BVH64=64
+Wrote shaders_index.csv + 3 shaders (.asm/.hlsl/.spv)
+```
+
+- 着色器容器（`PS\x00\x09`）**是明文的**，可完整枚举
+- 阶段分布说明游戏大量使用 **mesh shader（NGG）** 与 **硬件光追（BVH64）**
+- 输出包含 AMD GFX10.3 汇编、lift 出来的 HLSL SM 6.6、以及 SPIR-V 1.5
+- 索引 CSV 列：`stage, pso_hash, code_off, code_size, insns, bindings, has_rt, has_ngg, numthreads`
+
+结论：**着色器墙不存在**——数据可读、可反汇编、可 lift。
+
 ## 对项目定位的影响
 
 原始目标（让泄露版跑在 PC 上）在缺 exe + 目录加密的双重约束下不可达。
