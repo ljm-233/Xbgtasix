@@ -26,6 +26,7 @@
 | **光追 DXR（L7）** | ✅ | `t6_rt`，`RaytracingTier=11`（1.1），BLAS+TLAS+SBT，命中绿/未命中蓝 |
 | **模型查看器（L8）** | ✅ | `t8_model`：OBJ+PNG → 我们的管线，逐顶点法线 + 半兰伯特，输出 PNG |
 | **异步运行时（L9）** | ✅ | `t9_async`：真任务队列（64 回调并发）+ 模拟用户流程 |
+| **集成验证（L10）** | ✅ | `t10_integration`：读真配置得 TitleId=0x7952987A；Manual 队列 / 延迟提交 / XAsync 状态 |
 | `d3d12_xs` 导出面 | ✅ | 4 手写 + 14 原生转发 = 18 |
 | `xgameruntime` 导出面 | ✅ | 10 手写 + 482 生成桩 = 492 |
 | 游戏 exe | ❌ 缺失 | 泄露包内没有 `game_scarlett_master.exe` |
@@ -46,6 +47,7 @@ cd build
 ./t6_rt.exe                # DXR：BLAS + TLAS + 状态对象 + SBT + DispatchRays
 ./t8_model.exe model.obj [tex.png] out.png   # 渲染导出的游戏模型
 ./t9_async.exe             # 任务队列回调 + 用户流程
+./t10_integration.exe <MicrosoftGame.Config>   # 端到端：读配置 + Manual 队列 + 延迟提交
 ```
 
 九个测试全部**离屏渲染 + 像素/字节级断言**，没有显示器也能跑，`rc=0` 才有意义。
@@ -129,6 +131,7 @@ Xbgtasix/
   tests/t6_rt/                 L7：DXR（BLAS/TLAS/状态对象/SBT/DispatchRays）
   tests/t8_model/              L8：OBJ+PNG 模型查看器（WIC 解码/编码）
   tests/t9_async/              L9：任务队列 + 用户流程
+  tests/t10_integration/       L10：端到端（真配置 + Manual 队列 + 延迟提交 + XAsync）
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK

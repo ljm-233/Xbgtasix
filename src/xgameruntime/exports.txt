@@ -14,3 +14,7 @@ XUserCloseHandle
 XStoreQueryProductForCurrentGameAsync
 XSystemGetDeviceType
 XGameGetXboxTitleId
+XTaskQueueDispatch
+XTaskQueueSubmitDelayedCallback
+XAsyncGetStatus
+XAsyncCancel
