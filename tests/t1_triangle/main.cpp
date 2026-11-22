@@ -299,5 +299,7 @@ int main(int argc, char** argv) {
         dev->Release();
     }
     xbgtasix::logf("[t1] done rc=%d failures=%d", rc, g_fail);
-    return rc;
+    // 返回码必须同时反映 D3D 调用失败：只看像素会让 CreateRenderTargetView/
+    // CreateFence 之类的失败静默通过（审查发现 6 个测试都有这个问题）
+    return rc ? rc : (g_fail ? 1 : 0);
 }
