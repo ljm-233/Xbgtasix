@@ -49,10 +49,24 @@ T resolve(const char* name) {
 //   best（默认） 挑独显
 //   default      保持系统默认（传 nullptr 给真 d3d12）
 //   0/1/2...     指定 DXGI 枚举下标
+// 选卡结果缓存：DXGI 枚举 + 每候选 GetDesc1 在有些驱动上要几毫秒，
+// 而基准实测"每次 D3D12CreateDevice( nullptr ) 都重新枚举"会把启动拖慢。
+// 缓存持有一个引用，每次返回时再 AddRef 给调用方释放。
+std::mutex g_pick_mu;
+IDXGIAdapter1* g_picked = nullptr;
+bool g_picked_valid = false;
+
 IDXGIAdapter1* pick_adapter() {
     char mode[32] = {0};
     GetEnvironmentVariableA("XBGTASIX_ADAPTER", mode, sizeof(mode));
     if (_stricmp(mode, "default") == 0) return nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_pick_mu);
+        if (g_picked_valid) {
+            if (g_picked) g_picked->AddRef();
+            return g_picked;
+        }
+    }
 
     IDXGIFactory1* factory = nullptr;
     if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1, reinterpret_cast<void**>(&factory))) || !factory)
@@ -81,6 +95,14 @@ IDXGIAdapter1* pick_adapter() {
         a->Release();
     }
     factory->Release();
+    {
+        std::lock_guard<std::mutex> lock(g_pick_mu);
+        if (!g_picked_valid) {
+            g_picked = best;          // 缓存持有这份引用
+            g_picked_valid = true;
+        }
+    }
+    if (best && best == g_picked) best->AddRef();   // 给本次调用方
     if (best) {
         DXGI_ADAPTER_DESC1 d{};
         best->GetDesc1(&d);

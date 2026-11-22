@@ -272,6 +272,12 @@ echo "== t28_speech.exe"
     -ldxgi -ldxguid -ld3d12 -lole32 \
     -o "$OUT/t28_speech.exe"
 
+echo "== t29_perf.exe"
+"$CXX" "${FLAGS[@]}" tests/t29_perf/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t29_perf.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \

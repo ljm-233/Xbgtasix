@@ -16,6 +16,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -234,8 +235,25 @@ struct AsyncState {
     std::vector<unsigned char> result;
 };
 
+// 等待用的同步对象：原来 XAsyncGetStatus(wait=true) 用 Sleep(1) 轮询，
+// 而 Windows 默认计时器精度是 15.6 ms —— 基准实测往返 15.6 ms。
+// 改成条件变量后完成即唤醒。
+struct AsyncSync {
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+};
+
 std::mutex g_async_mu;
 std::unordered_map<XAsyncBlock*, AsyncState> g_async;
+std::unordered_map<XAsyncBlock*, std::shared_ptr<AsyncSync>> g_async_sync;
+
+std::shared_ptr<AsyncSync> sync_for(XAsyncBlock* a) {
+    std::lock_guard<std::mutex> lock(g_async_mu);
+    auto& sp = g_async_sync[a];
+    if (!sp) sp = std::make_shared<AsyncSync>();
+    return sp;
+}
 
 // 完成通知：标记完成 + 调回调（GDK 语义：回调在 completion 端口执行）
 void complete_async(XAsyncBlock* a, HRESULT status = S_OK) {
@@ -245,6 +263,12 @@ void complete_async(XAsyncBlock* a, HRESULT status = S_OK) {
         st.done = true;
         st.status = status;
     }
+    // 先唤醒等待者，再调回调：等待方不必等到回调结束
+    if (auto sp = sync_for(a)) {
+        std::lock_guard<std::mutex> lock(sp->m);
+        sp->done = true;
+    }
+    if (auto sp = sync_for(a)) sp->cv.notify_all();
     if (a->callback) a->callback(a);
 }
 
@@ -645,7 +669,12 @@ STDAPI XAsyncGetStatus(XAsyncBlock* asyncBlock, bool wait) noexcept {
     if (!asyncBlock) return E_INVALIDARG;
     if (is_async_done(asyncBlock)) return async_status(asyncBlock);
     if (!wait) return E_PENDING;
-    for (int i = 0; i < 5000 && !is_async_done(asyncBlock); ++i) Sleep(1);
+    auto sp = sync_for(asyncBlock);
+    if (sp) {
+        std::unique_lock<std::mutex> lock(sp->m);
+        // 超时只作兜底（5 秒），正常情况下完成即被唤醒，不再受 15.6ms 计时器粒度影响
+        sp->cv.wait_for(lock, std::chrono::seconds(5), [&] { return sp->done; });
+    }
     return is_async_done(asyncBlock) ? async_status(asyncBlock) : E_PENDING;
 }
 
@@ -666,6 +695,7 @@ STDAPI XAsyncRun(XAsyncBlock* asyncBlock, XAsyncWork* work) noexcept {
     {
         std::lock_guard<std::mutex> lock(g_async_mu);
         g_async[asyncBlock] = AsyncState{};
+        g_async_sync.erase(asyncBlock);
     }
     std::thread([asyncBlock, work] {
         const HRESULT hr = work(asyncBlock);
