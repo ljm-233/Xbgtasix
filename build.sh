@@ -154,6 +154,12 @@ echo "== t11_storage.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t11_storage.exe"
 
+echo "== t12_sheet.exe"
+"$CXX" "${FLAGS[@]}" tests/t12_sheet/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 -lole32 -lwindowscodecs \
+    -o "$OUT/t12_sheet.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
