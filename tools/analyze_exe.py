@@ -18,11 +18,9 @@ import sys
 SHIMMED = ("xgameruntime.dll", "xmem.dll", "d3d12_xs.dll",
            "xgameplatform.dll", "d3d12_x.dll")
 # 这些在 PC 上本来就存在
-NATIVE_PREFIX = ("api-ms-win", "vcruntime", "msvcp", "ucrtbase", "concrt", "vccorlib",
-                 "kernel32", "kernelbase", "user32", "advapi32", "ws2_32", "winhttp",
-                 "d3d12", "dxgi", "xinput", "xaudio2", "bcrypt", "crypt32", "ole32",
-                 "oleaut32", "shlwapi", "xcurl", "libhttpclient", "bink", "amd_fidelityfx",
-                 "xboxbvh")
+NATIVE_PREFIX = ("kernel32", "user32", "d3d12", "dxgi", "ole32", "oleaut32",
+                 "vcruntime", "msvcp", "api-ms-win", "ucrtbase", "advapi32",
+                 "xaudio2_9", "ws2_32", "bcrypt", "crypt32")
 
 
 def is_native(name):

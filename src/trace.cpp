@@ -2,6 +2,7 @@
 #include "xbgtasix/trace.h"
 
 #include <windows.h>
+#include <winternl.h>   // RtlCaptureStackBackTrace
 
 #include <mutex>
 #include <set>
@@ -55,6 +56,12 @@ void logf(const char* fmt, ...) {
     }
 }
 
+// 环境变量只读一次：桩是热路径，而且运行期改 env 会让行为不确定
+UnimplMode unimpl_mode_cached() {
+    static const UnimplMode mode = unimpl_mode();
+    return mode;
+}
+
 void unimpl(const char* api) {
     {
         std::lock_guard<std::mutex> lock(g_mu);
@@ -64,8 +71,22 @@ void unimpl(const char* api) {
         }
     }
     logf("[xbgtasix] UNIMPLEMENTED: %s", api);
-    if (unimpl_mode() == UnimplMode::Stop) {
+    if (unimpl_mode_cached() == UnimplMode::Stop) {
+        // 退出前先留下"谁调的"：只有 API 名对定位没帮助，栈比名字有用得多。
+        void* frames[24] = {0};
+        const USHORT n = RtlCaptureStackBackTrace(0, 24, frames, nullptr);
+        for (USHORT i = 0; i < n; ++i) {
+            logf("[xbgtasix]   #%-2u %p", i, frames[i]);
+        }
         logf("[xbgtasix] stop (set XBGTASIX_UNIMPL=log to continue)");
+        // ExitProcess 会等所有 DLL 的 DllMain(detach)：若我们此刻正持有 loader lock，
+        // 就会互等死锁。TerminateProcess 跳过这些回调，适合"诊断性退出"。
+        if (GetModuleHandleA("ntdll.dll")) {
+            using PFN = VOID(WINAPI*)(HANDLE, UINT);
+            auto fn = reinterpret_cast<PFN>(
+                GetProcAddress(GetModuleHandleA("kernel32.dll"), "TerminateProcess"));
+            if (fn) fn(GetCurrentProcess(), 70);
+        }
         ExitProcess(70);
     }
 }

@@ -106,9 +106,16 @@ int main(int argc, char** argv) {
     xbgtasix::logf("[t19] 写后剩余 %lld MB（减少 %lld KB）",
                    static_cast<long long>(quota1 / (1024 * 1024)), delta / 1024);
     ok(quota1 >= 0, "配额不为负");
-    ok(delta >= static_cast<long long>(n), "配额减少量 >= 写入量");
+    // 审查意见：>= 对配额测试等于没断言，多扣 100MB 也能过。改为精确匹配（按 64KB 块取整）
+    const long long blocks = static_cast<long long>((n + 65535) / 65536) * 65536;
+    ok(delta == blocks, "配额减少量恰好等于写入量（按 64KB 圆整）");
 
+    // 删掉文件后配额应回到初值
     DeleteFileA(file.c_str());
+    int64_t quota2 = -1;
+    ok(SUCCEEDED(XGameSaveFilesGetRemainingQuota(nullptr, "slot1", &quota2)), "GetRemainingQuota(删除后)");
+    ok(quota2 >= quota0, "删除后配额恢复（>= 写前）");
+
     xbgtasix::logf("[t19] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
 }

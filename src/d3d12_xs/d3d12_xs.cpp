@@ -109,7 +109,14 @@ __declspec(dllexport) HRESULT WINAPI D3D12CreateDevice(IUnknown* adapter,
         picked = pick_adapter();
         if (picked) adapter = picked;
     }
-    const HRESULT hr = pfn(adapter, min_level, riid, device);
+    HRESULT hr = pfn(adapter, min_level, riid, device);
+    if (FAILED(hr) && picked) {
+        // 挑中的独显可能不支持要求的最小 feature level 或驱动异常；
+        // 回落一次系统默认，而不是让整个游戏起不来
+        xbgtasix::logf("[d3d12_xs] 选定适配器失败 hr=0x%08lx，回落到系统默认",
+                       static_cast<unsigned long>(hr));
+        hr = pfn(nullptr, min_level, riid, device);
+    }
     if (picked) picked->Release();
     return hr;
 }

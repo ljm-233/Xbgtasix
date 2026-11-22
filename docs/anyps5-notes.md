@@ -72,7 +72,7 @@ Xbox 侧等价物：`XMemAlloc` 的 placement 语义、大页对齐、
 | PE 加载 | 自写 loader（参考 Leonida 的 PE loader） | 手工映射 + 导入 thunk，别用系统 LoadLibrary |
 | D3D12 → Vulkan | fork **vkd3d-proton** | 补 xs 变体入口：`D3D12CreateDevice`、residency、`D3D12SerializeVersionedRootSignature` |
 | DXBC → SPIR-V | **dxil-spirv** / dxc 反汇编 | vkd3d-proton 内部已用，可直接复用 |
-| 内存 | `xmem.dll` 六个导出：Alloc/Free/VirtualQuery/GetWorkingSetStatistics | 先 `VirtualAlloc` 顶，再逐项对齐语义 |
+| 内存 | `xmem.dll` 4 个导出：Alloc/Free/VirtualQuery/GetWorkingSetStatistics | 先 `VirtualAlloc` 顶，再逐项对齐语义 |
 | 音频 | XAudio2_9 → FAudio，或 wine 的 xaudio2 | Bink 只能先静音（RAD 不开源） |
 | 输入 | SDL3 | 手柄/键鼠映射 |
 | 测试输入 | **Microsoft GDK 公开样例** | 合法、可编译、有头文件 |

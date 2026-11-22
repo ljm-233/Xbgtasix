@@ -10,6 +10,7 @@ jobs:
   python-tools:
     name: Python 工具自检
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,6 +22,7 @@ jobs:
   docs-links:
     name: 文档相对链接
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,8 +33,7 @@ jobs:
   windows-build:
     name: Windows 构建 + 全套测试（需要 GDK，缺则跳过）
     runs-on: windows-latest
-    # 完整构建依赖微软 GDK 头文件（不入库），所以这一步允许失败但会显示原因
-    continue-on-error: true
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -46,13 +47,18 @@ jobs:
             echo "have=0" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 没有 GDK —— 跳过（这是预期行为，不算失败）
+      - name: 没有 GDK —— 明确标记"未覆盖"，不假装通过
         if: steps.gdk.outputs.have == '0'
         shell: bash
         run: |
-          echo "::notice::未找到 ../gdk/include_clean 与 ../gdk/lib/xgameruntime.lib"
-          echo "微软的 GDK 头/库不入库。要跑这一步，请把 GDK 解到仓库旁的 ../gdk/。"
-          echo "获取方式见 docs/publish.md 的说明。"
+          echo "::warning::未找到 ../gdk/include_clean 与 ../gdk/lib/xgameruntime.lib，构建步骤未执行"
+          {
+            echo "### windows-build: 未覆盖（缺 GDK）"
+            echo ""
+            echo "微软 GDK 头/库不入库，runner 上不存在 \`../gdk/\`。"
+            echo "本 job 因此**没有编译过任何 C++**，不能当作构建通过。"
+            echo "要真正验证：把 GDK 解到仓库旁的 \`../gdk/\`（见 docs/publish.md）。"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 安装 MinGW 与 Vulkan SDK（dxc）
         if: steps.gdk.outputs.have == '1'
@@ -64,12 +70,12 @@ jobs:
       - name: 构建
         if: steps.gdk.outputs.have == '1'
         shell: bash
-        run: ./build.sh
+        run: bash ./build.sh
 
       - name: 全套测试
         if: steps.gdk.outputs.have == '1'
         shell: bash
-        run: ./tools/run_suite.sh
+        run: bash ./tools/run_suite.sh
 
       - name: 上传测试报告
         if: steps.gdk.outputs.have == '1'

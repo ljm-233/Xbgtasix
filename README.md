@@ -63,7 +63,7 @@
 返回码语义：`0 = PASS`、`2 = SKIP`（本机不支持该能力，如无光追）、其它 `FAIL`。
 同时写 `build/suite/report.txt`（TSV）供脚本消费。
 
-实测：**21 PASS / 0 SKIP / 0 FAIL，约 5.6 秒**（`t6_rt` 首次约 30 秒，之后走驱动缓存降到 0.4 秒）。
+实测：**21 PASS / 0 SKIP / 0 FAIL，约 12 秒（21 项）**（`t6_rt` 首次约 30 秒，之后走驱动缓存降到 0.4 秒）。
 
 只跑子集：`./tools/run_suite.sh --only t5,t6`；强制核显：`XBGTASIX_ADAPTER=0 ./tools/run_suite.sh`。
 
