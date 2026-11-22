@@ -29,6 +29,8 @@
 #include "XStore.h"
 #include "XSystem.h"
 #include "XGameSaveFiles.h"
+#include "XGameActivation.h"
+#include "XGameRuntimeFeature.h"
 #include "XPackage.h"
 #include "XPersistentLocalStorage.h"
 #include "XTaskQueue.h"
@@ -332,6 +334,7 @@ struct TaskQueueState {
 
 struct UserState {
     uint64_t id = 0;
+    std::atomic<int> refs{1};
 };
 
 std::mutex g_user_mu;
@@ -602,9 +605,149 @@ STDAPI XUserGetId(XUserHandle user, uint64_t* userId) noexcept {
     return S_OK;
 }
 
+// 本地模拟用户：没有微软账号、没有网络，但查询类接口可以有稳定语义
+STDAPI XUserGetGamertag(XUserHandle user, XUserGamertagComponent component, size_t gamertagSize,
+                        char* gamertag, size_t* gamertagUsed) noexcept {
+    if (!user || !gamertag) return E_INVALIDARG;
+    (void)component;   // 只是显示名，不同组件给同一份
+    const char* name = "Player";
+    const size_t need = std::strlen(name) + 1;
+    if (gamertagUsed) *gamertagUsed = need;
+    if (gamertagSize < need) return E_NOT_SUFFICIENT_BUFFER;
+    std::memcpy(gamertag, name, need);
+    return S_OK;
+}
+
+STDAPI XUserGetLocalId(XUserHandle user, XUserLocalId* localId) noexcept {
+    if (!user || !localId) return E_INVALIDARG;
+    localId->value = reinterpret_cast<UserState*>(user)->id;
+    return S_OK;
+}
+
+STDAPI XUserGetIsGuest(XUserHandle user, bool* isGuest) noexcept {
+    if (!user || !isGuest) return E_INVALIDARG;
+    *isGuest = false;
+    return S_OK;
+}
+
+STDAPI XUserGetState(XUserHandle user, XUserState* state) noexcept {
+    if (!user || !state) return E_INVALIDARG;
+    *state = XUserState::SignedIn;   // 本地用户永远是"已登录"
+    return S_OK;
+}
+
+STDAPI XUserFindUserById(uint64_t userId, XUserHandle* user) noexcept {
+    if (!user) return E_INVALIDARG;
+    if (userId == 0) return E_INVALIDARG;
+    auto* u = new (std::nothrow) UserState();
+    if (!u) return E_OUTOFMEMORY;
+    u->id = userId;
+    *user = reinterpret_cast<XUserHandle>(u);
+    return S_OK;
+}
+
 STDAPI_(void) XUserCloseHandle(XUserHandle user) noexcept {
     if (!user) return;
-    delete reinterpret_cast<UserState*>(user);
+    auto* u = reinterpret_cast<UserState*>(user);
+    if (u->refs.fetch_sub(1) > 1) return;   // DuplicateHandle 过的不释放
+    delete u;
+}
+
+// ---- XUser 本地可实现的查询/句柄管理（签名全部对照 XUser.h） ----
+
+STDAPI XUserGetMaxUsers(uint32_t* maxUsers) noexcept {
+    if (!maxUsers) return E_INVALIDARG;
+    *maxUsers = 8;
+    return S_OK;
+}
+
+STDAPI_(int32_t) XUserCompare(XUserHandle user1, XUserHandle user2) noexcept {
+    if (user1 == user2) return 0;
+    if (!user1) return -1;
+    if (!user2) return 1;
+    const uint64_t a = reinterpret_cast<UserState*>(user1)->id;
+    const uint64_t b = reinterpret_cast<UserState*>(user2)->id;
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+STDAPI XUserDuplicateHandle(XUserHandle user, XUserHandle* duplicatedUser) noexcept {
+    if (!user || !duplicatedUser) return E_INVALIDARG;
+    reinterpret_cast<UserState*>(user)->refs.fetch_add(1);
+    *duplicatedUser = user;
+    return S_OK;
+}
+
+STDAPI_(bool) XUserIsStoreUser(XUserHandle user) noexcept {
+    return user != nullptr;
+}
+
+STDAPI_(bool) XUserIsSignOutPresent() noexcept {
+    return false;   // 本地用户不会被系统登出
+}
+
+STDAPI XUserGetAgeGroup(XUserHandle user, XUserAgeGroup* ageGroup) noexcept {
+    if (!user || !ageGroup) return E_INVALIDARG;
+    *ageGroup = XUserAgeGroup::Adult;
+    return S_OK;
+}
+
+STDAPI XUserCheckPrivilege(XUserHandle user, XUserPrivilegeOptions options, XUserPrivilege privilege,
+                           bool* hasPrivilege, XUserPrivilegeDenyReason* reason) noexcept {
+    (void)options;
+    (void)privilege;
+    if (!user || !hasPrivilege) return E_INVALIDARG;
+    *hasPrivilege = true;   // 本地用户拥有全部特权
+    if (reason) *reason = static_cast<XUserPrivilegeDenyReason>(0);
+    return S_OK;
+}
+
+STDAPI XUserFindUserByLocalId(XUserLocalId localId, XUserHandle* user) noexcept {
+    if (!user) return E_INVALIDARG;
+    if (localId.value == 0) return E_INVALIDARG;
+    auto* u = new (std::nothrow) UserState();
+    if (!u) return E_OUTOFMEMORY;
+    u->id = localId.value;
+    *user = reinterpret_cast<XUserHandle>(u);
+    return S_OK;
+}
+
+// 登录态变化事件：注册表保留，事件永不触发（PC 上没有系统级登录态）
+std::mutex g_user_evt_mu;
+uint64_t g_user_evt_next = 1;
+
+STDAPI XUserRegisterForChangeEvent(XTaskQueueHandle queue, void* context,
+                                   XUserChangeEventCallback* callback,
+                                   XTaskQueueRegistrationToken* token) noexcept {
+    (void)queue;
+    (void)context;
+    (void)callback;
+    if (!token) return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_user_evt_mu);
+    token->token = g_user_evt_next++;
+    return S_OK;
+}
+
+STDAPI_(bool) XUserUnregisterForChangeEvent(XTaskQueueRegistrationToken token,
+                                            bool wait) noexcept {
+    (void)token;
+    (void)wait;
+    return true;
+}
+
+STDAPI XUserSignOutAsync(XUserHandle user, XAsyncBlock* async) noexcept {
+    if (!user || !async) return E_INVALIDARG;
+    {
+        std::lock_guard<std::mutex> lock(g_async_mu);
+        g_async[async].done = true;
+        g_async[async].status = S_OK;
+    }
+    if (async->callback) async->callback(async);
+    return S_OK;
+}
+
+STDAPI XUserSignOutResult(XAsyncBlock* async) noexcept {
+    if (!async) return E_INVALIDARG;
+    return is_async_done(async) ? S_OK : E_PENDING;
 }
 
 // ---- 持久化本地存储 ----
@@ -820,6 +963,61 @@ STDAPI XStoreQueryProductForCurrentGameAsync(const XStoreContextHandle storeCont
     (void)async;
     XB_UNIMPL("XStoreQueryProductForCurrentGameAsync");
     return E_NOTIMPL;
+}
+
+// ---- 能力门（返回值直接决定游戏走哪条分支，必须是真的） ----
+
+STDAPI_(bool) XGameRuntimeIsFeatureAvailable(XGameRuntimeFeature feature) noexcept {
+    // 我们确实实现了的：XAsync / XPackage / XPersistentLocalStorage / XTaskQueue / XUser / XError
+    // 明确没实现的主机功能一律 false —— 宁可让游戏走降级路径，也不要让它以为能用
+    switch (feature) {
+        case XGameRuntimeFeature::XAsync:
+        case XGameRuntimeFeature::XPackage:
+        case XGameRuntimeFeature::XPersistentLocalStorage:
+        case XGameRuntimeFeature::XTaskQueue:
+        case XGameRuntimeFeature::XUser:
+        case XGameRuntimeFeature::XGameSave:
+        case XGameRuntimeFeature::XError:
+        case XGameRuntimeFeature::XThread:
+        case XGameRuntimeFeature::XGame:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// ---- 事件订阅（注册表保留，事件永不触发；Unregister 必须返回 true） ----
+
+std::mutex g_game_evt_mu;
+std::vector<XTaskQueueRegistrationToken> g_game_evt_tokens;
+uint64_t g_game_evt_next = 1;
+
+STDAPI XGameActivationRegisterForEvent(XTaskQueueHandle queue, void* context,
+                                       XGameActivationCallback* callback,
+                                       XTaskQueueRegistrationToken* token) noexcept {
+    (void)queue;
+    (void)context;
+    (void)callback;
+    if (!token) return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_game_evt_mu);
+    token->token = g_game_evt_next++;
+    g_game_evt_tokens.push_back(*token);
+    xbgtasix::logf("[xgamert] RegisterForEvent(token=%llu)，PC 上事件不会触发",
+                   static_cast<unsigned long long>(token->token));
+    return S_OK;
+}
+
+STDAPI_(bool) XGameActivationUnregisterForEvent(XTaskQueueRegistrationToken token,
+                                                bool wait) noexcept {
+    (void)wait;
+    std::lock_guard<std::mutex> lock(g_game_evt_mu);
+    for (auto it = g_game_evt_tokens.begin(); it != g_game_evt_tokens.end(); ++it) {
+        if (it->token == token.token) {
+            g_game_evt_tokens.erase(it);
+            return true;
+        }
+    }
+    return true;   // 注销未注册的 token 也返回 true（GDK 语义：不报错）
 }
 
 // ---- 系统信息 ----
