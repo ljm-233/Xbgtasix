@@ -38,6 +38,7 @@
 
 ```bash
 ./build.sh                 # MinGW64 + g++ + dxc
+./tools/run_suite.sh       # 一条命令跑全部 15 个测试（带机器可读报告）
 cd build
 ./t0_hello.exe --smoke     # 加载 + XMem + 设备
 ./t1_triangle.exe          # 三角形 + 像素校验
@@ -52,9 +53,12 @@ cd build
 ./t11_storage.exe <MicrosoftGame.Config>       # 持久化存储：路径/写入/容量
 ```
 
-九个测试全部**离屏渲染 + 像素/字节级断言**，没有显示器也能跑，`rc=0` 才有意义。
-实测总耗时约 31 秒，其中 `t6_rt` 单占 ~30 秒 —— 那是驱动首次编译光追管线的固定成本
-（`SetPipelineState1` 处阻塞，与本项目代码无关），其余测试都在 0.2–0.5 秒。
+**15 个测试全部离屏渲染 + 像素/字节级断言**，没有显示器也能跑。
+统一入口 `./tools/run_suite.sh`，返回码约定：`0=PASS / 2=SKIP（本机不支持该能力）/ 其它=FAIL`，
+并写一份 `build/suite/report.txt`（TSV）供脚本消费。
+
+实测：全套 **15 PASS / 0 SKIP / 0 FAIL，约 5.6 秒**。
+`t6_rt` 首次运行要 ~30 秒（驱动编译光追管线），之后走驱动缓存降到 ~0.4 秒。
 
 依赖见文末。
 

@@ -10,12 +10,11 @@
 
 ```bash
 cd D:/GTA6/Xbgtasix && ./build.sh
-cd build
-./t0_hello.exe --smoke && ./t1_triangle.exe && ./t2_textured.exe && ./t3_xmem.exe \
-  && ./t4_bindless.exe && ./t5_mesh.exe && ./t6_rt.exe && ./t9_async.exe
+./tools/run_suite.sh          # 15 个测试一条命令，输出 PASS/SKIP/FAIL 表 + TSV 报告
 ```
 
-期望：全部 `rc=0`，`t3` 输出 `93 checks, 0 failures`，`t9` 输出 `failures=0 -> PASS`。
+期望：`15 PASS / 0 SKIP / 0 FAIL`。
+换机器时若某项返回 2（SKIP），说明该机不支持那项能力（如无光追），不算失败。
 
 ## exe 到手后（照这个顺序）
 
