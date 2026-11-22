@@ -298,6 +298,18 @@ echo "== t32_window.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t32_window.exe"
 
+echo "== t33_memory.exe"
+"$CXX" "${FLAGS[@]}" tests/t33_memory/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t33_memory.exe"
+
+echo "== t34_residency.exe"
+"$CXX" "${FLAGS[@]}" tests/t34_residency/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t34_residency.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \

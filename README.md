@@ -74,7 +74,7 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 
 ```bash
 ./build.sh                 # MinGW64 + g++ + dxc，产出 3 个 shim（约 90 秒）
-./tools/run_suite.sh       # 32 项测试一条命令，约 12 秒
+./tools/run_suite.sh       # 34 项测试一条命令，约 12 秒
 ./tools/ci_build.sh        # CI 同款：无 GDK 也能验 xmem 子集
 ```
 
@@ -199,7 +199,7 @@ Xbgtasix/
 |---|---|---|
 | `python-tools` | 合成样本自检 5 个 Python 工具 | 无依赖 |
 | `docs-links` | 检查 md 相对链接 | 无依赖 |
-| `windows-build` | **从 NuGet 拉官方 GDK**（`tools/fetch_gdk.py`）→ `tools/ci_build.sh` 跑**完整构建 + 全套 32 项**；拉不到时退化成"无 GDK 子集"，并在 summary 写明未覆盖部分 | GDK 走微软自己的 nuget.org 源，仓库不转发微软二进制 |
+| `windows-build` | **从 NuGet 拉官方 GDK**（`tools/fetch_gdk.py`）→ `tools/ci_build.sh` 跑**完整构建 + 全套 34 项**；拉不到时退化成"无 GDK 子集"，并在 summary 写明未覆盖部分 | GDK 走微软自己的 nuget.org 源，仓库不转发微软二进制 |
 
 ---
 

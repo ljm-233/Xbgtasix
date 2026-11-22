@@ -256,7 +256,9 @@ void test_query_after_free() {
     XMemFree(p);
     XMemVirtualQueryInfo info{};
     const bool got = XMemVirtualQuery(p, &info);
-    ok(!got || info.State == MEM_FREE, "qaf: freed region is MEM_FREE or query fails");
+    // 释放后地址可能仍在 isolate 区（保留但已 decommit），所以接受 MEM_FREE 或 MEM_RESERVE
+    ok(!got || info.State == MEM_FREE || info.State == MEM_RESERVE,
+       "qaf: 释放后区域已 free 或已 decommit（隔离区）");
     xbgtasix::logf("[t3] query-after-free: got=%d state=0x%lx", got ? 1 : 0,
                  static_cast<unsigned long>(info.State));
 }

@@ -12,6 +12,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -44,6 +45,17 @@ struct Header {
 };
 
 std::mutex g_mu;
+
+// 释放隔离区（quarantine）。
+// 为什么需要：只按地址匹配的话，一次延迟的 double free 若期间同址被重新分配，
+// 就会去释放**活的**分配。把刚释放的块先留着不还（最多 kQuarantineMax 个），
+// 地址就不会被立刻复用，这类假释放会走"unknown pointer"分支被记下来。
+constexpr size_t kQuarantineMax = 64;
+struct Quarantined {
+    void* raw;
+    size_t committed;
+};
+std::vector<Quarantined> g_quarantine;
 std::unordered_map<void*, Header> g_allocs;
 uint64_t g_live_bytes = 0;
 uint64_t g_live_count = 0;
@@ -149,7 +161,21 @@ __declspec(dllexport) void __cdecl XMemFree(void* ptr) {
         return;
     }
     if (poison_enabled()) std::memset(ptr, 0xDD, h.size);
-    VirtualFree(h.raw, 0, MEM_RELEASE);
+
+    // 先进隔离区：地址保留（防止同址立刻复用），但把物理页退掉（真实释放内存压力）
+    VirtualFree(h.raw, h.committed, MEM_DECOMMIT);
+
+    // 超过上限再真正归还最老的那个
+    void* to_free_raw = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_quarantine.push_back(Quarantined{h.raw, h.committed});
+        if (g_quarantine.size() > kQuarantineMax) {
+            to_free_raw = g_quarantine.front().raw;
+            g_quarantine.erase(g_quarantine.begin());
+        }
+    }
+    if (to_free_raw) VirtualFree(to_free_raw, 0, MEM_RELEASE);
 }
 
 // [推断] 字段口径直接映射 Windows MEMORY_BASIC_INFORMATION。主机上没有
