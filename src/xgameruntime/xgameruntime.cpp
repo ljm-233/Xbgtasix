@@ -13,6 +13,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <fstream>
 #include <mutex>
@@ -27,6 +28,7 @@
 #include "XGameRuntime.h"
 #include "XStore.h"
 #include "XSystem.h"
+#include "XPersistentLocalStorage.h"
 #include "XTaskQueue.h"
 #include "XUser.h"
 
@@ -95,6 +97,69 @@ void load_game_config() {
                    static_cast<unsigned long>(g_rt.title_id),
                    g_rt.store_id.empty() ? "?" : g_rt.store_id.c_str(),
                    g_rt.msa_app_id.empty() ? "?" : g_rt.msa_app_id.c_str());
+}
+
+// ---------------- 持久化本地存储 (PLS) ----------------
+
+std::mutex g_pls_mu;
+std::string g_pls_path;
+bool g_pls_ready = false;
+
+uint64_t pls_total_bytes() {
+    // MicrosoftGame.Config 里的 <PersistentLocalStorage><SizeMB>2048</SizeMB>
+    const std::string xml = read_file(g_rt.config_path.c_str());
+    const std::string mb = find_tag(xml, "SizeMB");
+    if (!mb.empty()) return std::stoull(mb) * 1024ull * 1024ull;
+    return 256ull * 1024ull * 1024ull;   // 没配置时的保守默认
+}
+
+uint64_t dir_used_bytes(const std::string& dir) {
+    uint64_t total = 0;
+    WIN32_FIND_DATAA fd{};
+    const std::string pattern = dir + "\\*";
+    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (std::strcmp(fd.cFileName, ".") == 0 || std::strcmp(fd.cFileName, "..") == 0) continue;
+        const std::string child = dir + "\\" + fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            total += dir_used_bytes(child);
+        } else {
+            LARGE_INTEGER sz{};
+            sz.LowPart = fd.nFileSizeLow;
+            sz.HighPart = static_cast<LONG>(fd.nFileSizeHigh);
+            total += static_cast<uint64_t>(sz.QuadPart);
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return total;
+}
+
+// 目录形如 %LOCALAPPDATA%\Xbgtasix\<TitleId>
+bool ensure_pls_path() {
+    std::lock_guard<std::mutex> lock(g_pls_mu);
+    if (g_pls_ready) return true;
+    // 允许用 XBGTASIX_PLS_ROOT 覆盖根目录（某些受限环境写不了 %LOCALAPPDATA%）
+    char base[MAX_PATH] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_PLS_ROOT", base, MAX_PATH) == 0) {
+        if (GetEnvironmentVariableA("LOCALAPPDATA", base, MAX_PATH) == 0) return false;
+        _snprintf(base + strlen(base), MAX_PATH - strlen(base), "\\Xbgtasix");
+    }
+    char buf[MAX_PATH] = {0};
+    _snprintf(buf, MAX_PATH, "%s\\%08lX", base, static_cast<unsigned long>(g_rt.title_id));
+    // 逐级创建
+    for (char* p = buf + strlen(base) + 1; *p; ++p) {
+        if (*p == '\\') {
+            *p = 0;
+            CreateDirectoryA(buf, nullptr);
+            *p = '\\';
+        }
+    }
+    CreateDirectoryA(buf, nullptr);
+    g_pls_path = buf;
+    g_pls_ready = true;
+    xbgtasix::logf("[xgamert] PLS 目录: %s", buf);
+    return true;
 }
 
 // ---------------- 异步完成表 ----------------
@@ -340,6 +405,37 @@ STDAPI XUserGetId(XUserHandle user, uint64_t* userId) noexcept {
 STDAPI_(void) XUserCloseHandle(XUserHandle user) noexcept {
     if (!user) return;
     delete reinterpret_cast<UserState*>(user);
+}
+
+// ---- 持久化本地存储 ----
+
+STDAPI XPersistentLocalStorageGetPathSize(size_t* pathSize) noexcept {
+    if (!pathSize) return E_INVALIDARG;
+    if (!ensure_pls_path()) return E_FAIL;
+    *pathSize = g_pls_path.size() + 1;
+    return S_OK;
+}
+
+STDAPI XPersistentLocalStorageGetPath(size_t pathSize, char* path, size_t* pathUsed) noexcept {
+    if (!path || pathSize == 0) return E_INVALIDARG;
+    if (!ensure_pls_path()) return E_FAIL;
+    const size_t need = g_pls_path.size() + 1;
+    if (pathSize < need) return E_NOT_SUFFICIENT_BUFFER;
+    std::memcpy(path, g_pls_path.c_str(), need);
+    if (pathUsed) *pathUsed = need;
+    return S_OK;
+}
+
+STDAPI XPersistentLocalStorageGetSpaceInfo(XPersistentLocalStorageSpaceInfo* info) noexcept {
+    if (!info) return E_INVALIDARG;
+    if (!ensure_pls_path()) return E_FAIL;
+    const uint64_t total = pls_total_bytes();
+    const uint64_t used = dir_used_bytes(g_pls_path);
+    info->totalBytes = total;
+    info->usedBytes = used;
+    info->availableFreeBytes = total > used ? total - used : 0;
+    info->totalFreeBytes = info->availableFreeBytes;
+    return S_OK;
 }
 
 // ---- 商店 / 授权（仍然桩） ----

@@ -18,3 +18,6 @@ XTaskQueueDispatch
 XTaskQueueSubmitDelayedCallback
 XAsyncGetStatus
 XAsyncCancel
+XPersistentLocalStorageGetPathSize
+XPersistentLocalStorageGetSpaceInfo
+XPersistentLocalStorageGetPath

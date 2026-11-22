@@ -27,6 +27,7 @@
 | **模型查看器（L8）** | ✅ | `t8_model`：OBJ+PNG → 我们的管线，逐顶点法线 + 半兰伯特，输出 PNG |
 | **异步运行时（L9）** | ✅ | `t9_async`：真任务队列（64 回调并发）+ 模拟用户流程 |
 | **集成验证（L10）** | ✅ | `t10_integration`：读真配置得 TitleId=0x7952987A；Manual 队列 / 延迟提交 / XAsync 状态 |
+| **持久化存储（L11）** | ✅ | `t11_storage`：PLS 路径含 TitleId、写入回读、容量 2048 MB 来自配置 |
 | `d3d12_xs` 导出面 | ✅ | 4 手写 + 14 原生转发 = 18 |
 | `xgameruntime` 导出面 | ✅ | 10 手写 + 482 生成桩 = 492 |
 | 游戏 exe | ❌ 缺失 | 泄露包内没有 `game_scarlett_master.exe` |
@@ -48,6 +49,7 @@ cd build
 ./t8_model.exe model.obj [tex.png] out.png   # 渲染导出的游戏模型
 ./t9_async.exe             # 任务队列回调 + 用户流程
 ./t10_integration.exe <MicrosoftGame.Config>   # 端到端：读配置 + Manual 队列 + 延迟提交
+./t11_storage.exe <MicrosoftGame.Config>       # 持久化存储：路径/写入/容量
 ```
 
 九个测试全部**离屏渲染 + 像素/字节级断言**，没有显示器也能跑，`rc=0` 才有意义。
@@ -81,6 +83,7 @@ TLS、SEH 全由系统完成 —— 我们要写的只是"这些 DLL 里该有�
 | 文档 | 结论 |
 |---|---|
 | [docs/HANDOFF.md](docs/HANDOFF.md) | **交接摘要**：当前状态、复跑命令、exe 到手后的顺序 |
+| [docs/package-completeness.md](docs/package-completeness.md) | 用包自带 layout 核对：**104 个条目只缺 1 个 = exe** |
 | [docs/report.md](docs/report.md) | **技术报告（叙事版）**：目标、做法、数字、缺口 |
 | [docs/exe-day-checklist.md](docs/exe-day-checklist.md) | **exe 到手当天的 10 分钟操作顺序**（含三堵预期墙） |
 | [docs/where-is-the-exe.md](docs/where-is-the-exe.md) | 全包扫描确认**没有 exe**；`gameos.xvd` 等容器里也没有 |
@@ -132,6 +135,7 @@ Xbgtasix/
   tests/t8_model/              L8：OBJ+PNG 模型查看器（WIC 解码/编码）
   tests/t9_async/              L9：任务队列 + 用户流程
   tests/t10_integration/       L10：端到端（真配置 + Manual 队列 + 延迟提交 + XAsync）
+  tests/t11_storage/           L11：持久化本地存储
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK
