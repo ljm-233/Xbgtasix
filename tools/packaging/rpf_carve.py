@@ -67,6 +67,24 @@ def classify_plain(data):
     return hits, first
 
 
+def classify_inner(out):
+    """按**前缀**分类，避免把"前 512 字节里碰巧出现 < 的二进制"当成 XML。"""
+    body = out
+    for bom in (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff"):
+        if body.startswith(bom):
+            body = body[len(bom):]
+            break
+    body = body.lstrip()
+    for magic, name in INNER_MAGICS.items():
+        if body.startswith(magic):
+            return name
+    head = body[:256]
+    printable = sum(1 for b in head if 9 <= b <= 13 or 32 <= b < 127) / max(1, len(head))
+    if printable > 0.85:
+        return "文本（未识别格式）"
+    return "二进制"
+
+
 def carve_zlib(data, dump_dir=None, max_streams=200):
     found = collections.Counter()
     streams = []
@@ -80,14 +98,9 @@ def carve_zlib(data, dump_dir=None, max_streams=200):
                 d = zlib.decompressobj()
                 out = d.decompress(data[i:i + 1_000_000])
                 if len(out) > 64:
-                    label = None
-                    for magic, name in INNER_MAGICS.items():
-                        if out.startswith(magic) or magic in out[:512]:
-                            label = name
-                            break
-                    if label:
-                        found[label] += 1
-                        streams.append((i, len(out), label, out))
+                    label = classify_inner(out)
+                    found[label] += 1
+                    streams.append((i, len(out), label, out))
             except zlib.error:
                 pass
         i += 1
