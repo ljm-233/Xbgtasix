@@ -46,7 +46,7 @@
 | L18 | **包挂载 + 包身份** | `t18_package`：真配置的包身份、挂载到真实目录、坏包返回 `E_NOTFOUND` |
 | L19 | **存档目录 + 配额** | `t19_save`：1 MB 往返逐字节一致、配额随占用减少 |
 | L20 | **队列 waiter / monitor** | `t20_taskqueue2`：signal 语义、注销后不再触发、引用计数、进程级队列 |
-| L21 | **用户本地语义 + 能力门** | `t21_user`：bool/int32/HRESULT 三种返回类型、特权、登出、能力门真假混合 |
+| L21 | **用户 + 能力门 + UI 降级** | `t21_user`：能力门真假混合、特权、登出、消息框/输入框/WebAuth 立即完成 |
 
 **唯一缺口：游戏可执行文件**（见 [docs/package-completeness.md](docs/package-completeness.md)：
 包清单 104 条，只缺 `game_scarlett_master.exe` 一个）。
@@ -76,7 +76,7 @@ TLS、SEH 全由系统完成 —— 要写的只是"这些 DLL 里该有什么"�
 
 | DLL | 导出 | 内容 |
 |---|---|---|
-| `xgameruntime.dll` | **461**（56 手写 + 400 生成桩） | 生命周期（真读 `MicrosoftGame.Config`）、任务队列、用户、持久化存储、XAsync |
+| `xgameruntime.dll` | **461**（74 手写 + 387 生成桩） | 生命周期（真读 `MicrosoftGame.Config`）、任务队列、用户、持久化存储、XAsync |
 | `xmem.dll` | 4 | `XMemAlloc/Free/VirtualQuery/GetWorkingSetStatistics`，64 KB 页语义 |
 | `d3d12_xs.dll` | 18 | 4 个手写（带日志 + 选卡）+ 14 个原生转发到系统 `d3d12.dll` |
 

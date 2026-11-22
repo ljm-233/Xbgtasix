@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "xbgtasix/trace.h"
 
@@ -38,6 +39,20 @@ HRESULT WINAPI XUserGetState(void* user, int* state);
 HRESULT WINAPI XUserSignOutAsync(void* user, void* async_block);
 HRESULT WINAPI XUserSignOutResult(void* async_block);
 bool WINAPI XGameRuntimeIsFeatureAvailable(int feature);
+
+// UI：主机弹窗降级为"立即完成"
+HRESULT WINAPI XGameUiShowMessageDialogAsync(void* async_block, const char* title, const char* content,
+                                             const char* b1, const char* b2, const char* b3,
+                                             unsigned default_button, unsigned cancel_button);
+HRESULT WINAPI XGameUiShowMessageDialogResult(void* async_block, unsigned* result_button);
+HRESULT WINAPI XGameUiShowTextEntryAsync(void* async_block, const char* title, const char* desc,
+                                         const char* default_text, unsigned scope, unsigned max_len);
+HRESULT WINAPI XGameUiShowTextEntryResultSize(void* async_block, unsigned* size);
+HRESULT WINAPI XGameUiShowTextEntryResult(void* async_block, unsigned size, char* text, unsigned* used);
+HRESULT WINAPI XGameUiShowWebAuthenticationAsync(void* async_block, void* user, const char* request_uri,
+                                                 const char* completion_uri);
+HRESULT WINAPI XGameUiShowWebAuthenticationResultSize(void* async_block, size_t* size);
+HRESULT WINAPI XAsyncGetStatus(void* async_block, bool wait);
 }
 
 namespace {
@@ -130,6 +145,37 @@ int main() {
     AsyncBlock so{};
     ok(SUCCEEDED(XUserSignOutAsync(u1, &so)), "SignOutAsync");
     ok(XUserSignOutResult(&so) == S_OK, "SignOutResult=S_OK");
+
+    // ---- UI：必须立即完成，且结果能取回（关键：不能挂在 E_PENDING）----
+    {
+        AsyncBlock dlgt{};
+        ok(SUCCEEDED(XGameUiShowMessageDialogAsync(&dlgt, "标题", "内容", "确定", nullptr, nullptr,
+                                                   1, 1)),
+           "ShowMessageDialogAsync");
+        ok(XAsyncGetStatus(&dlgt, false) == S_OK, "消息框立即完成（不是 E_PENDING）");
+        unsigned btn = 9;
+        ok(SUCCEEDED(XGameUiShowMessageDialogResult(&dlgt, &btn)) && btn == 1,
+           "MessageDialogResult 返回默认按钮");
+
+        AsyncBlock te{};
+        ok(SUCCEEDED(XGameUiShowTextEntryAsync(&te, "名字", "请输入", "默认名", 0, 32)),
+           "ShowTextEntryAsync");
+        unsigned size = 0;
+        ok(SUCCEEDED(XGameUiShowTextEntryResultSize(&te, &size)), "TextEntryResultSize");
+        std::vector<char> buf(size > 0 ? size : 1, 0);
+        unsigned used = 0;
+        ok(SUCCEEDED(XGameUiShowTextEntryResult(&te, size, buf.data(), &used)) &&
+               std::strcmp(buf.data(), "默认名") == 0,
+           "TextEntryResult 回填默认文本", buf.data());
+
+        AsyncBlock wa{};
+        ok(SUCCEEDED(XGameUiShowWebAuthenticationAsync(&wa, u1, "https://example/x", "app://done")),
+           "ShowWebAuthenticationAsync");
+        size_t wsize = 0;
+        ok(SUCCEEDED(XGameUiShowWebAuthenticationResultSize(&wa, &wsize)) && wsize > 24,
+           "WebAuth ResultSize");
+        ok(XAsyncGetStatus(&wa, false) == S_OK, "WebAuth 立即完成");
+    }
 
     XUserCloseHandle(u2);
     XUserCloseHandle(u1);
