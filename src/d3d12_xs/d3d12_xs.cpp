@@ -11,6 +11,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <dxgi1_4.h>
 
 #include <mutex>
 
@@ -41,6 +42,55 @@ T resolve(const char* name) {
     return reinterpret_cast<T>(p);
 }
 
+// 选卡：默认偏好"非软件适配器 + 显存最大"的独显。
+// 笔记本上 D3D12CreateDevice(nullptr) 常选中核显，游戏会莫名其妙跑在 iGPU 上。
+//
+// 环境变量 XBGTASIX_ADAPTER：
+//   best（默认） 挑独显
+//   default      保持系统默认（传 nullptr 给真 d3d12）
+//   0/1/2...     指定 DXGI 枚举下标
+IDXGIAdapter1* pick_adapter() {
+    char mode[32] = {0};
+    GetEnvironmentVariableA("XBGTASIX_ADAPTER", mode, sizeof(mode));
+    if (_stricmp(mode, "default") == 0) return nullptr;
+
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1, reinterpret_cast<void**>(&factory))) || !factory)
+        return nullptr;
+
+    int want = -1;
+    if (mode[0] >= '0' && mode[0] <= '9') want = atoi(mode);
+
+    IDXGIAdapter1* best = nullptr;
+    SIZE_T best_vram = 0;
+    for (UINT i = 0;; ++i) {
+        IDXGIAdapter1* a = nullptr;
+        if (factory->EnumAdapters1(i, &a) == DXGI_ERROR_NOT_FOUND) break;
+        if (!a) break;
+        DXGI_ADAPTER_DESC1 d{};
+        if (FAILED(a->GetDesc1(&d))) { a->Release(); continue; }
+        const bool software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+        if (want >= 0) {
+            if (static_cast<int>(i) == want) { best = a; break; }
+        } else if (!software && (!best || d.DedicatedVideoMemory > best_vram)) {
+            if (best) best->Release();
+            best = a;
+            best_vram = d.DedicatedVideoMemory;
+            continue;
+        }
+        a->Release();
+    }
+    factory->Release();
+    if (best) {
+        DXGI_ADAPTER_DESC1 d{};
+        best->GetDesc1(&d);
+        char name[256] = {0};
+        WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, name, sizeof(name), nullptr, nullptr);
+        xbgtasix::logf("[d3d12_xs] 选卡 -> %s（%.1f GB）", name, d.DedicatedVideoMemory / 1024.0 / 1024 / 1024);
+    }
+    return best;
+}
+
 }  // namespace
 
 extern "C" {
@@ -53,7 +103,15 @@ __declspec(dllexport) HRESULT WINAPI D3D12CreateDevice(IUnknown* adapter,
     static PFN pfn = resolve<PFN>("D3D12CreateDevice");
     if (!pfn) return E_FAIL;
     xbgtasix::logf("[d3d12_xs] D3D12CreateDevice(feature_level=0x%x)", static_cast<unsigned>(min_level));
-    return pfn(adapter, min_level, riid, device);
+    // 调用方传 nullptr 时替它挑一块合适的卡（笔记本上默认常常是核显）
+    IDXGIAdapter1* picked = nullptr;
+    if (!adapter) {
+        picked = pick_adapter();
+        if (picked) adapter = picked;
+    }
+    const HRESULT hr = pfn(adapter, min_level, riid, device);
+    if (picked) picked->Release();
+    return hr;
 }
 
 __declspec(dllexport) HRESULT WINAPI
