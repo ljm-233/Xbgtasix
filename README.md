@@ -3,8 +3,8 @@
 [![ci](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml/badge.svg)](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-面向 Xbox Series / GDK 的**兼容层**与**资产格式研究**工具集。纯自写代码：512 个导出、
-15 个可断言测试、17 份带来源标注的结论文档。
+面向 Xbox Series / GDK 的**兼容层**与**资产格式研究**工具集。纯自写代码：
+16 个可断言测试、17 份带来源标注的结论文档。
 
 > 不包含任何游戏文件、微软 GDK 头文件/库、解密密钥或绕过手段。
 
@@ -41,6 +41,7 @@
 | L13 | 显卡适配 / 能力断言 | `t13_caps`，双 GPU 交叉验证 |
 | L14 | 显存预算实测 | `t14_vram`，7.0 GB 账面 / 6.0 GB 实测 |
 | L15 | 预算变化通知 + 降级 | `t15_budget`，21 次通知 |
+| L16 | **真实游戏侧 DLL 加载** | `t16`，包内 16 个 DLL 全部加载成功 |
 
 **唯一缺口：游戏可执行文件**（见 [docs/package-completeness.md](docs/package-completeness.md)：
 包清单 104 条，只缺 `game_scarlett_master.exe` 一个）。
@@ -51,13 +52,13 @@
 
 ```bash
 ./build.sh              # MinGW64 + g++ + dxc
-./tools/run_suite.sh    # 15 个测试一条命令
+./tools/run_suite.sh    # 16 个测试一条命令
 ```
 
 返回码语义：`0 = PASS`、`2 = SKIP`（本机不支持该能力，如无光追）、其它 `FAIL`。
 同时写 `build/suite/report.txt`（TSV）供脚本消费。
 
-实测：**15 PASS / 0 SKIP / 0 FAIL，约 5.6 秒**（`t6_rt` 首次约 30 秒，之后走驱动缓存降到 0.4 秒）。
+实测：**16 PASS / 0 SKIP / 0 FAIL，约 5.6 秒**（`t6_rt` 首次约 30 秒，之后走驱动缓存降到 0.4 秒）。
 
 只跑子集：`./tools/run_suite.sh --only t5,t6`；强制核显：`XBGTASIX_ADAPTER=0 ./tools/run_suite.sh`。
 
@@ -70,7 +71,7 @@ TLS、SEH 全由系统完成 —— 要写的只是"这些 DLL 里该有什么"�
 
 | DLL | 导出 | 内容 |
 |---|---|---|
-| `xgameruntime.dll` | **492**（21 手写 + 471 生成桩） | 生命周期（真读 `MicrosoftGame.Config`）、任务队列、用户、持久化存储、XAsync |
+| `xgameruntime.dll` | **461**（21 手写 + 440 生成桩） | 生命周期（真读 `MicrosoftGame.Config`）、任务队列、用户、持久化存储、XAsync |
 | `xmem.dll` | 4 | `XMemAlloc/Free/VirtualQuery/GetWorkingSetStatistics`，64 KB 页语义 |
 | `d3d12_xs.dll` | 18 | 4 个手写（带日志 + 选卡）+ 14 个原生转发到系统 `d3d12.dll` |
 
@@ -134,6 +135,7 @@ Xbgtasix/
   tools/run_suite.sh           一条命令跑全套 + TSV 报告
   tools/selftest_tools.py      Python 工具自检（CI 门槛）
   tools/check_docs.py          文档相对链接检查
+  tools/check_real_dlls.py     用包内真实 DLL 验证 shim 导出面（静态核对 + 动态加载）
   tools/push_via_api.py        git TLS 不可用时用 API 重放提交历史
   tools/match_texture.py       模型名 ↔ 贴图名 匹配
   tools/render_gallery.sh      批量渲染 OBJ

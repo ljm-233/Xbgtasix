@@ -14,6 +14,10 @@ fi
 GDK_INC=${GDK_INC:-$gdk_inc_default}
 mkdir -p "$OUT"
 
+# shim 会与别人的 exe/DLL 一起加载，必须自包含：静态链接 MinGW 运行库，
+# 否则真实程序加载我们的 DLL 时会因缺 libwinpthread-1.dll / libgcc 而失败（实测踩过）。
+LDFLAGS_STATIC=(-static)
+
 FLAGS=(-std=c++20 -O2 -D_WIN32_WINNT=0x0A00 -DNOMINMAX -DWIN32_LEAN_AND_MEAN
        -Iinclude -I"$GDK_INC" -Wno-attributes -Wall -Wextra
        -static-libgcc -static-libstdc++)
@@ -31,7 +35,7 @@ fi
 build_shim() {
   local name=$1; shift
   echo "== $name.dll"
-  "$CXX" "${FLAGS[@]}" -shared "src/$name/$name.cpp" src/trace.cpp "$@" \
+  "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared "src/$name/$name.cpp" src/trace.cpp "$@" \
       -o "$OUT/$name.dll" -Wl,--out-implib,"$OUT/lib$name.dll.a"
 }
 
@@ -44,7 +48,7 @@ echo "== xgameruntime.dll (手写 + 生成桩)"
   [ -f src/generated/xgameruntime_exports.inc ] && cat src/generated/xgameruntime_exports.inc
 } > "$OUT/xgameruntime.def"
 
-"$CXX" "${FLAGS[@]}" -shared \
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
     src/xgameruntime/xgameruntime.cpp src/generated/xgameruntime_stubs.cpp src/trace.cpp \
     "$OUT/xgameruntime.def" \
     -o "$OUT/xgameruntime.dll" -Wl,--out-implib,"$OUT/libxgameruntime.dll.a"
@@ -60,7 +64,7 @@ echo "== d3d12_xs.dll (手写 4 + 转发)"
   cat src/d3d12_xs/exports.txt
 } > "$OUT/d3d12_xs.def"
 
-"$CXX" "${FLAGS[@]}" -shared \
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
     src/d3d12_xs/d3d12_xs.cpp src/trace.cpp "$OUT/d3d12_xs.def" \
     -ldxgi -ldxguid \
     -o "$OUT/d3d12_xs.dll" -Wl,--out-implib,"$OUT/libd3d12_xs.dll.a"
