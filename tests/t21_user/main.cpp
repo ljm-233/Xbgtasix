@@ -18,6 +18,9 @@ struct LocalId {
     unsigned long long value;
 };
 
+// 数据导出回归：.def 少了 DATA 修饰时，客户端读到的是函数跳转指令字节
+extern "C" const GUID _GUID_014d1cc3_bcfe_41ff_b2f0_e1ef07155828;
+
 extern "C" {
 HRESULT WINAPI XGameRuntimeInitialize(void);
 HRESULT WINAPI XUserAddAsync(int options, void* async_block);
@@ -151,6 +154,17 @@ int main() {
     AsyncBlock so{};
     ok(SUCCEEDED(XUserSignOutAsync(u1, &so)), "SignOutAsync");
     ok(XUserSignOutResult(&so) == S_OK, "SignOutResult=S_OK");
+
+    // ---- 数据导出：GUID 必须是真值，不能是代码字节 ----
+    {
+        const GUID& g = _GUID_014d1cc3_bcfe_41ff_b2f0_e1ef07155828;
+        char buf[64];
+        _snprintf(buf, sizeof(buf), "%08lX-%04X-%04X", (unsigned long)g.Data1, g.Data2, g.Data3);
+        xbgtasix::logf("[t21] GUID = %s", buf);
+        ok(g.Data1 == 0x014d1cc3 && g.Data2 == 0xbcfe && g.Data3 == 0x41ff,
+           "GUID 导出是真数据（不是函数跳转桩）", buf);
+        ok(g.Data4[0] == 0xb2 && g.Data4[7] == 0x28, "GUID 的 Data4 正确");
+    }
 
     // ---- UI：必须立即完成，且结果能取回（关键：不能挂在 E_PENDING）----
     {

@@ -29,7 +29,7 @@ mkdir -p "$BIN/pls" "$BIN/suite"
 
 if [ ! -x "$BIN/t0_hello.exe" ]; then
   echo "先构建：./build.sh"
-  exit 2
+  exit 3
 fi
 
 want() {
@@ -103,10 +103,15 @@ PKG=${XBGTASIX_PKG:-"D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK"}
 if [ -d "$PKG" ]; then
   run_py t16 tools/check_real_dlls.py "$PKG"
 else
+  want t16 && { total=$((total + 1)); skip=$((skip + 1)); }
   echo "t16  真实 DLL 加载            SKIP   缺少游戏包目录（XBGTASIX_PKG 可指定）"
 fi
 
 echo
+if [ $total -eq 0 ]; then
+  echo "== 汇总: 没有跑任何测试（--only 没匹配到？）" >&2
+  exit 1
+fi
 echo "== 汇总: $pass PASS / $skip SKIP / $fail FAIL（共 $total）"
 echo "   报告: $report"
 [ $fail -eq 0 ] || exit 1

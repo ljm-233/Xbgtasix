@@ -4,16 +4,16 @@
 
 ## 一句话
 
-兼容层和图形能力已经做完（L0–L9 全绿），数据面能自凿；**唯一缺口是游戏 exe**。
+兼容层和图形能力已经做完（L0–L21 全绿），数据面能自凿；**唯一缺口是游戏 exe**。
 
 ## 复跑（30 秒）
 
 ```bash
 cd D:/GTA6/Xbgtasix && ./build.sh
-./tools/run_suite.sh          # 15 个测试一条命令，输出 PASS/SKIP/FAIL 表 + TSV 报告
+./tools/run_suite.sh          # 21 项测试一条命令，输出 PASS/SKIP/FAIL 表 + TSV 报告
 ```
 
-期望：`15 PASS / 0 SKIP / 0 FAIL`。
+期望：`21 PASS / 0 SKIP / 0 FAIL`。
 换机器时若某项返回 2（SKIP），说明该机不支持那项能力（如无光追），不算失败。
 
 ## exe 到手后（照这个顺序）

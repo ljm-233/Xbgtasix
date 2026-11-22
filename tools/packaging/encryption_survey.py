@@ -50,7 +50,8 @@ def classify(buf):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("rpf")
-    ap.add_argument("--limit-mb", type=int, default=0)
+    ap.add_argument("--limit-mb", type=int, default=64,
+                    help="只读前 N MB（默认 64；0 表示整文件，大归档慎用）")
     ap.add_argument("--block", type=int, default=BLOCK)
     a = ap.parse_args()
     try:
@@ -64,6 +65,9 @@ def main():
     blocks = [data[i:i + a.block] for i in range(0, len(data) - a.block + 1, a.block)]
     counts = collections.Counter(classify(b) for b in blocks)
     total = sum(counts.values())
+    if total == 0:
+        print("文件太小（小于一个块），无法统计")
+        return 1
 
     label = {"zero": "全零填充", "zlib": "zlib 压缩（可解）", "text": "文本（可读）",
              "structured": "二进制结构（可读但需解析）", "high-entropy": "高熵（疑似加密）"}

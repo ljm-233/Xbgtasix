@@ -153,7 +153,7 @@ def main():
         print("     已导出到 %s（最多 50 个）" % a.dump_dir)
 
     print("\n   结论：目录表 %s，但载荷可雕刻 —— 这就是现有工具的工作方式。" %
-          ("仍加密" if True else ""))
+          ("仍加密" if not found else ""))
 
 
 if __name__ == "__main__":

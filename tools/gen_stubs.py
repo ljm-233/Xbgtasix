@@ -115,7 +115,7 @@ def build_rettype_index(header_dir):
     pat2 = re.compile(r"\b(HRESULT|bool|void|int32_t|uint32_t|size_t|uint64_t)\s+STDAPICALLTYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
     if not header_dir or not os.path.isdir(header_dir):
         return idx
-    for path in glob.glob(os.path.join(header_dir, "*.h")):
+    for path in sorted(glob.glob(os.path.join(header_dir, "*.h"))):   # 排序保证可重复
         try:
             text = open(path, encoding="utf-8", errors="replace").read()
         except OSError:
@@ -250,7 +250,7 @@ def main():
 
         for i, sym in enumerate(syms):
             label = sym.replace('"', '\\"')
-            kind = rettype_index.get(sym, "hresult")
+            kind = rettype_index.get(sym, "other")
             if kind == "void":
                 f.write('void %s(void) { XB_UNIMPL("%s"); }\n' % (ident(sym, i), label))
             elif kind == "bool":

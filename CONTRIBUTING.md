@@ -11,7 +11,7 @@
 
 ```bash
 ./build.sh                 # 兼容层
-./tools/run_suite.sh       # 15 项测试
+./tools/run_suite.sh       # 21 项测试
 python tools/selftest_tools.py   # Python 工具自检
 python tools/check_docs.py       # 文档链接
 ```
