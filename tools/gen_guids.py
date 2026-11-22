@@ -10,6 +10,12 @@
 用法：python tools/gen_guids.py <xgameruntime.lib> <out_guids.cpp> <out.def>
 """
 import io
+import sys
+
+try:   # Windows 控制台默认是 CP1252/CP936，打中文会抛 UnicodeEncodeError
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 import re
 import sys
 

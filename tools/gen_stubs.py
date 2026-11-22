@@ -15,6 +15,12 @@
   - 生成的桩函数返回 void：故意 ABI 不完整 —— 它们只负责"炸出来并记录调用名"。
 """
 import argparse
+import sys
+
+try:   # Windows 控制台默认是 CP1252/CP936，打中文会抛 UnicodeEncodeError
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 import os
 import re
 import struct
