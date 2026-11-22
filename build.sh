@@ -41,6 +41,11 @@ build_shim() {
 
 # xgameruntime = 手写实现 + 从 GDK 导入库生成的 482 个"抛异常"桩
 echo "== xgameruntime.dll (手写 + 生成桩)"
+# _GUID_xxx 是数据导出，必须生成真 GUID 而不是函数桩
+if [ -f "$GDK_LIB_DIR/xgameruntime.lib" ]; then
+  python tools/gen_guids.py "$(cygpath -m "$GDK_LIB_DIR/xgameruntime.lib")" \
+      src/generated/xgameruntime_guids.cpp src/generated/xgameruntime_guids.inc
+fi
 {
   echo "LIBRARY xgameruntime"
   echo "EXPORTS"
@@ -49,7 +54,8 @@ echo "== xgameruntime.dll (手写 + 生成桩)"
 } > "$OUT/xgameruntime.def"
 
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
-    src/xgameruntime/xgameruntime.cpp src/generated/xgameruntime_stubs.cpp src/trace.cpp \
+    src/xgameruntime/xgameruntime.cpp src/generated/xgameruntime_stubs.cpp \
+    src/trace.cpp \
     "$OUT/xgameruntime.def" \
     -o "$OUT/xgameruntime.dll" -Wl,--out-implib,"$OUT/libxgameruntime.dll.a"
 

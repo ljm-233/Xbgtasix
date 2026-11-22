@@ -31,7 +31,10 @@
 #include "XGameSaveFiles.h"
 #include "XGameActivation.h"
 #include "XGameRuntimeFeature.h"
+#include "XGameStreaming.h"
 #include "XGameUI.h"
+#include "XDisplay.h"
+#include "XSystem.h"
 #include "XPackage.h"
 #include "XPersistentLocalStorage.h"
 #include "XTaskQueue.h"
@@ -265,11 +268,13 @@ struct TaskEntry {
 };
 
 struct WaiterReg {
+    uint64_t id;
     XTaskQueuePort port;
     HANDLE wait_handle;
 };
 
 struct MonitorReg {
+    uint64_t id;
     XTaskQueuePort port;
     void* context;
     XTaskQueueMonitorCallback* callback;
@@ -390,6 +395,17 @@ STDAPI XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, voi
     const XTaskQueueDispatchMode mode = (port == XTaskQueuePort::Completion) ? q->comp_mode : q->work_mode;
     if (mode == XTaskQueueDispatchMode::Immediate) {
         callback(context, false);
+        std::vector<MonitorReg> ms;
+        {
+            std::lock_guard<std::mutex> lock(q->mu);
+            for (const auto& w : q->waiters) {
+                if (w.port == port && w.wait_handle) SetEvent(w.wait_handle);
+            }
+            ms = q->monitors;
+        }
+        for (const auto& m : ms) {
+            if (m.callback) m.callback(m.context, queue, port);
+        }
         return S_OK;
     }
     {
@@ -412,9 +428,15 @@ STDAPI XTaskQueueSubmitDelayedCallback(XTaskQueueHandle queue, XTaskQueuePort po
                                       void* context, XTaskQueueCallback* callback) noexcept {
     if (!queue || !callback) return E_INVALIDARG;
     // 简化实现：起一个一次性线程，到点再投递（真实 GDK 是队列内定时器）
-    std::thread([queue, port, delayMs, context, callback] {
+    auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    q->refcount.fetch_add(1);   // 睡眠期间句柄不能被别人 Close 掉
+    std::thread([q, queue, port, delayMs, context, callback] {
         std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-        XTaskQueueSubmitCallback(queue, port, context, callback);
+        if (!q->stopped.load()) XTaskQueueSubmitCallback(queue, port, context, callback);
+        if (q->refcount.fetch_sub(1) == 1) {   // 关了句柄才由最后一个人释放
+            q->shutdown(true);
+            delete q;
+        }
     }).detach();
     return S_OK;
 }
@@ -474,8 +496,10 @@ STDAPI XTaskQueueRegisterWaiter(XTaskQueueHandle queue, XTaskQueuePort port, HAN
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     {
         std::lock_guard<std::mutex> lock(q->mu);
-        q->waiters.push_back(WaiterReg{port, waitHandle});
-        token->token = q->waiters.size();
+        static uint64_t next_id = 1;
+        const uint64_t id = next_id++;
+        q->waiters.push_back(WaiterReg{id, port, waitHandle});
+        token->token = id;
     }
     xbgtasix::logf("[xgamert] RegisterWaiter(port=%u, event=%p)", static_cast<unsigned>(port),
                    waitHandle);
@@ -487,8 +511,9 @@ STDAPI_(void) XTaskQueueUnregisterWaiter(XTaskQueueHandle queue,
     if (!queue) return;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     std::lock_guard<std::mutex> lock(q->mu);
-    const size_t idx = static_cast<size_t>(token.token);
-    if (idx >= 1 && idx <= q->waiters.size()) q->waiters.erase(q->waiters.begin() + (idx - 1));
+    for (auto it = q->waiters.begin(); it != q->waiters.end(); ++it) {
+        if (it->id == token.token) { q->waiters.erase(it); break; }
+    }
 }
 
 STDAPI XTaskQueueRegisterMonitor(XTaskQueueHandle queue, void* callbackContext,
@@ -498,8 +523,10 @@ STDAPI XTaskQueueRegisterMonitor(XTaskQueueHandle queue, void* callbackContext,
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     {
         std::lock_guard<std::mutex> lock(q->mu);
-        q->monitors.push_back(MonitorReg{XTaskQueuePort::Work, callbackContext, callback});
-        token->token = q->monitors.size();
+        static uint64_t next_id = 1;
+        const uint64_t id = next_id++;
+        q->monitors.push_back(MonitorReg{id, XTaskQueuePort::Work, callbackContext, callback});
+        token->token = id;
     }
     xbgtasix::logf("[xgamert] RegisterMonitor（监听整个队列）");
     return S_OK;
@@ -510,8 +537,9 @@ STDAPI_(void) XTaskQueueUnregisterMonitor(XTaskQueueHandle queue,
     if (!queue) return;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     std::lock_guard<std::mutex> lock(q->mu);
-    const size_t idx = static_cast<size_t>(token.token);
-    if (idx >= 1 && idx <= q->monitors.size()) q->monitors.erase(q->monitors.begin() + (idx - 1));
+    for (auto it = q->monitors.begin(); it != q->monitors.end(); ++it) {
+        if (it->id == token.token) { q->monitors.erase(it); break; }
+    }
 }
 
 // ---- 进程级默认队列 ----
@@ -520,16 +548,24 @@ std::mutex g_proc_queue_mu;
 XTaskQueueHandle g_proc_queue = nullptr;
 
 STDAPI_(void) XTaskQueueSetCurrentProcessTaskQueue(XTaskQueueHandle queue) noexcept {
-    std::lock_guard<std::mutex> lock(g_proc_queue_mu);
-    if (queue) reinterpret_cast<TaskQueueState*>(queue)->refcount.fetch_add(1);
-    g_proc_queue = queue;
+    XTaskQueueHandle old = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_proc_queue_mu);
+        if (queue) reinterpret_cast<TaskQueueState*>(queue)->refcount.fetch_add(1);
+        old = g_proc_queue;
+        g_proc_queue = queue;
+    }
+    // 头文件：替换时旧队列的句柄会被关闭
+    if (old && old != queue) XTaskQueueCloseHandle(old);
     xbgtasix::logf("[xgamert] SetCurrentProcessTaskQueue(%p)", static_cast<void*>(queue));
 }
 
 STDAPI_(bool) XTaskQueueGetCurrentProcessTaskQueue(XTaskQueueHandle* queue) noexcept {
+    if (queue) *queue = nullptr;   // _Out_ 必须写，否则调用方拿到栈垃圾再去 Close
     std::lock_guard<std::mutex> lock(g_proc_queue_mu);
     if (!g_proc_queue) return false;
-    if (queue) *queue = g_proc_queue;
+    reinterpret_cast<TaskQueueState*>(g_proc_queue)->refcount.fetch_add(1);  // 契约上由调用方 Close
+    *queue = g_proc_queue;
     return true;
 }
 
@@ -545,6 +581,12 @@ STDAPI XAsyncGetStatus(XAsyncBlock* asyncBlock, bool wait) noexcept {
 
 STDAPI_(void) XAsyncCancel(XAsyncBlock* asyncBlock) noexcept {
     if (!asyncBlock) return;
+    // 头文件：已完成的操作 cancel 应当什么都不做（否则会把 S_OK 抹成 E_ABORT 并二次回调）
+    {
+        std::lock_guard<std::mutex> lock(g_async_mu);
+        auto it = g_async.find(asyncBlock);
+        if (it != g_async.end() && it->second.done) return;
+    }
     complete_async(asyncBlock, E_ABORT);
 }
 
@@ -977,11 +1019,14 @@ STDAPI_(bool) XGameRuntimeIsFeatureAvailable(XGameRuntimeFeature feature) noexce
         case XGameRuntimeFeature::XPersistentLocalStorage:
         case XGameRuntimeFeature::XTaskQueue:
         case XGameRuntimeFeature::XUser:
+        case XGameRuntimeFeature::XGame:
+            return true;
+        // 以下模块只有部分实现（XGameSave 仅 Files 目录式、XError/XThread 全是桩），
+        // 报 true 会让游戏走进去然后撞上 ExitProcess(70)。宁可不报。
         case XGameRuntimeFeature::XGameSave:
         case XGameRuntimeFeature::XError:
         case XGameRuntimeFeature::XThread:
-        case XGameRuntimeFeature::XGame:
-            return true;
+            return false;
         default:
             return false;
     }
@@ -1253,6 +1298,41 @@ STDAPI XGameUiSetMultiplayerActivityGameInviteUiResponse(
 
 STDAPI XGameUiSetErrorDialogUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
     return ui_response_ack("SetErrorDialogUiResponse", callbackHandle);
+}
+
+// ---- 按值返回结构体的 API ----
+// 这类不能交给生成桩：MS x64 用 RCX 传 sret 隐藏指针，桩 return 0 会让调用方
+// 拿到未初始化的栈内存（例如 family[64] 没有 NUL -> 越界读）。
+// 子代理 reviewer-genstubs 把这条列为阻塞项。
+
+STDAPI_(XSystemAnalyticsInfo) XSystemGetAnalyticsInfo() noexcept {
+    XSystemAnalyticsInfo info{};
+    info.osVersion = XVersion{10, 0, 22631, 0};
+    info.hostingOsVersion = XVersion{10, 0, 22631, 0};
+    std::snprintf(info.family, sizeof(info.family), "Windows.Desktop");
+    std::snprintf(info.form, sizeof(info.form), "PC");
+    return info;
+}
+
+STDAPI_(XSystemRuntimeInfo) XSystemGetRuntimeInfo() noexcept {
+    XSystemRuntimeInfo info{};
+    info.runtimeVersion = XVersion{1, 0, 0, 0};
+    info.availableVersion = XVersion{1, 0, 0, 0};
+    return info;
+}
+
+STDAPI_(XDisplayHdrModeResult) XDisplayTryEnableHdrMode(
+    XDisplayHdrModePreference displayModePreference,
+    XDisplayHdrModeInfo* displayHdrModeInfo) noexcept {
+    (void)displayModePreference;
+    if (displayHdrModeInfo) *displayHdrModeInfo = XDisplayHdrModeInfo{};
+    return XDisplayHdrModeResult::Disabled;   // PC 上不接管 HDR
+}
+
+STDAPI_(XGameStreamingConnectionState) XGameStreamingGetConnectionState(
+    XGameStreamingClientId client) noexcept {
+    (void)client;
+    return XGameStreamingConnectionState::Disconnected;   // 没有串流客户端
 }
 
 // ---- 系统信息 ----

@@ -52,6 +52,8 @@ HRESULT WINAPI XGameUiShowTextEntryResult(void* async_block, unsigned size, char
 HRESULT WINAPI XGameUiShowWebAuthenticationAsync(void* async_block, void* user, const char* request_uri,
                                                  const char* completion_uri);
 HRESULT WINAPI XGameUiShowWebAuthenticationResultSize(void* async_block, size_t* size);
+HRESULT WINAPI XGameUiShowWebAuthenticationResult(void* async_block, size_t buffer_size, void* buffer,
+                                                  void** ptr_to_buffer, size_t* buffer_used);
 HRESULT WINAPI XAsyncGetStatus(void* async_block, bool wait);
 HRESULT WINAPI XGameUiSetMessageDialogUiResponse(void* handle, unsigned response);
 HRESULT WINAPI XGameUiSetTextEntryUiResponse(void* handle, const char* response);
@@ -176,9 +178,23 @@ int main() {
         ok(SUCCEEDED(XGameUiShowWebAuthenticationAsync(&wa, u1, "https://example/x", "app://done")),
            "ShowWebAuthenticationAsync");
         size_t wsize = 0;
-        ok(SUCCEEDED(XGameUiShowWebAuthenticationResultSize(&wa, &wsize)) && wsize > 24,
-           "WebAuth ResultSize");
+        const size_t expect = 24 + std::strlen("app://done") + 1;   // 结构体 + URI + NUL
+        ok(SUCCEEDED(XGameUiShowWebAuthenticationResultSize(&wa, &wsize)) && wsize == expect,
+           "WebAuth ResultSize 精确等于 24+URI+NUL");
         ok(XAsyncGetStatus(&wa, false) == S_OK, "WebAuth 立即完成");
+
+        std::vector<unsigned char> wbuf(wsize > 0 ? wsize : 1, 0);
+        void* pin = nullptr;
+        size_t wused = 0;
+        ok(SUCCEEDED(XGameUiShowWebAuthenticationResult(&wa, wsize, wbuf.data(), &pin, &wused)) &&
+               pin == wbuf.data() && wused == expect,
+           "WebAuth Result：ptrToBuffer 指进 caller buffer");
+        if (pin) {
+            // 结构体首 4 字节是 HRESULT，后面是 URI 指针
+            const auto* uri = *reinterpret_cast<const char* const*>(
+                reinterpret_cast<const unsigned char*>(pin) + 16);
+            ok(uri && std::strcmp(uri, "app://done") == 0, "WebAuth 回填的 URI 正确");
+        }
 
         // UI 回调注入与本实现兼容：不接管 UI，但调用链不能崩
         ok(SUCCEEDED(XGameUiSetUiCallbacks(nullptr, true)), "SetUiCallbacks(nullptr)");

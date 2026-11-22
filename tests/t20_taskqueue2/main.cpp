@@ -19,7 +19,10 @@ struct Token {
 extern "C" {
 HRESULT WINAPI XTaskQueueCreate(int work_mode, int comp_mode, void** queue);
 HRESULT WINAPI XTaskQueueSubmitCallback(void* queue, int port, void* context, void* callback);
-HRESULT WINAPI XTaskQueueDispatch(void* queue, int port, unsigned timeout_ms);
+HRESULT WINAPI XTaskQueueSubmitDelayedCallback(void* queue, int port, unsigned delay_ms, void* context,
+                                               void* callback);
+HRESULT WINAPI XTaskQueueTerminate(void* queue, bool wait, void* context, void* callback);
+bool WINAPI XTaskQueueDispatch(void* queue, int port, unsigned timeout_ms);
 HRESULT WINAPI XTaskQueueRegisterWaiter(void* queue, int port, HANDLE wait, void* ctx, void* cb,
                                         void* token);
 void WINAPI XTaskQueueUnregisterWaiter(void* queue, Token token);
@@ -120,7 +123,35 @@ int main() {
     XTaskQueueSetCurrentProcessTaskQueue(nullptr);
     ok(!XTaskQueueGetCurrentProcessTaskQueue(&got), "清空后返回 false");
 
+    // ---- 多 waiter：注销一个不能影响另一个（下标错位会静默丢 signal）----
+    HANDLE evA = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    HANDLE evB = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    Token ta{0}, tb{0};
+    ok(SUCCEEDED(XTaskQueueRegisterWaiter(q, 0, evA, nullptr, nullptr, &ta)), "waiter A");
+    ok(SUCCEEDED(XTaskQueueRegisterWaiter(q, 0, evB, nullptr, nullptr, &tb)), "waiter B");
+    XTaskQueueUnregisterWaiter(q, ta);
+    ResetEvent(evB);
+    ok(SUCCEEDED(XTaskQueueSubmitCallback(q, 0, nullptr, reinterpret_cast<void*>(&on_work))), "提交");
+    ok(WaitForSingleObject(evB, 300) == WAIT_OBJECT_0, "注销 A 之后 B 仍被 signal");
+    XTaskQueueUnregisterWaiter(q, tb);
+    while (XTaskQueueDispatch(q, 0, 0)) {}
+
+    // ---- 延迟提交：不能崩，且到点才可用 ----
+    ok(SUCCEEDED(XTaskQueueSubmitDelayedCallback(q, 0, 30, nullptr,
+                                                 reinterpret_cast<void*>(&on_work))),
+       "SubmitDelayedCallback");
+    ok(!XTaskQueueDispatch(q, 0, 0), "延迟任务不会立刻可派发");
+    bool fired = false;
+    for (int i = 0; i < 20 && !fired; ++i) fired = XTaskQueueDispatch(q, 0, 30);
+    ok(fired, "延迟任务到点被派发");
+
+    // ---- 终止：残留任务不能把进程挂住 ----
+    ok(SUCCEEDED(XTaskQueueSubmitCallback(q, 0, nullptr, reinterpret_cast<void*>(&on_work))), "残留任务");
+    ok(SUCCEEDED(XTaskQueueTerminate(q, true, nullptr, nullptr)), "Terminate(wait)");
+
     XTaskQueueCloseHandle(q);
+    CloseHandle(evA);
+    CloseHandle(evB);
     CloseHandle(ev);
     xbgtasix::logf("[t20] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
