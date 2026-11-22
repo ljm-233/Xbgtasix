@@ -73,8 +73,9 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 ## 快速开始
 
 ```bash
-./build.sh                 # MinGW64 + g++ + dxc，产出 3 个 shim
+./build.sh                 # MinGW64 + g++ + dxc，产出 3 个 shim（约 90 秒）
 ./tools/run_suite.sh       # 32 项测试一条命令，约 12 秒
+./tools/ci_build.sh        # CI 同款：无 GDK 也能验 xmem 子集
 ```
 
 返回码约定：`0 = PASS`、`2 = SKIP`（本机不支持该能力）、其它 `FAIL`。
@@ -160,6 +161,7 @@ Xbgtasix/
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/analyze_exe.py         目标 exe 导入面 vs shim 导出面（跑之前就能对表）
   tools/launch.sh              放进 shim 环境跑起来 + 失败分类
+  tools/ci_build.sh            CI 同款构建+测试（分"需 GDK / 不需 GDK"两层）
   tools/run_suite.sh           一条命令跑全套 + TSV 报告
   tools/check_real_dlls.py     用真实游戏侧 DLL 验证导出面（静态 + 动态）
   tools/selftest_tools.py      Python 工具自检（CI 门槛）
@@ -194,7 +196,7 @@ Xbgtasix/
 |---|---|---|
 | `python-tools` | 合成样本自检 5 个 Python 工具 | 无依赖 |
 | `docs-links` | 检查 md 相对链接 | 无依赖 |
-| `windows-build` | 构建 + 全套测试 | 需要 GDK 头；缺的时候会在 summary 里**明确写"本 job 没有编译过任何 C++"**，不冒充通过 |
+| `windows-build` | `tools/ci_build.sh`：先跑**无 GDK 依赖**的 `xmem.dll` + `t3_xmem`（93 条断言），有 GDK 再跑全套 | 两种情况都真编译真断言；缺 GDK 时 summary 明确写"未覆盖 xgameruntime/d3d12_xs" |
 
 ---
 
