@@ -95,6 +95,7 @@ run_one t14 t14_vram.exe
 run_one t17 t17_async2.exe
 run_one t18 t18_package.exe "$CFG"
 run_one t19 t19_save.exe "$CFG"
+run_one t20 t20_taskqueue2.exe
 run_one t15 t15_budget.exe
 
 PKG=${XBGTASIX_PKG:-"D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK"}
