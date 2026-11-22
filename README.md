@@ -87,6 +87,7 @@ TLS、SEH 全由系统完成 —— 我们要写的只是"这些 DLL 里该有�
 | 文档 | 结论 |
 |---|---|
 | [docs/HANDOFF.md](docs/HANDOFF.md) | **交接摘要**：当前状态、复跑命令、exe 到手后的顺序 |
+| [docs/publish.md](docs/publish.md) | 发布到 GitHub 的步骤（含本机无网络的替代方案） |
 | [docs/package-completeness.md](docs/package-completeness.md) | 用包自带 layout 核对：**104 个条目只缺 1 个 = exe** |
 | [docs/encryption-map.md](docs/encryption-map.md) | 逐个归档的加密占比：**levels.rpf 99% 明文**，加密的只有目录表 |
 | [docs/assets-inventory.md](docs/assets-inventory.md) | 现在能拿到的资产：333 载具 / 160 服装 / 57 GB TTPF 贴图 / 21,522 着色器 |

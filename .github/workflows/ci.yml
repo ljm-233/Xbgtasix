@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python-tools:
+    name: Python 工具自检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # 用合成样本验证 rpf9_probe / rpf_carve / shader_stats / match_texture / analyze_exe
+      - run: python tools/selftest_tools.py
+
+  docs-links:
+    name: 文档相对链接
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tools/check_docs.py
+
+  windows-build:
+    name: Windows 构建 + 全套测试（需要 GDK，缺则跳过）
+    runs-on: windows-latest
+    # 完整构建依赖微软 GDK 头文件（不入库），所以这一步允许失败但会显示原因
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查 GDK 头文件是否就位
+        id: gdk
+        shell: bash
+        run: |
+          if [ -d ../gdk/include_clean ] && [ -f ../gdk/lib/xgameruntime.lib ]; then
+            echo "have=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 没有 GDK —— 跳过（这是预期行为，不算失败）
+        if: steps.gdk.outputs.have == '0'
+        shell: bash
+        run: |
+          echo "::notice::未找到 ../gdk/include_clean 与 ../gdk/lib/xgameruntime.lib"
+          echo "微软的 GDK 头/库不入库。要跑这一步，请把 GDK 解到仓库旁的 ../gdk/。"
+          echo "获取方式见 docs/publish.md 的说明。"
+
+      - name: 安装 MinGW 与 Vulkan SDK（dxc）
+        if: steps.gdk.outputs.have == '1'
+        shell: bash
+        run: |
+          choco install mingw --no-progress -y
+          choco install vulkan-sdk --no-progress -y
+
+      - name: 构建
+        if: steps.gdk.outputs.have == '1'
+        shell: bash
+        run: ./build.sh
+
+      - name: 全套测试
+        if: steps.gdk.outputs.have == '1'
+        shell: bash
+        run: ./tools/run_suite.sh
+
+      - name: 上传测试报告
+        if: steps.gdk.outputs.have == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-report
+          path: build/suite/
+          if-no-files-found: ignore

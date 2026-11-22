@@ -87,5 +87,5 @@ DXBC  count=0    DXIL  count=0    SHDR  count=0    RDEF  count=0
 （"缺失的 exe 里带着解密密钥"）一致 —— 数据很可能是加密/压缩存储的。
 但这只是**字节级旁证**，不是定论：RPF9 的 TOC 可能在压缩后的块里。
 
-下一步验证方式：用 [rpf9-explorer](rpf9-explorer-1.0-windows-x64.zip) 打开 `common.rpf` 试列目录。
+下一步验证方式：用 `rpf9-explorer`（第三方工具，不在本仓库内） 打开 `common.rpf` 试列目录。
 列得出来 → 只是压缩；列不出来 → 加密，资产路线也得等密钥。
