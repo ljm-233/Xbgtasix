@@ -68,7 +68,8 @@ echo "== shaders (dxc)"
 DXC=${DXC:-/c/VulkanSDK/1.4.363.1/Bin/dxc.exe}
 if [ -x "$DXC" ]; then
   for pair in "t1_triangle/triangle:VSMain:vs_6_0:PSMain:ps_6_0:triangle" \
-              "t2_textured/quad:VSMain:vs_6_0:PSMain:ps_6_0:quad"; do
+              "t2_textured/quad:VSMain:vs_6_0:PSMain:ps_6_0:quad" \
+              "t4_bindless/bindless:VSMain:vs_6_0:PSMain:ps_6_0:bindless"; do
     IFS=: read -r src vsname vsprof psname psprof out <<< "$pair"
     HLSL=$(cygpath -m "$PWD/tests/$src.hlsl")
     "$DXC" -T "$vsprof" -E "$vsname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.vs.cso")" "$HLSL"
@@ -95,6 +96,12 @@ echo "== t2_textured.exe"
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t2_textured.exe"
+
+echo "== t4_bindless.exe"
+"$CXX" "${FLAGS[@]}" tests/t4_bindless/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t4_bindless.exe"
 
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
