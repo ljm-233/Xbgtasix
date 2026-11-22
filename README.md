@@ -143,6 +143,7 @@ Xbgtasix/
   tests/t12_sheet/             拼图工具（批量渲染/贴图库 -> 网格缩略图）
   tests/t13_caps/              显卡适配：适配器枚举 + 能力断言 + 选卡验证
   tests/t14_vram/              显存预算：QueryVideoMemoryInfo + 实测可分配量
+  tests/t15_budget/            预算变化通知 + 降级策略实测
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK
