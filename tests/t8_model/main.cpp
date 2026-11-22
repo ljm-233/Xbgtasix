@@ -793,7 +793,10 @@ int main(int argc, char** argv) {
     const float eye[3] = {1.45f * std::cos(0.5f), 0.75f, 1.55f};
     const float at[3] = {0, 0, 0};
     const float up[3] = {0, 1, 0};
-    Mat4 model = mul(rotation_x(-1.5708f), rotation_y(0.6f));  // RAGE 数据是 Z-up
+    // RAGE 数据是 Z-up，要转成 Y-up。行向量约定下绕 X 旋转 +90°：
+    //   y' = y*cos + z*sin = z   (Z 轴朝上 -> Y 轴朝上)
+    // 写成 -90° 会得到 y' = -z，模型整个倒过来（很容易看漏，因为"倒着"也能渲染成功）
+    Mat4 model = mul(rotation_x(1.5708f), rotation_y(0.6f));
     Mat4 mvp_m = mul(mul(model, look_at(eye, at, up)), perspective(0.9f, 1.0f, 0.05f, 100.0f));
     // 模型归一化到单位球：先平移 -center，再缩放 1/radius
     // 行向量约定：p' = (p - center) * s
