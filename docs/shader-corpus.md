@@ -121,6 +121,10 @@ mesh shader（NGG）能正确识别成 `[outputtopology("triangle")]` + `MSMain`
 用 `D3D12_PIPELINE_STATE_STREAM_DESC` 建 mesh PSO、`ID3D12GraphicsCommandList6::DispatchMesh`
 出图，中心像素 (105,130,146) 与清屏色 (5,5,5) 区分开。
 
+`tests/t6_rt` 验证了 64 个 BVH64 所依赖的能力：本机 `RaytracingTier = 11`（1.1），
+BLAS(384 B) + TLAS(448 B) + 状态对象 + SBT + `DispatchRays` 全通，中心像素绿（命中）、
+角落像素蓝（未命中）。
+
 > 踩坑记录：手写 stream 子对象时，类型字段（4 字节）后面必须按载荷自身对齐补 padding，
 > 否则指针落在 +4 位置，D3D12 运行时用对齐指令读会直接 AV（0xC0000005）。
 

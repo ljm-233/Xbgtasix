@@ -78,6 +78,9 @@ if [ -x "$DXC" ]; then
     "$DXC" -T "$vsprof" -E "$vsname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.$vsext.cso")" "$HLSL"
     "$DXC" -T "$psprof" -E "$psname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.ps.cso")" "$HLSL"
   done
+  # t6：光追库不需要 -E，导出库里所有 entry point
+  "$DXC" -T lib_6_3 -O3 -Fo "$(cygpath -m "$PWD/$OUT/rt.lib.cso")" \
+      "$(cygpath -m "$PWD/tests/t6_rt/rt.hlsl")"
 else
   echo "  (找不到 dxc，跳过；测试程序会因缺 .cso 退出)"
 fi
@@ -111,6 +114,12 @@ echo "== t5_mesh.exe"
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t5_mesh.exe"
+
+echo "== t6_rt.exe"
+"$CXX" "${FLAGS[@]}" tests/t6_rt/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t6_rt.exe"
 
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
