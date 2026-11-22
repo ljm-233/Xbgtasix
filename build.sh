@@ -50,11 +50,19 @@ fi
   echo "LIBRARY xgameruntime"
   echo "EXPORTS"
   cat src/xgameruntime/exports.txt
-  [ -f src/generated/xgameruntime_exports.inc ] && cat src/generated/xgameruntime_exports.inc
+  if [ -f src/generated/xgameruntime_exports.inc ]; then
+    cat src/generated/xgameruntime_exports.inc
+  else
+    echo "警告：缺少 generated/xgameruntime_exports.inc，.def 会缺导出" >&2
+  fi
+  if [ -f src/generated/xgameruntime_guids.inc ]; then
+    cat src/generated/xgameruntime_guids.inc
+  fi
 } > "$OUT/xgameruntime.def"
 
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
     src/xgameruntime/xgameruntime.cpp src/generated/xgameruntime_stubs.cpp \
+    src/generated/xgameruntime_guids.cpp \
     src/trace.cpp \
     "$OUT/xgameruntime.def" \
     -o "$OUT/xgameruntime.dll" -Wl,--out-implib,"$OUT/libxgameruntime.dll.a"
@@ -227,4 +235,5 @@ echo "== t3_xmem.exe"
 
 echo
 echo "done: $OUT/"
-ls -1 "$OUT"/*.dll "$OUT"/*.exe "$OUT"/*.cso
+# 注意：set -e 下 `ls *.cso` 在没有 shader 产出时会非零退出，把成功构建变成失败
+ls -1 "$OUT"/*.dll "$OUT"/*.exe "$OUT"/*.cso 2>/dev/null || true

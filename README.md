@@ -57,7 +57,7 @@
 
 ```bash
 ./build.sh              # MinGW64 + g++ + dxc
-./tools/run_suite.sh    # 16 个测试一条命令
+./tools/run_suite.sh    # 21 项测试一条命令
 ```
 
 返回码语义：`0 = PASS`、`2 = SKIP`（本机不支持该能力，如无光追）、其它 `FAIL`。
@@ -76,7 +76,7 @@ TLS、SEH 全由系统完成 —— 要写的只是"这些 DLL 里该有什么"�
 
 | DLL | 导出 | 内容 |
 |---|---|---|
-| `xgameruntime.dll` | **461**（74 手写 + 387 生成桩） | 生命周期（真读 `MicrosoftGame.Config`）、任务队列、用户、持久化存储、XAsync |
+| `xgameruntime.dll` | **461**（86 手写 + 325 生成桩 + 50 个 GUID 数据导出） | 生命周期（真读 `MicrosoftGame.Config`）、任务队列、用户、持久化存储、XAsync |
 | `xmem.dll` | 4 | `XMemAlloc/Free/VirtualQuery/GetWorkingSetStatistics`，64 KB 页语义 |
 | `d3d12_xs.dll` | 18 | 4 个手写（带日志 + 选卡）+ 14 个原生转发到系统 `d3d12.dll` |
 
@@ -111,6 +111,7 @@ XBGTASIX_CONFIG=<path>  # 指定 MicrosoftGame.Config
 | [HANDOFF](docs/HANDOFF.md) | 交接摘要（状态、复跑、下一步） |
 | [env-gotchas](docs/env-gotchas.md) | 环境与工具链的 7 个坑（沙箱按进程放行、路径分隔符、git TLS、mingw 头文件不一致…） |
 | [publish](docs/publish.md) | 发布到 GitHub 的步骤与认证方式 |
+| [audit-2026-11](docs/audit-2026-11.md) | 五个子代理的全项目审查记录（含未修项与优先级） |
 | [CONTRIBUTING](CONTRIBUTING.md) | 怎么加测试 / 补 shim 导出 / 标证据等级 / 提交规范 |
 | [anyps5-notes](docs/anyps5-notes.md) | 同类项目 AnyPS5 的分层方式与教训 |
 | [gdk_api_surface](docs/gdk_api_surface.md) | 包内 16 个 DLL 的导入/导出面 |
@@ -130,11 +131,11 @@ XBGTASIX_CONFIG=<path>  # 指定 MicrosoftGame.Config
 Xbgtasix/
   build.sh                     MinGW 构建（合并手写导出 + 生成导出 + dxc 编 shader）
   include/xbgtasix/trace.h     日志 / 未实现策略
-  src/xgameruntime/            21 个手写实现 + exports.txt
+  src/xgameruntime/            86 个手写实现 + exports.txt
   src/xmem/                    XMem* → VirtualAlloc（64 KB 页语义）
   src/d3d12_xs/                手写 + forward.def（14 个原生转发）+ 选卡
-  src/generated/               471 个桩（gen_stubs.py 生成，勿手改）
-  tests/t0…t15/                15 个测试，全部离屏可跑
+  src/generated/               325 个桩 + 50 个 GUID 数据导出（生成物，勿手改）
+  tests/t0…t21/                20 个目录（t16 是 python 步），全部离屏可跑
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK
@@ -146,11 +147,11 @@ Xbgtasix/
   tools/match_texture.py       模型名 ↔ 贴图名 匹配
   tools/render_gallery.sh      批量渲染 OBJ
   tools/packaging/             rpf9_probe / rpf_carve / encryption_survey / shader_stats / find_pe / pe_surface / verify_package
-  docs/                        17 份结论文档
+  docs/                        18 份结论文档（+ 审查记录）
   .github/workflows/ci.yml     3 个 job（见下）
 ```
 
-规模：**6,335 行**代码（C++/HLSL），33 个提交，`.git` 1.7 MB。
+规模：**7,829 行**代码（C++/HLSL），49 个提交，`.git` 2.7 MB。
 
 ---
 
@@ -172,7 +173,7 @@ Xbgtasix/
 |---|---|---|
 | `python-tools` | 合成样本自检 5 个 Python 工具 | 无依赖 |
 | `docs-links` | 检查 md 相对链接 | 无依赖 |
-| `windows-build` | 构建 + 15 项测试 | 需要 GDK 头；缺失时打印说明后跳过（`continue-on-error`） |
+| `windows-build` | 构建 + 全套 21 项 | 需要 GDK 头；缺失时打印说明后跳过（`continue-on-error`） |
 
 ---
 

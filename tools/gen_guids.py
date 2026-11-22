@@ -40,7 +40,7 @@ def main():
 
     # 导出名片段（build.sh 会把它拼进 .def；数据符号不需要别名）
     io.open(incfile, "w", encoding="utf-8", newline="\n").write(
-        "".join("  %s\n" % g for g in ok))
+        "".join("  %s DATA\n" % g for g in ok))
     print("%d 个 GUID 数据定义 -> %s / %s" % (len(ok), cpp, incfile))
 
 
