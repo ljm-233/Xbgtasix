@@ -116,6 +116,7 @@ run_one t27 t27_composite.exe
 run_one t28 t28_speech.exe
 run_one t29 t29_perf.exe "$CFG"
 run_one t30 t30_fakegame.exe "$CFG" "$PKG"
+run_one t31 t31_swapchain.exe
 run_one t15 t15_budget.exe
 
 if [ -d "$PKG" ]; then
