@@ -113,6 +113,7 @@ run_one t24 t24_save2.exe
 run_one t25 t25_sys.exe
 run_one t26 t26_stream.exe
 run_one t27 t27_composite.exe
+run_one t28 t28_speech.exe
 run_one t15 t15_budget.exe
 
 if [ -d "$PKG" ]; then
