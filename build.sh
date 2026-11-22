@@ -148,6 +148,12 @@ echo "== t10_integration.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t10_integration.exe"
 
+echo "== t11_storage.exe"
+"$CXX" "${FLAGS[@]}" tests/t11_storage/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t11_storage.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
