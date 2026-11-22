@@ -30,6 +30,15 @@ constexpr UINT kRecordSize = 64;   // SBT 记录：32 字节 shader id + 余量�
 
 int g_fail = 0;
 
+// 分段计时：找出这 30 秒花在哪
+double ms_since_start() {
+    static LARGE_INTEGER f = [] { LARGE_INTEGER t; QueryPerformanceFrequency(&t); return t; }();
+    static LARGE_INTEGER start = [] { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t; }();
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return 1000.0 * double(now.QuadPart - start.QuadPart) / double(f.QuadPart);
+}
+
 void check(HRESULT hr, const char* what) {
     if (FAILED(hr)) {
         xbgtasix::logf("[t6] FAIL %s hr=0x%08lx", what, static_cast<unsigned long>(hr));
@@ -195,6 +204,7 @@ int main() {
     so.NumSubobjects = 5;
     so.pSubobjects = subobjects;
 
+    xbgtasix::logf("[t6] t=%.0fms 创建状态对象前", ms_since_start());
     ID3D12StateObject* state = nullptr;
     check(dev5->CreateStateObject(&so, IID_ID3D12StateObject, reinterpret_cast<void**>(&state)),
           "CreateStateObject");
@@ -203,6 +213,7 @@ int main() {
         dev->Release();
         return 1;
     }
+    xbgtasix::logf("[t6] t=%.0fms 状态对象完成（这段是 DXIL 运行期编译）", ms_since_start());
     ID3D12StateObjectProperties* props = nullptr;
     check(state->QueryInterface(IID_ID3D12StateObjectProperties, reinterpret_cast<void**>(&props)),
           "QI StateObjectProperties");
@@ -301,8 +312,9 @@ int main() {
         ++fence_val;
         queue->Signal(fence, fence_val);
         if (fence->GetCompletedValue() < fence_val) {
-            fence->SetEventOnCompletion(fence_val, ev);
-            WaitForSingleObject(ev, 10000);
+            const HRESULT hs = fence->SetEventOnCompletion(fence_val, ev);
+            const DWORD w = WaitForSingleObject(ev, 10000);
+            xbgtasix::logf("[t6] BLAS 等待: setev=0x%08lx wait=%lu", static_cast<unsigned long>(hs), w);
         }
     }
 
@@ -358,8 +370,9 @@ int main() {
         ++fence_val;
         queue->Signal(fence, fence_val);
         if (fence->GetCompletedValue() < fence_val) {
-            fence->SetEventOnCompletion(fence_val, ev);
-            WaitForSingleObject(ev, 10000);
+            const HRESULT hs = fence->SetEventOnCompletion(fence_val, ev);
+            const DWORD w = WaitForSingleObject(ev, 10000);
+            xbgtasix::logf("[t6] TLAS 等待: setev=0x%08lx wait=%lu", static_cast<unsigned long>(hs), w);
         }
     }
 
@@ -483,23 +496,31 @@ int main() {
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     check(list->Close(), "List::Close(rays)");
+    xbgtasix::logf("[t6] t=%.0fms DispatchRays 录完并 Close", ms_since_start());
     {
         ID3D12CommandList* lists[] = {list};
         queue->ExecuteCommandLists(1, lists);
+        xbgtasix::logf("[t6] t=%.0fms ExecuteCommandLists 返回", ms_since_start());
         ++fence_val;
         queue->Signal(fence, fence_val);
+        xbgtasix::logf("[t6] t=%.0fms Signal 返回", ms_since_start());
         if (fence->GetCompletedValue() < fence_val) {
-            fence->SetEventOnCompletion(fence_val, ev);
-            WaitForSingleObject(ev, 20000);
+            const HRESULT hs = fence->SetEventOnCompletion(fence_val, ev);
+            const DWORD w = WaitForSingleObject(ev, 20000);
+            xbgtasix::logf("[t6] DispatchRays 等待: setev=0x%08lx wait=%lu", static_cast<unsigned long>(hs), w);
+            if (w == WAIT_TIMEOUT) xbgtasix::logf("[t6] 超时，设备移除原因=0x%08lx",
+                                                  static_cast<unsigned long>(dev->GetDeviceRemovedReason()));
         }
     }
 
+    xbgtasix::logf("[t6] t=%.0fms 命令提交与等待完成", ms_since_start());
     // ---- 判定：中心绿（命中）、四角蓝（miss）----
     unsigned char* px = nullptr;
     D3D12_RANGE rr{0, kReadbackBytes};
     int rc = 1;
     if (SUCCEEDED(rb->Map(0, &rr, reinterpret_cast<void**>(&px))) && px) {
         auto at = [&](UINT x, UINT y) { return px + y * kRowPitch + x * 4; };
+        xbgtasix::logf("[t6] t=%.0fms Map 返回", ms_since_start());
         const unsigned char* c = at(kDim / 2, kDim / 2);
         const unsigned char* corner = at(1, 1);
         xbgtasix::logf("[t6] 中心 = (%u,%u,%u,%u)  角落 = (%u,%u,%u,%u)",
@@ -535,6 +556,7 @@ int main() {
     if (alloc) alloc->Release();
     if (queue) queue->Release();
     if (ev) CloseHandle(ev);
+    xbgtasix::logf("[t6] t=%.0fms 全部结束", ms_since_start());
     dev5->Release();
     dev->Release();
 
