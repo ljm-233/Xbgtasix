@@ -85,6 +85,7 @@ TLS、SEH 全由系统完成 —— 我们要写的只是"这些 DLL 里该有�
 | [docs/HANDOFF.md](docs/HANDOFF.md) | **交接摘要**：当前状态、复跑命令、exe 到手后的顺序 |
 | [docs/package-completeness.md](docs/package-completeness.md) | 用包自带 layout 核对：**104 个条目只缺 1 个 = exe** |
 | [docs/encryption-map.md](docs/encryption-map.md) | 逐个归档的加密占比：**levels.rpf 99% 明文**，加密的只有目录表 |
+| [docs/assets-inventory.md](docs/assets-inventory.md) | 现在能拿到的资产：333 载具 / 160 服装 / 57 GB TTPF 贴图 / 21,522 着色器 |
 | [docs/report.md](docs/report.md) | **技术报告（叙事版）**：目标、做法、数字、缺口 |
 | [docs/exe-day-checklist.md](docs/exe-day-checklist.md) | **exe 到手当天的 10 分钟操作顺序**（含三堵预期墙） |
 | [docs/where-is-the-exe.md](docs/where-is-the-exe.md) | 全包扫描确认**没有 exe**；`gameos.xvd` 等容器里也没有 |
@@ -137,6 +138,7 @@ Xbgtasix/
   tests/t9_async/              L9：任务队列 + 用户流程
   tests/t10_integration/       L10：端到端（真配置 + Manual 队列 + 延迟提交 + XAsync）
   tests/t11_storage/           L11：持久化本地存储
+  tests/t12_sheet/             拼图工具（批量渲染/贴图库 -> 网格缩略图）
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK
