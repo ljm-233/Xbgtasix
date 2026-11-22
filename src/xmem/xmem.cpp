@@ -4,7 +4,7 @@
 //   [事实]  有公开资料原文支撑，见 docs/xmem-evidence.md
 //   [推断]  由公开资料合理推导，但无逐字定义
 //   [自定]  完全由本项目选定，仅由 tests/t3_xmem 锁住，拿到 xmem.h 后必须替换
-#include "xbshim/trace.h"
+#include "xbgtasix/trace.h"
 
 #include <windows.h>
 
@@ -49,7 +49,7 @@ uint64_t g_total_allocs = 0;
 bool poison_enabled() {
     static const bool on = [] {
         char buf[8] = {0};
-        return GetEnvironmentVariableA("XBSHIM_XMEM_POISON", buf, sizeof(buf)) > 0 &&
+        return GetEnvironmentVariableA("XBGTASIX_XMEM_POISON", buf, sizeof(buf)) > 0 &&
                std::strcmp(buf, "1") == 0;
     }();
     return on;
@@ -85,7 +85,7 @@ __declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) 
 
     const size_t align = alignment_from(attributes);
     if (size > SIZE_MAX - align - sizeof(Header)) {
-        xbshim::logf("[xmem] XMemAlloc size overflow: %zu", size);
+        xbgtasix::logf("[xmem] XMemAlloc size overflow: %zu", size);
         return nullptr;
     }
     // 多要 align + header 用于手动对齐。
@@ -98,7 +98,7 @@ __declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) 
     auto* raw = static_cast<uint8_t*>(
         VirtualAlloc(nullptr, committed, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!raw) {
-        xbshim::logf("[xmem] VirtualAlloc(%zu, align=%zu) failed: %lu", size, align, GetLastError());
+        xbgtasix::logf("[xmem] VirtualAlloc(%zu, align=%zu) failed: %lu", size, align, GetLastError());
         return nullptr;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(raw) + sizeof(Header);
@@ -128,7 +128,7 @@ __declspec(dllexport) void __cdecl XMemFree(void* ptr) {
         std::lock_guard<std::mutex> lock(g_mu);
         auto it = g_allocs.find(ptr);
         if (it == g_allocs.end()) {
-            xbshim::logf("[xmem] XMemFree of unknown pointer %p (ignored)", ptr);
+            xbgtasix::logf("[xmem] XMemFree of unknown pointer %p (ignored)", ptr);
             return;
         }
         h = it->second;

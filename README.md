@@ -1,4 +1,4 @@
-# xbshim — Xbox GDK 兼容层骨架（Windows 原生，L0–L4 已跑通）
+# Xbgtasix — Xbox GDK 兼容层骨架（Windows 原生，L0–L4 已跑通）
 
 在普通 Windows 上，让导入 `xgameruntime.dll` / `xmem.dll` / `d3d12_xs.dll` 的程序启动，
 并建出真实 D3D12 设备。
@@ -43,7 +43,7 @@ TLS、SEH 全部由系统完成。要写的只是"这些 DLL 里该有什么"。
 | `d3d12_xs.dll` | **18 个导出**：4 个手写（带日志）+ 14 个原生转发到 `System32\d3d12.dll` | 已验证能建出真设备 |
 
 生成了一个桩就少一个"未知失败"：现在任何 GDK 程序导入的名字都能解析到，
-第一个缺的东西会以 `[xbshim] UNIMPLEMENTED: <名字>` 出现在 `xbshim.log`。
+第一个缺的东西会以 `[xbgtasix] UNIMPLEMENTED: <名字>` 出现在 `xbgtasix.log`。
 
 ## 验证记录（本机）
 
@@ -108,7 +108,7 @@ L4（t2_textured，纹理 + CBV + 深度，同一场景渲两次比对）：
 | `XMemVirtualQueryInfo.RegionSize` | ≥64KB 且是 64KB 的整数倍 |
 | 释放后 `XMemVirtualQuery` | 返回 `MEM_FREE`（`state=0x10000`） |
 | 线程安全 | mutex + 哈希表；8 线程并发已验证 |
-| `XBSHIM_XMEM_POISON=1` | free 时 `memset(0xDD)`，用于抓 use-after-free |
+| `XBGTASIX_XMEM_POISON=1` | free 时 `memset(0xDD)`，用于抓 use-after-free |
 
 **性能注记**：每次 `XMemAlloc` 一次 `VirtualAlloc`，约 5 µs/次（6.6 万次 350 ms）。
 真游戏有百万级小分配时这会偏慢，也更容易碎片化；等真程序压上来再考虑页池。
@@ -120,8 +120,8 @@ L4（t2_textured，纹理 + CBV + 深度，同一场景渲两次比对）：
 
 ## 未实现 API 策略
 
-`XBSHIM_UNIMPL=stop`（默认）→ 打印调用名后 `ExitProcess(70)`；
-`XBSHIM_UNIMPL=log` → 只记录，用于铺开调用面。日志同时写 stderr 与 exe 同目录 `xbshim.log`。
+`XBGTASIX_UNIMPL=stop`（默认）→ 打印调用名后 `ExitProcess(70)`；
+`XBGTASIX_UNIMPL=log` → 只记录，用于铺开调用面。日志同时写 stderr 与 exe 同目录 `xbgtasix.log`。
 
 ## 生成桩
 
@@ -136,9 +136,9 @@ python tools/gen_stubs.py ../gdk/lib/xgameruntime.lib --dll xgameruntime \
 ## 目录
 
 ```
-xbshim/
+xbgtasix/
   build.sh                     MinGW 构建（合并手写导出 + 生成导出 + dxc 编 shader）
-  include/xbshim/trace.h       日志 / 未实现策略
+  include/xbgtasix/trace.h       日志 / 未实现策略
   src/trace.cpp
   src/xmem/                    XMem* → VirtualAlloc（64KB 页语义）
   src/xgameruntime/            手写实现 + exports.txt

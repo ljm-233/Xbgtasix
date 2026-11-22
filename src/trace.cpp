@@ -1,5 +1,5 @@
-// xbshim: 日志 + 未实现 API 策略
-#include "xbshim/trace.h"
+// xbgtasix: 日志 + 未实现 API 策略
+#include "xbgtasix/trace.h"
 
 #include <windows.h>
 
@@ -7,7 +7,7 @@
 #include <set>
 #include <string>
 
-namespace xbshim {
+namespace xbgtasix {
 namespace {
 
 std::mutex g_mu;
@@ -18,12 +18,12 @@ char g_root[MAX_PATH] = {0};
 void ensure_open() {
     if (g_file) return;
     char path[MAX_PATH] = {0};
-    DWORD n = GetEnvironmentVariableA("XBSHIM_LOG", path, MAX_PATH);
+    DWORD n = GetEnvironmentVariableA("XBGTASIX_LOG", path, MAX_PATH);
     if (n == 0) {
         char exe[MAX_PATH] = {0};
         GetModuleFileNameA(nullptr, exe, MAX_PATH);
         if (char* slash = strrchr(exe, '\\')) *(slash + 1) = 0;
-        _snprintf(path, MAX_PATH, "%sxbshim.log", exe);
+        _snprintf(path, MAX_PATH, "%sxbgtasix.log", exe);
     }
     g_file = fopen(path, "a");
 }
@@ -32,7 +32,7 @@ void ensure_open() {
 
 UnimplMode unimpl_mode() {
     char buf[16] = {0};
-    DWORD n = GetEnvironmentVariableA("XBSHIM_UNIMPL", buf, sizeof(buf));
+    DWORD n = GetEnvironmentVariableA("XBGTASIX_UNIMPL", buf, sizeof(buf));
     if (n > 0 && _stricmp(buf, "log") == 0) return UnimplMode::Log;
     return UnimplMode::Stop;
 }
@@ -63,9 +63,9 @@ void unimpl(const char* api) {
             if (unimpl_mode() == UnimplMode::Log) return;
         }
     }
-    logf("[xbshim] UNIMPLEMENTED: %s", api);
+    logf("[xbgtasix] UNIMPLEMENTED: %s", api);
     if (unimpl_mode() == UnimplMode::Stop) {
-        logf("[xbshim] stop (set XBSHIM_UNIMPL=log to continue)");
+        logf("[xbgtasix] stop (set XBGTASIX_UNIMPL=log to continue)");
         ExitProcess(70);
     }
 }
@@ -77,4 +77,4 @@ void set_game_root(const char* path) {
 
 const char* game_root() { return g_root; }
 
-}  // namespace xbshim
+}  // namespace xbgtasix

@@ -13,7 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "xbshim/trace.h"
+#include "xbgtasix/trace.h"
 
 extern "C" {
 // xgameruntime.dll
@@ -36,14 +36,14 @@ int g_failures = 0;
 
 void check(HRESULT hr, const char* what) {
     if (FAILED(hr)) {
-        xbshim::logf("[t0] FAIL %s hr=0x%08lx", what, static_cast<unsigned long>(hr));
+        xbgtasix::logf("[t0] FAIL %s hr=0x%08lx", what, static_cast<unsigned long>(hr));
         ++g_failures;
     }
 }
 
 void check_bool(bool ok, const char* what) {
     if (!ok) {
-        xbshim::logf("[t0] FAIL %s", what);
+        xbgtasix::logf("[t0] FAIL %s", what);
         ++g_failures;
     }
 }
@@ -62,12 +62,12 @@ HWND create_window(HINSTANCE inst) {
     WNDCLASSA wc{};
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = inst;
-    wc.lpszClassName = "xbshim_t0";
+    wc.lpszClassName = "xbgtasix_t0";
     wc.hCursor = LoadCursorA(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
     RECT r{0, 0, static_cast<LONG>(kWidth), static_cast<LONG>(kHeight)};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    return CreateWindowExA(0, wc.lpszClassName, "xbshim t0_hello", WS_OVERLAPPEDWINDOW,
+    return CreateWindowExA(0, wc.lpszClassName, "xbgtasix t0_hello", WS_OVERLAPPEDWINDOW,
                            CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
                            nullptr, nullptr, inst, nullptr);
 }
@@ -107,7 +107,7 @@ bool create_pipeline(Gpu& g, HWND hwnd) {
     if (!g.device) return false;
 
     LUID luid = g.device->GetAdapterLuid();
-    xbshim::logf("[t0] device ok, adapter luid=%08lx:%08lx, nodes=%u",
+    xbgtasix::logf("[t0] device ok, adapter luid=%08lx:%08lx, nodes=%u",
                  static_cast<unsigned long>(luid.HighPart), static_cast<unsigned long>(luid.LowPart),
                  g.device->GetNodeCount());
 
@@ -207,7 +207,7 @@ bool render_frames(Gpu& g) {
             g.fence->SetEventOnCompletion(g.fence_value, g.fence_event);
             WaitForSingleObject(g.fence_event, 5000);
         }
-        xbshim::logf("[t0] frame %u presented", i + 1);
+        xbgtasix::logf("[t0] frame %u presented", i + 1);
     }
     return true;
 }
@@ -217,7 +217,7 @@ bool render_frames(Gpu& g) {
 int main(int argc, char** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const bool smoke = (argc > 1 && std::strcmp(argv[1], "--smoke") == 0);
-    xbshim::logf("[t0] t0_hello start (smoke=%d) pid=%lu", smoke ? 1 : 0, GetCurrentProcessId());
+    xbgtasix::logf("[t0] t0_hello start (smoke=%d) pid=%lu", smoke ? 1 : 0, GetCurrentProcessId());
 
     check(XGameRuntimeInitialize(), "XGameRuntimeInitialize");
 
@@ -228,7 +228,7 @@ int main(int argc, char** argv) {
         check_bool((reinterpret_cast<uintptr_t>(p) & 0xFFFF) == 0, "XMemAlloc 64KiB alignment");
         std::memset(p, 0xAB, 65536);
         XMemFree(p);
-        xbshim::logf("[t0] xmem roundtrip ok");
+        xbgtasix::logf("[t0] xmem roundtrip ok");
     }
 
     // smoke：只验证设备创建（不开窗，可在无桌面环境跑）
@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
         Gpu probe;
         const bool ok = create_pipeline(probe, nullptr);
         probe.release();
-        xbshim::logf("[t0] smoke done with %d failure(s)", g_failures);
+        xbgtasix::logf("[t0] smoke done with %d failure(s)", g_failures);
         return (ok && g_failures == 0) ? 0 : 1;
     }
 
@@ -244,7 +244,7 @@ int main(int argc, char** argv) {
     HINSTANCE inst = GetModuleHandleA(nullptr);
     HWND hwnd = create_window(inst);
     if (!hwnd) {
-        xbshim::logf("[t0] CreateWindow failed: %lu", GetLastError());
+        xbgtasix::logf("[t0] CreateWindow failed: %lu", GetLastError());
         return 1;
     }
     ShowWindow(hwnd, SW_SHOW);
@@ -254,6 +254,6 @@ int main(int argc, char** argv) {
     bool ok = create_pipeline(g2, hwnd) && render_frames(g2);
     g2.release();
     DestroyWindow(hwnd);
-    xbshim::logf("[t0] window run %s, %d failure(s)", ok ? "ok" : "failed", g_failures);
+    xbgtasix::logf("[t0] window run %s, %d failure(s)", ok ? "ok" : "failed", g_failures);
     return (ok && g_failures == 0) ? 0 : 1;
 }

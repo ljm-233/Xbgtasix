@@ -7,7 +7,7 @@
 //   3) 记录 xs 变体多出来的调用，供后续决定是否真的需要实现
 //
 // 之后要接 vkd3d-proton 时，只需把 resolve() 的搜索路径换成随包分发的 d3d12core.dll。
-#include "xbshim/trace.h"
+#include "xbgtasix/trace.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -26,9 +26,9 @@ void load_real() {
     _snprintf(path, MAX_PATH, "%s\\d3d12.dll", sys);
     g_d3d12 = LoadLibraryA(path);
     if (!g_d3d12) {
-        xbshim::logf("[d3d12_xs] failed to load %s (err=%lu)", path, GetLastError());
+        xbgtasix::logf("[d3d12_xs] failed to load %s (err=%lu)", path, GetLastError());
     } else {
-        xbshim::logf("[d3d12_xs] real d3d12 -> %s", path);
+        xbgtasix::logf("[d3d12_xs] real d3d12 -> %s", path);
     }
 }
 
@@ -37,7 +37,7 @@ T resolve(const char* name) {
     std::call_once(g_once, load_real);
     if (!g_d3d12) return nullptr;
     void* p = reinterpret_cast<void*>(GetProcAddress(g_d3d12, name));
-    if (!p) xbshim::logf("[d3d12_xs] export not found in real d3d12.dll: %s", name);
+    if (!p) xbgtasix::logf("[d3d12_xs] export not found in real d3d12.dll: %s", name);
     return reinterpret_cast<T>(p);
 }
 
@@ -52,7 +52,7 @@ __declspec(dllexport) HRESULT WINAPI D3D12CreateDevice(IUnknown* adapter,
     using PFN = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
     static PFN pfn = resolve<PFN>("D3D12CreateDevice");
     if (!pfn) return E_FAIL;
-    xbshim::logf("[d3d12_xs] D3D12CreateDevice(feature_level=0x%x)", static_cast<unsigned>(min_level));
+    xbgtasix::logf("[d3d12_xs] D3D12CreateDevice(feature_level=0x%x)", static_cast<unsigned>(min_level));
     return pfn(adapter, min_level, riid, device);
 }
 

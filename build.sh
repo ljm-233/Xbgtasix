@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建 xbshim（MinGW64 / git-bash）。CMake 在本机会卡在编译器探测，直接用 g++。
+# 构建 xbgtasix（MinGW64 / git-bash）。CMake 在本机会卡在编译器探测，直接用 g++。
 set -euo pipefail
 cd "$(dirname "$0")"
 
