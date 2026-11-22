@@ -62,6 +62,7 @@ echo "== d3d12_xs.dll (手写 4 + 转发)"
 
 "$CXX" "${FLAGS[@]}" -shared \
     src/d3d12_xs/d3d12_xs.cpp src/trace.cpp "$OUT/d3d12_xs.def" \
+    -ldxgi -ldxguid \
     -o "$OUT/d3d12_xs.dll" -Wl,--out-implib,"$OUT/libd3d12_xs.dll.a"
 
 echo "== shaders (dxc)"
@@ -159,6 +160,12 @@ echo "== t12_sheet.exe"
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
     -ldxgi -ldxguid -ld3d12 -lole32 -lwindowscodecs \
     -o "$OUT/t12_sheet.exe"
+
+echo "== t13_caps.exe"
+"$CXX" "${FLAGS[@]}" tests/t13_caps/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t13_caps.exe"
 
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
