@@ -66,8 +66,17 @@ def probe(path, window=512, limit_mb=8):
     print("     " + " ".join(row))
 
     runs = zero_runs(data, 1024)
-    print("\n   零填充区间（>=1KB）:", ", ".join("0x%x..0x%x (%.1f KB)" % (a, b, (b - a) / 1024)
-                                              for a, b in runs) or "无")
+    if runs:
+        total_zero = sum(b - a for a, b in runs)
+        biggest = max(runs, key=lambda r: r[1] - r[0])
+        print("\n   零填充: %d 段，共 %.1f KB（占读入的 %.1f%%），最大一段 0x%x..0x%x (%.1f KB）" % (
+            len(runs), total_zero / 1024, 100.0 * total_zero / max(1, len(data)),
+            biggest[0], biggest[1], (biggest[1] - biggest[0]) / 1024))
+        print("     前 3 段: %s%s" % (
+            ", ".join("0x%x..0x%x" % (a, b) for a, b in runs[:3]),
+            " …" if len(runs) > 3 else ""))
+    else:
+        print("\n   零填充: 无")
 
     print("\n   已知魔数:")
     for sig, label in SIGS.items():
