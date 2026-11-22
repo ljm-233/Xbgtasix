@@ -21,7 +21,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
+#include <vector>
 
 #include "XAsync.h"
 #include "XGame.h"
@@ -164,17 +164,37 @@ bool ensure_pls_path() {
 
 // ---------------- 异步完成表 ----------------
 
-std::mutex g_async_mu;
-std::unordered_set<XAsyncBlock*> g_async_done;
+struct AsyncState {
+    bool done = false;
+    HRESULT status = S_OK;
+    size_t result_size = 0;
+    std::vector<unsigned char> result;
+};
 
-void mark_async_done(XAsyncBlock* a) {
-    std::lock_guard<std::mutex> lock(g_async_mu);
-    g_async_done.insert(a);
+std::mutex g_async_mu;
+std::unordered_map<XAsyncBlock*, AsyncState> g_async;
+
+// 完成通知：标记完成 + 调回调（GDK 语义：回调在 completion 端口执行）
+void complete_async(XAsyncBlock* a, HRESULT status = S_OK) {
+    {
+        std::lock_guard<std::mutex> lock(g_async_mu);
+        AsyncState& st = g_async[a];
+        st.done = true;
+        st.status = status;
+    }
+    if (a->callback) a->callback(a);
 }
 
 bool is_async_done(XAsyncBlock* a) {
     std::lock_guard<std::mutex> lock(g_async_mu);
-    return g_async_done.count(a) != 0;
+    auto it = g_async.find(a);
+    return it != g_async.end() && it->second.done;
+}
+
+HRESULT async_status(XAsyncBlock* a) {
+    std::lock_guard<std::mutex> lock(g_async_mu);
+    auto it = g_async.find(a);
+    return it == g_async.end() ? E_PENDING : it->second.status;
 }
 
 // ---------------- 任务队列 ----------------
@@ -355,16 +375,39 @@ STDAPI_(void) XTaskQueueCloseHandle(XTaskQueueHandle queue) noexcept {
 
 STDAPI XAsyncGetStatus(XAsyncBlock* asyncBlock, bool wait) noexcept {
     if (!asyncBlock) return E_INVALIDARG;
-    if (is_async_done(asyncBlock)) return S_OK;
+    if (is_async_done(asyncBlock)) return async_status(asyncBlock);
     if (!wait) return E_PENDING;
     for (int i = 0; i < 5000 && !is_async_done(asyncBlock); ++i) Sleep(1);
-    return is_async_done(asyncBlock) ? S_OK : E_PENDING;
+    return is_async_done(asyncBlock) ? async_status(asyncBlock) : E_PENDING;
 }
 
 STDAPI_(void) XAsyncCancel(XAsyncBlock* asyncBlock) noexcept {
     if (!asyncBlock) return;
-    mark_async_done(asyncBlock);
-    if (asyncBlock->callback) asyncBlock->callback(asyncBlock);
+    complete_async(asyncBlock, E_ABORT);
+}
+
+// 通用异步：把 work 丢到线程里跑，完成时按 GDK 语义回调
+STDAPI XAsyncRun(XAsyncBlock* asyncBlock, XAsyncWork* work) noexcept {
+    if (!asyncBlock || !work) return E_INVALIDARG;
+    {
+        std::lock_guard<std::mutex> lock(g_async_mu);
+        g_async[asyncBlock] = AsyncState{};
+    }
+    std::thread([asyncBlock, work] {
+        const HRESULT hr = work(asyncBlock);
+        complete_async(asyncBlock, SUCCEEDED(hr) ? S_OK : hr);
+    }).detach();
+    return S_OK;
+}
+
+STDAPI XAsyncGetResultSize(XAsyncBlock* asyncBlock, size_t* bufferSize) noexcept {
+    if (!asyncBlock || !bufferSize) return E_INVALIDARG;
+    // 注意：只加一次锁。std::mutex 不可重入，持锁再调 async_status() 会自死锁（踩过，60 秒超时）
+    std::lock_guard<std::mutex> lock(g_async_mu);
+    auto it = g_async.find(asyncBlock);
+    if (it == g_async.end() || !it->second.done) return E_PENDING;
+    *bufferSize = it->second.result_size;
+    return it->second.status;
 }
 
 // ---- 用户（本地模拟） ----
@@ -379,10 +422,9 @@ STDAPI XUserAddAsync(XUserAddOptions options, XAsyncBlock* async) noexcept {
         std::lock_guard<std::mutex> lock(g_user_mu);
         g_pending_user[async] = reinterpret_cast<XUserHandle>(u);
     }
-    mark_async_done(async);
     xbgtasix::logf("[xgamert] XUserAddAsync -> 本地用户 id=%llu",
                    static_cast<unsigned long long>(u->id));
-    if (async->callback) async->callback(async);
+    complete_async(async);
     return S_OK;
 }
 
