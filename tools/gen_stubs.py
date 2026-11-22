@@ -138,11 +138,16 @@ def main():
 
     with open(base + "_stubs.cpp", "w", encoding="utf-8") as f:
         f.write('// 自动生成 —— 不要手改。重新运行 gen_stubs.py 覆盖。\n')
-        f.write('#include "xbgtasix/trace.h"\n\n')
+        f.write('#include <cstdint>\n\n#include "xbgtasix/trace.h"\n\n')
         f.write('extern "C" {\n')
         for i, sym in enumerate(syms):
             label = sym.replace('"', '\\"')
-            f.write('void %s(void) { XB_UNIMPL("%s"); }\n' % (ident(sym, i), label))
+            # 返回类型必须给一个"安全默认值"，不能是 void：
+            # 调用方会读 EAX/RAX，void 桩给的是栈垃圾 -> 不崩溃但行为随机。
+            # 返回 0 的含义按真实类型看是：HRESULT=S_OK / bool=false / 指针=NULL，
+            # 这三种都不会让调用方拿着野指针去解引用。
+            f.write('uintptr_t %s(void) { XB_UNIMPL("%s"); return 0; }\n'
+                    % (ident(sym, i), label))
         f.write('}  // extern "C"\n')
 
     print("%s: %d 个导出 -> %s.def / %s_stubs.cpp" % (args.dll, len(syms), base, base))
