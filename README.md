@@ -68,6 +68,7 @@ TLS、SEH 全由系统完成 —— 我们要写的只是"这些 DLL 里该有�
 
 | 文档 | 结论 |
 |---|---|
+| [docs/where-is-the-exe.md](docs/where-is-the-exe.md) | 全包扫描确认**没有 exe**；`gameos.xvd` 等容器里也没有 |
 | [docs/rpf9-findings.md](docs/rpf9-findings.md) | RPF9 目录表加密且公开工具不解；载荷可扫描；贴图名字来自载荷内部 |
 | [docs/shader-corpus.md](docs/shader-corpus.md) | 21,522 条着色器：**mesh shader 34.8%、光追 64 个、绑定槽 p99=98** |
 | [docs/d3d12xs-evidence.md](docs/d3d12xs-evidence.md) | D3D12.x 与桌面 D3D12 的差异面与哪些能用转发解决 |
