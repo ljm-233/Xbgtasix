@@ -66,12 +66,18 @@ Stats stats() {
 //   attributes 低 32 位是 >=64KB 的 2 的幂 -> 视为请求的对齐字节数；否则 64KB
 // 审查意见：这里的规则不能照抄实现，否则用被测代码算期望值 = 恒真。
 // 期望值写成字面量表（见下面的 cases），本函数只用于打印。
-size_t expect_align(uint64_t attributes) {
-    const uint64_t req = attributes & 0xFFFFFFFFull;
-    const uint64_t cap = 256ull * 1024 * 1024;
-    if (req >= 65536 && req <= cap && (req & (req - 1)) == 0) return static_cast<size_t>(req);
-    return 65536;
-}
+// 期望值写成字面量，不从实现推导（否则实现错了测试也跟着错）。
+// 规则：attributes 低 32 位若是 >=64KB 且 <=256MB 的 2 的幂，就按它对齐；否则 64KB。
+struct AlignCase { uint64_t code; size_t want; const char* why; };
+// 0 / 1 / 12345 都不是"合法对齐码" -> 64KB
+constexpr AlignCase kAlignCases[] = {
+    {0ull,                  65536, "默认"},
+    {1ull,                  65536, "非 2 的幂"},
+    {12345ull,              65536, "奇怪的码"},
+    {65536ull,              65536, "64KB 请求"},
+    {2ull * 1024 * 1024,    2ull * 1024 * 1024, "2MB 大页"},
+    {16ull * 1024 * 1024,   16ull * 1024 * 1024, "16MB"},
+};
 
 constexpr unsigned char kCanary = 0xA5;
 
@@ -89,15 +95,14 @@ bool verify(const unsigned char* p, size_t n) {
 // ---- 1. 对齐矩阵 ----
 void test_align_matrix() {
     const size_t sizes[] = {1, 4096, 65537, 1024 * 1024};
-    // 覆盖：0(默认) / 1(非 2 的幂) / 64KB / 2MB / 16MB / 一个奇怪的码
-    const uint64_t codes[] = {0, 1, 65536, 2ull * 1024 * 1024, 16ull * 1024 * 1024, 12345};
-    for (uint64_t code : codes) {
-        const size_t want = expect_align(code);
+    for (const AlignCase& c : kAlignCases) {
+        const uint64_t code = c.code;
+        const size_t want = c.want;
         for (size_t sz : sizes) {
             void* p = XMemAlloc(code, sz);
             ok(p != nullptr, "align: alloc");
             if (!p) continue;
-            ok((reinterpret_cast<uintptr_t>(p) % want) == 0, "align: pointer multiple");
+            ok((reinterpret_cast<uintptr_t>(p) % want) == 0, c.why);
             const size_t probe = sz < 64 ? sz : 64;
             stamp(static_cast<unsigned char*>(p), probe);
             ok(verify(static_cast<unsigned char*>(p), probe), "align: canary");
