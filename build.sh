@@ -4,6 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 export PATH="/d/mingw64/bin:$PATH"
+# 生成脚本会打中文；CI 的 Windows 控制台是 CP1252，不设这个会 UnicodeEncodeError
+export PYTHONIOENCODING=utf-8
 CXX=${CXX:-g++}
 OUT=build
 # 注意：MinGW 的 g++ 不认 MSYS 风格 /d/... 路径，必须用 D:/... 或相对路径
