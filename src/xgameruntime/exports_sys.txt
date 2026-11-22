@@ -1,0 +1,13 @@
+; XSystem/XDisplay/XThread（system_extra.cpp）
+; 只列本文件真正实现的符号：XSystemGetDeviceType/XSystemGetAnalyticsInfo/
+; XSystemGetRuntimeInfo/XDisplayTryEnableHdrMode 已在 xgameruntime.cpp 实现，不要重复。
+XSystemGetConsoleId
+XSystemGetXboxLiveSandboxId
+XSystemGetAppSpecificDeviceId
+XSystemIsHandleValid
+XSystemHandleTrack
+XDisplayAcquireTimeoutDeferral
+XDisplayCloseTimeoutDeferralHandle
+XThreadSetTimeSensitive
+XThreadIsTimeSensitive
+XThreadAssertNotTimeSensitive
