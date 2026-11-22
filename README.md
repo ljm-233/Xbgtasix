@@ -1,6 +1,7 @@
 # Xbgtasix
 
 [![ci](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml/badge.svg)](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 面向 Xbox Series / GDK 的**兼容层**与**资产格式研究**工具集。纯自写代码：512 个导出、
 15 个可断言测试、17 份带来源标注的结论文档。
@@ -178,6 +179,19 @@ Xbgtasix/
 **不做**：获取/破解 exe 或密钥、分发游戏资产、绕过授权。
 
 ---
+
+## 许可证
+
+[MIT](LICENSE) —— 代码与文档可自由使用、修改、再分发（保留版权声明即可）。
+
+**许可范围仅限本仓库的内容**：
+
+| 对象 | 是否被本许可证覆盖 |
+|---|---|
+| `src/`、`tests/`、`tools/`、`docs/` 里的自写代码与文档 | ✅ MIT |
+| 游戏资产（模型/贴图/音频/脚本） | ❌ 不在仓库内，版权归 Rockstar/Take-Two |
+| 微软 GDK 头文件与导入库 | ❌ 不在仓库内，微软自有许可 |
+| 第三方工具（PercyStar / SixNG / rpf9-explorer） | ❌ 未随仓库分发，各有自己的许可 |
 
 ## 法律
 
