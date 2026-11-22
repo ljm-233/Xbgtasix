@@ -325,8 +325,9 @@ struct TaskQueueState {
     std::deque<TaskEntry> work;
     std::deque<TaskEntry> comp;
     std::atomic<bool> stopped{false};
-    std::thread worker_work;
-    std::thread worker_comp;
+    // 线程池模式要按核数起多个 worker：主机上 ThreadPool 就是并行的，
+    // 只起 1 个线程会让"提交 8 个任务"退化成串行（实测这台机器 18 核）
+    std::vector<std::thread> workers;
 
     std::deque<TaskEntry>& queue_for(XTaskQueuePort p) {
         return p == XTaskQueuePort::Completion ? comp : work;
@@ -349,24 +350,44 @@ struct TaskQueueState {
         }
     }
 
+    static unsigned pool_size(XTaskQueueDispatchMode mode) {
+        if (mode == XTaskQueueDispatchMode::SerializedThreadPool) return 1;   // 串行池：1 个
+        if (mode != XTaskQueueDispatchMode::ThreadPool) return 0;             // Manual/Immediate：不起
+        const unsigned hc = std::thread::hardware_concurrency();
+        // 上限 8：主机上 GDK 的 ThreadPool 也不会把整机核数都吃掉
+        return hc == 0 ? 4 : (hc > 8 ? 8 : hc);
+    }
+
     void start_workers() {
-        // 只有线程池模式才起工作线程；Manual 必须由 XTaskQueueDispatch 驱动，
-        // Immediate 在提交时同步执行。之前给所有模式都起了线程，
-        // 导致 Manual 队列的回调被后台线程"偷偷"跑掉（t10 抓到）。
-        const bool work_threaded = work_mode == XTaskQueueDispatchMode::ThreadPool ||
-                                   work_mode == XTaskQueueDispatchMode::SerializedThreadPool;
-        const bool comp_threaded = comp_mode == XTaskQueueDispatchMode::ThreadPool ||
-                                   comp_mode == XTaskQueueDispatchMode::SerializedThreadPool;
-        if (work_threaded) worker_work = std::thread([this] { pump(XTaskQueuePort::Work); });
-        if (comp_threaded) worker_comp = std::thread([this] { pump(XTaskQueuePort::Completion); });
+        const unsigned nw = pool_size(work_mode);
+        const unsigned nc = pool_size(comp_mode);
+        for (unsigned i = 0; i < nw; ++i) {
+            workers.emplace_back([this] { pump(XTaskQueuePort::Work); });
+        }
+        for (unsigned i = 0; i < nc; ++i) {
+            workers.emplace_back([this] { pump(XTaskQueuePort::Completion); });
+        }
+        if (nw || nc) {
+            xbgtasix::logf("[xgamert] 队列线程: work=%u completion=%u（本机 %u 核）", nw, nc,
+                           std::thread::hardware_concurrency());
+        }
     }
 
     void shutdown(bool wait) {
         stopped.store(true);
         cv.notify_all();
         if (!wait) return;
-        if (worker_work.joinable()) worker_work.join();
-        if (worker_comp.joinable()) worker_comp.join();
+        for (auto& t : workers) {
+            if (!t.joinable()) continue;
+            // 在 worker 自己的回调里 Terminate 会对自身 join -> 死锁；
+            // 这种情况交给 detach，让线程自行退出
+            if (t.get_id() == std::this_thread::get_id()) {
+                t.detach();
+            } else {
+                t.join();
+            }
+        }
+        workers.clear();
     }
 };
 

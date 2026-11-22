@@ -35,6 +35,20 @@ Windows 默认计时器精度 = 15.6 ms → Sleep(1) 实际睡 15.6 ms
 这条不是微优化：真实游戏在加载线程里 `for (;;) { if (XAsyncGetStatus(b, true) == S_OK) break; }`
 这种写法，每次等 15.6 ms，几十个异步就是秒级卡顿。
 
+## 一·补：CPU 侧
+
+| 项目 | 实测/结论 |
+|---|---|
+| 本机 | **18 核 / 18 线程 / 2900 MHz** |
+| 线程池 worker 数 | 按核数起，上限 8（`min(hardware_concurrency, 8)`） |
+| SerializedThreadPool | 1 个 worker（语义就是串行） |
+| ThreadPool 吞吐 | **2000 个回调 16 ms**（约 12.5 万/秒） |
+
+**修掉的一个缺陷**：原来不论多少核都只起 **1 个 worker**，
+所以"提交 8 个任务"在 ThreadPool 模式下退化成串行执行。
+主机上 GDK 的 ThreadPool 是真并行，这属于语义错误而不只是性能问题。
+`t32_window` 现在断言 2000 个回调全部被执行且不丢。
+
 ## 二、可行性：分三层看
 
 ### 第 1 层：已证明可行（有测试证据）
