@@ -163,6 +163,7 @@ Xbgtasix/
   tools/analyze_exe.py         目标 exe 导入面 vs shim 导出面（跑之前就能对表）
   tools/launch.sh              放进 shim 环境跑起来 + 失败分类
   tools/ci_build.sh            CI 同款构建+测试（分"需 GDK / 不需 GDK"两层）
+  tools/ci_watch.sh            短轮询 CI 状态（默认最多 240s，超时先干别的）
   tools/run_suite.sh           一条命令跑全套 + TSV 报告
   tools/check_real_dlls.py     用真实游戏侧 DLL 验证导出面（静态 + 动态）
   tools/selftest_tools.py      Python 工具自检（CI 门槛）
