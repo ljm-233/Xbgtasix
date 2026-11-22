@@ -11,3 +11,8 @@ XDisplayCloseTimeoutDeferralHandle
 XThreadSetTimeSensitive
 XThreadIsTimeSensitive
 XThreadAssertNotTimeSensitive
+XLaunchUri
+XClosedCaptionSetEnabled
+XClosedCaptionGetProperties
+XErrorSetCallback
+XErrorSetOptions

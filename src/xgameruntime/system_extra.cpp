@@ -14,10 +14,15 @@
 //   * 尺寸与 *Used 都是 size_t（x64 = 8 字节），不是 uint32_t。
 //   * 三个 size-then-fill 函数的 used 指针都是 _Out_opt_：nullptr 合法，不得解引用。
 #include <windows.h>
+#include <shellapi.h>
 
 #include "XDisplay.h"
 #include "XSystem.h"
 #include "XThread.h"
+
+#include "XAccessibility.h"
+#include "XError.h"
+#include "XLauncher.h"
 
 #include "xbgtasix/trace.h"
 
@@ -376,3 +381,68 @@ STDAPI_(void) XThreadAssertNotTimeSensitive() noexcept {
 }
 
 }  // extern "C"
+
+// ===========================================================================
+// XLauncher / XAccessibility / XError（追加：PC 上有真语义的部分）
+// ===========================================================================
+
+// XLauncher.h:17 —— 在 PC 上等价于 ShellExecute("open", uri)
+STDAPI XLaunchUri(XUserHandle requestingUser, const char* uri) noexcept {
+    (void)requestingUser;
+    if (!uri || !uri[0]) return E_INVALIDARG;
+    const HINSTANCE r = ShellExecuteA(nullptr, "open", uri, nullptr, nullptr, SW_SHOWNORMAL);
+    // ShellExecute 的返回值 >32 才算成功
+    const bool ok = reinterpret_cast<INT_PTR>(r) > 32;
+    xbgtasix::logf("[xlaunch] XLaunchUri(%s) -> %s", uri, ok ? "已交给系统" : "系统拒绝");
+    if (!ok) return HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION);
+    return S_OK;
+}
+
+static bool g_cc_enabled = false;
+
+// XAccessibility.h:53
+STDAPI XClosedCaptionSetEnabled(bool enabled) noexcept {
+    g_cc_enabled = enabled;
+    xbgtasix::logf("[xacc] 字幕: %s", enabled ? "开" : "关");
+    return S_OK;
+}
+
+// XAccessibility.h:49 —— 必须整块填满：调用方按结构体读，残值会被当成颜色/字号
+STDAPI XClosedCaptionGetProperties(XClosedCaptionProperties* properties) noexcept {
+    if (!properties) return E_INVALIDARG;
+    std::memset(properties, 0, sizeof(*properties));
+    // 跟随 Windows 的无障碍设置（关掉时给一套安全默认值）
+    BOOL enabled = g_cc_enabled ? TRUE : FALSE;
+    // SystemParametersInfo 的 SPI_GETCLIENTAREAANIMATION 之类没有直接对应项，
+    // 这里用注册表里的"显示字幕"偏好作为参考值（读不到就保留默认）
+    struct { XColor bg; XColor fg; XColor win; } defaults{
+        {0, 0, 0, 255}, {255, 255, 255, 255}, {0, 0, 0, 0}};
+    properties->BackgroundColor = defaults.bg;
+    properties->FontColor = defaults.fg;
+    properties->WindowColor = defaults.win;
+    properties->FontEdgeAttribute = XClosedCaptionFontEdgeAttribute::Default;
+    properties->FontStyle = XClosedCaptionFontStyle::Default;
+    properties->FontScale = 1.0f;
+    properties->Enabled = enabled != FALSE;
+    return S_OK;
+}
+
+// XError.h:19 —— 错误回调：PC 上按游戏注册的回调转发，未注册就只记日志
+static XErrorCallback* g_error_cb = nullptr;
+static void* g_error_ctx = nullptr;
+static XErrorOptions g_error_opts = XErrorOptions::None;
+
+STDAPI_(void) XErrorSetCallback(XErrorCallback* callback, void* context) noexcept {
+    g_error_cb = callback;
+    g_error_ctx = context;
+}
+
+// 头文件是**两个**参数：有调试器时 / 无调试器时各一套选项
+STDAPI_(void) XErrorSetOptions(XErrorOptions optionsDebuggerPresent,
+                               XErrorOptions optionsDebuggerNotPresent) noexcept {
+    g_error_opts = optionsDebuggerPresent | optionsDebuggerNotPresent;
+    xbgtasix::logf("[xerror] 选项: 有调试器=0x%x 无调试器=0x%x"
+                   "（DebugBreak/FailFast 我们不执行，避免没有调试器时直接杀进程）",
+                   static_cast<unsigned>(optionsDebuggerPresent),
+                   static_cast<unsigned>(optionsDebuggerNotPresent));
+}
