@@ -168,10 +168,42 @@ uint64_t dir_used_bytes(const std::string& dir) {
 }
 
 // 目录形如 %LOCALAPPDATA%\Xbgtasix\<TitleId>
+// 逐级创建目录，最后验证。
+// 注意：CreateDirectoryA 不建中间层，必须从盘符起每一级都建。
+// 曾经写成从 base 之后开始扫，把 "\\Xbgtasix" 这一级整个跳过 -> ERROR_PATH_NOT_FOUND(3)；
+// 同时又没检查返回值，日志照打"成功"，把问题误判成"沙箱写不了"（见 docs/env-gotchas.md 第 1、2 条）
+bool ensure_dir_tree(const std::string& path) {
+    if (path.size() < 4) return false;
+    std::string cur;
+    size_t i = 0;
+    if (path.size() > 1 && path[1] == ':') {   // 盘符前缀 "C:"
+        cur = path.substr(0, 2);
+        i = 2;
+    }
+    for (; i < path.size(); ++i) {
+        const char c = path[i];
+        if (c == '\\' || c == '/') {
+            if (cur.size() > (cur.size() > 1 && cur[1] == ':' ? 2u : 0u)) {
+                CreateDirectoryA(cur.c_str(), nullptr);
+            }
+        }
+        cur.push_back(c);
+    }
+    if (!cur.empty()) CreateDirectoryA(cur.c_str(), nullptr);
+
+    const DWORD attr = GetFileAttributesA(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        xbgtasix::logf("[xgamert] 目录创建失败（%lu）: %s", GetLastError(), path.c_str());
+        return false;
+    }
+    return true;
+}
+
 bool ensure_pls_path() {
     std::lock_guard<std::mutex> lock(g_pls_mu);
     if (g_pls_ready) return true;
-    // 允许用 XBGTASIX_PLS_ROOT 覆盖根目录（某些受限环境写不了 %LOCALAPPDATA%）
+    // XBGTASIX_PLS_ROOT 用于便携安装，也用于受限环境（沙箱只放行编译产物写工作区内）
+    // 和测试时隔离存档目录，避免污染真实 %LOCALAPPDATA%
     char base[MAX_PATH] = {0};
     if (GetEnvironmentVariableA("XBGTASIX_PLS_ROOT", base, MAX_PATH) == 0) {
         if (GetEnvironmentVariableA("LOCALAPPDATA", base, MAX_PATH) == 0) return false;
@@ -179,15 +211,7 @@ bool ensure_pls_path() {
     }
     char buf[MAX_PATH] = {0};
     _snprintf(buf, MAX_PATH, "%s\\%08lX", base, static_cast<unsigned long>(g_rt.title_id));
-    // 逐级创建
-    for (char* p = buf + strlen(base) + 1; *p; ++p) {
-        if (*p == '\\') {
-            *p = 0;
-            CreateDirectoryA(buf, nullptr);
-            *p = '\\';
-        }
-    }
-    CreateDirectoryA(buf, nullptr);
+    if (!ensure_dir_tree(buf)) return false;
     g_pls_path = buf;
     g_pls_ready = true;
     xbgtasix::logf("[xgamert] PLS 目录: %s", buf);
@@ -638,15 +662,7 @@ static std::string save_folder_for(const char* configurationId) {
     if (!ensure_pls_path()) return {};
     const std::string dir = g_pls_path + "\\SaveData\\" +
                             sanitize(configurationId ? configurationId : "default");
-    // 逐级创建（PLS 根已存在，这里只补 SaveData 与末级）
-    CreateDirectoryA((g_pls_path + "\\SaveData").c_str(), nullptr);
-    CreateDirectoryA(dir.c_str(), nullptr);
-    // 必须验证：目录没建成却返回路径，等于把失败留给调用方去撞（实测踩过）
-    const DWORD attr = GetFileAttributesA(dir.c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        xbgtasix::logf("[xgamert] 存档目录创建失败（%lu）: %s", GetLastError(), dir.c_str());
-        return {};
-    }
+    if (!ensure_dir_tree(dir)) return {};
     return dir;
 }
 
