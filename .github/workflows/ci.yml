@@ -48,18 +48,29 @@ jobs:
           choco install vulkan-sdk --no-progress -y
           echo "/c/ProgramData/mingw64/mingw64/bin" >> "$GITHUB_PATH"
 
+      - name: 缓存 GDK nupkg
+        uses: actions/cache@v4
+        with:
+          path: build/gdk/_pkg
+          key: gdk-nuget-2610.0.9661
+
+      - name: 从 NuGet 拉官方 GDK（解出头文件与导入库）
+        shell: bash
+        run: |
+          mkdir -p build/gdk/_pkg
+          python tools/fetch_gdk.py --out build/gdk
+
       - name: 检测 GDK 是否可用
         id: gdk
         shell: bash
         run: |
-          if [ -f "../gdk/include_clean/XTaskQueue.h" ]; then
+          if [ -f "build/gdk/include_clean/XTaskQueue.h" ] && [ -f "build/gdk/lib/xgameruntime.lib" ]; then
             echo "have=1" >> "$GITHUB_OUTPUT"
+            echo "GDK_INC=build/gdk/include_clean" >> "$GITHUB_ENV"
           else
             echo "have=0" >> "$GITHUB_OUTPUT"
           fi
 
-      # 一个脚本干完：先跑无 GDK 依赖的 xmem 子集，有 GDK 再跑全套。
-      # 两种情况都会**真的编译真代码、真的跑断言**，不会空转。
       - name: 构建 + 测试（tools/ci_build.sh）
         shell: bash
         run: ./tools/ci_build.sh
