@@ -1,0 +1,16 @@
+# 构建产物
+build/
+*.cso
+*.dll
+*.exe
+*.dll.a
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# 本地 GDK 解包结果（微软的头/库不入库）
+/gdk/
+/gdk_setup/
+/gdk_x/

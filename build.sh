@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# 构建 xbshim（MinGW64 / git-bash）。CMake 在本机会卡在编译器探测，直接用 g++。
+set -euo pipefail
+cd "$(dirname "$0")"
+
+export PATH="/d/mingw64/bin:$PATH"
+CXX=${CXX:-g++}
+OUT=build
+# 注意：MinGW 的 g++ 不认 MSYS 风格 /d/... 路径，必须用 D:/... 或相对路径
+gdk_inc_default="$(cd .. && pwd)/gdk/include_clean"
+if command -v cygpath >/dev/null 2>&1; then
+  gdk_inc_default=$(cygpath -m "$gdk_inc_default")
+fi
+GDK_INC=${GDK_INC:-$gdk_inc_default}
+mkdir -p "$OUT"
+
+FLAGS=(-std=c++20 -O2 -D_WIN32_WINNT=0x0A00 -DNOMINMAX -DWIN32_LEAN_AND_MEAN
+       -Iinclude -I"$GDK_INC" -Wno-attributes -Wall -Wextra
+       -static-libgcc -static-libstdc++)
+
+# 首次构建（新克隆）时自动从 GDK 导入库生成导出桩
+GEN=src/generated/xgameruntime_exports.inc
+GDK_LIB_DIR="$(dirname "$GDK_INC")/lib"
+if [ ! -f "$GEN" ] && [ -f "$GDK_LIB_DIR/xgameruntime.lib" ]; then
+  echo "== 生成导出桩（src/generated 不存在）"
+  EXCL=$(grep -v '^;' src/xgameruntime/exports.txt | grep . | paste -sd, -)
+  python tools/gen_stubs.py "$(cygpath -m "$GDK_LIB_DIR/xgameruntime.lib")" \
+      --dll xgameruntime --out src/generated --exclude "$EXCL"
+fi
+
+build_shim() {
+  local name=$1; shift
+  echo "== $name.dll"
+  "$CXX" "${FLAGS[@]}" -shared "src/$name/$name.cpp" src/trace.cpp "$@" \
+      -o "$OUT/$name.dll" -Wl,--out-implib,"$OUT/lib$name.dll.a"
+}
+
+# xgameruntime = 手写实现 + 从 GDK 导入库生成的 482 个"抛异常"桩
+echo "== xgameruntime.dll (手写 + 生成桩)"
+{
+  echo "LIBRARY xgameruntime"
+  echo "EXPORTS"
+  cat src/xgameruntime/exports.txt
+  [ -f src/generated/xgameruntime_exports.inc ] && cat src/generated/xgameruntime_exports.inc
+} > "$OUT/xgameruntime.def"
+
+"$CXX" "${FLAGS[@]}" -shared \
+    src/xgameruntime/xgameruntime.cpp src/generated/xgameruntime_stubs.cpp src/trace.cpp \
+    "$OUT/xgameruntime.def" \
+    -o "$OUT/xgameruntime.dll" -Wl,--out-implib,"$OUT/libxgameruntime.dll.a"
+
+build_shim xmem
+
+# d3d12_xs = 4 个手写（带日志）+ 其余全部转发到系统 d3d12.dll
+echo "== d3d12_xs.dll (手写 4 + 转发)"
+{
+  echo "LIBRARY d3d12_xs"
+  echo "EXPORTS"
+  grep -vE '^;|^LIBRARY|^EXPORTS' src/d3d12_xs/forward.def | sed 's/^[[:space:]]*//'
+  cat src/d3d12_xs/exports.txt
+} > "$OUT/d3d12_xs.def"
+
+"$CXX" "${FLAGS[@]}" -shared \
+    src/d3d12_xs/d3d12_xs.cpp src/trace.cpp "$OUT/d3d12_xs.def" \
+    -o "$OUT/d3d12_xs.dll" -Wl,--out-implib,"$OUT/libd3d12_xs.dll.a"
+
+echo "== shaders (dxc)"
+DXC=${DXC:-/c/VulkanSDK/1.4.363.1/Bin/dxc.exe}
+if [ -x "$DXC" ]; then
+  for pair in "t1_triangle/triangle:VSMain:vs_6_0:PSMain:ps_6_0:triangle" \
+              "t2_textured/quad:VSMain:vs_6_0:PSMain:ps_6_0:quad"; do
+    IFS=: read -r src vsname vsprof psname psprof out <<< "$pair"
+    HLSL=$(cygpath -m "$PWD/tests/$src.hlsl")
+    "$DXC" -T "$vsprof" -E "$vsname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.vs.cso")" "$HLSL"
+    "$DXC" -T "$psprof" -E "$psname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.ps.cso")" "$HLSL"
+  done
+else
+  echo "  (找不到 dxc，跳过；测试程序会因缺 .cso 退出)"
+fi
+
+echo "== t0_hello.exe"
+"$CXX" "${FLAGS[@]}" tests/t0_hello/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t0_hello.exe"
+
+echo "== t1_triangle.exe"
+"$CXX" "${FLAGS[@]}" tests/t1_triangle/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t1_triangle.exe"
+
+echo "== t2_textured.exe"
+"$CXX" "${FLAGS[@]}" tests/t2_textured/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t2_textured.exe"
+
+echo "== t3_xmem.exe"
+"$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t3_xmem.exe"
+
+echo
+echo "done: $OUT/"
+ls -1 "$OUT"/*.dll "$OUT"/*.exe "$OUT"/*.cso
