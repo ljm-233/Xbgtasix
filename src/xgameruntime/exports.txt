@@ -31,3 +31,6 @@ XPackageGetMountPath
 XPackageMount
 XPackageMountWithUiAsync
 XPackageMountWithUiResult
+XGameSaveFilesGetFolderWithUiAsync
+XGameSaveFilesGetFolderWithUiResult
+XGameSaveFilesGetRemainingQuota

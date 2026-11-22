@@ -28,6 +28,7 @@
 #include "XGameRuntime.h"
 #include "XStore.h"
 #include "XSystem.h"
+#include "XGameSaveFiles.h"
 #include "XPackage.h"
 #include "XPersistentLocalStorage.h"
 #include "XTaskQueue.h"
@@ -613,6 +614,83 @@ STDAPI XPackageMountWithUiResult(XAsyncBlock* async, XPackageMountHandle* mount)
     if (mit == g_pending_mount.end()) return E_UNEXPECTED;
     *mount = mit->second;
     g_pending_mount.erase(mit);
+    return S_OK;
+}
+
+// ---- 存档（XGameSaveFiles：目录式，映射到 PLS 下的子目录） ----
+
+std::mutex g_save_mu;
+std::unordered_map<XAsyncBlock*, std::string> g_pending_save;
+
+// configurationId 由游戏自定（例如 "slot1"），这里也当目录名用，需要过滤非法字符
+static std::string sanitize(const std::string& in) {
+    std::string out;
+    for (char c : in) {
+        const bool bad = c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' ||
+                         c == '"' || c == '<' || c == '>' || c == '|' || c < 0x20;
+        out.push_back(bad ? '_' : c);
+    }
+    if (out.empty() || out == "." || out == "..") out = "default";
+    return out;
+}
+
+static std::string save_folder_for(const char* configurationId) {
+    if (!ensure_pls_path()) return {};
+    const std::string dir = g_pls_path + "\\SaveData\\" +
+                            sanitize(configurationId ? configurationId : "default");
+    // 逐级创建（PLS 根已存在，这里只补 SaveData 与末级）
+    CreateDirectoryA((g_pls_path + "\\SaveData").c_str(), nullptr);
+    CreateDirectoryA(dir.c_str(), nullptr);
+    // 必须验证：目录没建成却返回路径，等于把失败留给调用方去撞（实测踩过）
+    const DWORD attr = GetFileAttributesA(dir.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        xbgtasix::logf("[xgamert] 存档目录创建失败（%lu）: %s", GetLastError(), dir.c_str());
+        return {};
+    }
+    return dir;
+}
+
+STDAPI XGameSaveFilesGetFolderWithUiAsync(XUserHandle requestingUser, const char* configurationId,
+                                          XAsyncBlock* async) noexcept {
+    (void)requestingUser;   // 本地模拟用户，不校验
+    if (!async || !configurationId) return E_INVALIDARG;
+    const std::string dir = save_folder_for(configurationId);
+    {
+        std::lock_guard<std::mutex> lock(g_save_mu);
+        if (!dir.empty()) g_pending_save[async] = dir;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_async_mu);
+        g_async[async].done = true;
+        g_async[async].status = dir.empty() ? E_FAIL : S_OK;
+    }
+    xbgtasix::logf("[xgamert] XGameSaveFiles 文件夹(%s) -> %s", configurationId,
+                   dir.empty() ? "(失败)" : dir.c_str());
+    if (async->callback) async->callback(async);
+    return S_OK;
+}
+
+STDAPI XGameSaveFilesGetFolderWithUiResult(XAsyncBlock* async, size_t folderSize,
+                                           char* folderResult) noexcept {
+    if (!async || !folderResult || folderSize == 0) return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_save_mu);
+    auto it = g_pending_save.find(async);
+    if (it == g_pending_save.end()) return E_UNEXPECTED;
+    if (folderSize < it->second.size() + 1) return E_NOT_SUFFICIENT_BUFFER;
+    std::memcpy(folderResult, it->second.c_str(), it->second.size() + 1);
+    g_pending_save.erase(it);
+    return S_OK;
+}
+
+STDAPI XGameSaveFilesGetRemainingQuota(XUserHandle userContext, const char* configurationId,
+                                       int64_t* remainingQuota) noexcept {
+    (void)userContext;
+    if (!configurationId || !remainingQuota) return E_INVALIDARG;
+    const std::string dir = save_folder_for(configurationId);
+    if (dir.empty()) return E_FAIL;
+    const uint64_t total = pls_total_bytes();
+    const uint64_t used = dir_used_bytes(g_pls_path);   // 整个 PLS 目录的占用
+    *remainingQuota = static_cast<int64_t>(total > used ? total - used : 0);
     return S_OK;
 }
 

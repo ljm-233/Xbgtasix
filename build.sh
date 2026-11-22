@@ -195,6 +195,12 @@ echo "== t18_package.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t18_package.exe"
 
+echo "== t19_save.exe"
+"$CXX" "${FLAGS[@]}" tests/t19_save/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t19_save.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
