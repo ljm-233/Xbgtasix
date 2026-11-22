@@ -259,6 +259,12 @@ echo "== t26_stream.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t26_stream.exe"
 
+echo "== t27_composite.exe"
+"$CXX" "${FLAGS[@]}" tests/t27_composite/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t27_composite.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \

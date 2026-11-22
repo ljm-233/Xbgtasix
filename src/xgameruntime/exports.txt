@@ -86,3 +86,5 @@ XSystemGetAnalyticsInfo
 XSystemGetRuntimeInfo
 XDisplayTryEnableHdrMode
 XGameStreamingGetConnectionState
+XTaskQueueGetPort
+XTaskQueueCreateComposite

@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "XAsync.h"
@@ -280,8 +281,17 @@ struct MonitorReg {
     XTaskQueueMonitorCallback* callback;
 };
 
+// 复合队列：本身不排队，提交时把任务转发给两个"端口来源"队列
+struct PortHandle {
+    struct TaskQueueState* queue;
+    XTaskQueuePort port;
+};
+
 struct TaskQueueState {
     std::atomic<int> refcount{1};
+    // 非空表示这是一个复合队列：work/comp 分别转发给这两个队列
+    TaskQueueState* forward_work = nullptr;
+    TaskQueueState* forward_comp = nullptr;
     std::vector<WaiterReg> waiters;
     std::vector<MonitorReg> monitors;
     XTaskQueueDispatchMode work_mode = XTaskQueueDispatchMode::ThreadPool;
@@ -391,6 +401,14 @@ STDAPI XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, voi
                                XTaskQueueCallback* callback) noexcept {
     if (!queue || !callback) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    // 复合队列：把任务原样交给来源队列，排队/派发完全由那边负责
+    if (q->forward_work || q->forward_comp) {
+        TaskQueueState* target = (port == XTaskQueuePort::Completion) ? q->forward_comp
+                                                                     : q->forward_work;
+        if (!target) return E_INVALIDARG;
+        return XTaskQueueSubmitCallback(reinterpret_cast<XTaskQueueHandle>(target), port, context,
+                                        callback);
+    }
     std::vector<MonitorReg> pending_monitors;
     const XTaskQueueDispatchMode mode = (port == XTaskQueuePort::Completion) ? q->comp_mode : q->work_mode;
     if (mode == XTaskQueueDispatchMode::Immediate) {
@@ -469,8 +487,20 @@ STDAPI XTaskQueueTerminate(XTaskQueueHandle queue, bool wait, void* context,
     return S_OK;
 }
 
+std::mutex g_port_mu;
+std::unordered_set<void*> g_port_handles;
+
 STDAPI_(void) XTaskQueueCloseHandle(XTaskQueueHandle queue) noexcept {
     if (!queue) return;
+    {
+        std::lock_guard<std::mutex> lock(g_port_mu);
+        auto it = g_port_handles.find(reinterpret_cast<void*>(queue));
+        if (it != g_port_handles.end()) {
+            g_port_handles.erase(it);
+            delete reinterpret_cast<PortHandle*>(queue);
+            return;
+        }
+    }
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     if (q->refcount.fetch_sub(1) > 1) return;   // DuplicateHandle 后要等引用计数归零
     q->shutdown(true);
@@ -558,6 +588,46 @@ STDAPI_(void) XTaskQueueSetCurrentProcessTaskQueue(XTaskQueueHandle queue) noexc
     // 头文件：替换时旧队列的句柄会被关闭
     if (old && old != queue) XTaskQueueCloseHandle(old);
     xbgtasix::logf("[xgamert] SetCurrentProcessTaskQueue(%p)", static_cast<void*>(queue));
+}
+
+STDAPI XTaskQueueGetPort(XTaskQueueHandle queue, XTaskQueuePort port,
+                         XTaskQueuePortHandle* portHandle) noexcept {
+    if (!queue || !portHandle) return E_INVALIDARG;
+    auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    auto* ph = new (std::nothrow) PortHandle{q, port};
+    if (!ph) return E_OUTOFMEMORY;
+    q->refcount.fetch_add(1);   // 端口句柄持有队列
+    {
+        std::lock_guard<std::mutex> lock(g_port_mu);
+        g_port_handles.insert(ph);
+    }
+    *portHandle = reinterpret_cast<XTaskQueuePortHandle>(ph);
+    return S_OK;
+}
+
+STDAPI XTaskQueueCreateComposite(XTaskQueuePortHandle workPort, XTaskQueuePortHandle completionPort,
+                                 XTaskQueueHandle* queue) noexcept {
+    if (!workPort || !queue) return E_INVALIDARG;
+    auto* wp = reinterpret_cast<PortHandle*>(workPort);
+    auto* q = new (std::nothrow) TaskQueueState();
+    if (!q) return E_OUTOFMEMORY;
+    // 复合队列不起线程：任务全部转发给来源队列
+    q->work_mode = XTaskQueueDispatchMode::Manual;
+    q->comp_mode = XTaskQueueDispatchMode::Manual;
+    q->forward_work = wp->queue;
+    wp->queue->refcount.fetch_add(1);
+    if (completionPort) {
+        auto* cp = reinterpret_cast<PortHandle*>(completionPort);
+        q->forward_comp = cp->queue;
+        cp->queue->refcount.fetch_add(1);
+    }
+    *queue = reinterpret_cast<XTaskQueueHandle>(q);
+    xbgtasix::logf("[xgamert] CreateComposite(work=%p, comp=%p) -> %p",
+                   static_cast<void*>(wp->queue),
+                   completionPort ? static_cast<void*>(reinterpret_cast<PortHandle*>(
+                                        completionPort)->queue) : nullptr,
+                   static_cast<void*>(q));
+    return S_OK;
 }
 
 STDAPI_(bool) XTaskQueueGetCurrentProcessTaskQueue(XTaskQueueHandle* queue) noexcept {
