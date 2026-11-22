@@ -790,13 +790,14 @@ int main(int argc, char** argv) {
     { ID3D12CommandList* ls[] = {list}; queue->ExecuteCommandLists(1, ls); wait(); }
 
     // 相机：绕 Y 轴 30°，距离按半径自适应
-    const float eye[3] = {1.45f * std::cos(0.5f), 0.75f, 1.55f};
+    const float eye[3] = {1.45f * std::cos(0.5f), 0.95f, 1.55f};
     const float at[3] = {0, 0, 0};
     const float up[3] = {0, 1, 0};
     // RAGE 数据是 Z-up，要转成 Y-up。行向量约定下绕 X 旋转 +90°：
     //   y' = y*cos + z*sin = z   (Z 轴朝上 -> Y 轴朝上)
     // 写成 -90° 会得到 y' = -z，模型整个倒过来（很容易看漏，因为"倒着"也能渲染成功）
-    Mat4 model = mul(rotation_x(1.5708f), rotation_y(0.6f));
+    // 绕 Y 再转 180°，从车辆/衣物的正面看，而不是背面
+    Mat4 model = mul(rotation_x(1.5708f), rotation_y(0.6f + 3.14159f));
     Mat4 mvp_m = mul(mul(model, look_at(eye, at, up)), perspective(0.9f, 1.0f, 0.05f, 100.0f));
     // 模型归一化到单位球：先平移 -center，再缩放 1/radius
     // 行向量约定：p' = (p - center) * s

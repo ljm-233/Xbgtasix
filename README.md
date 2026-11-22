@@ -84,6 +84,7 @@ TLS、SEH 全由系统完成 —— 我们要写的只是"这些 DLL 里该有�
 |---|---|
 | [docs/HANDOFF.md](docs/HANDOFF.md) | **交接摘要**：当前状态、复跑命令、exe 到手后的顺序 |
 | [docs/package-completeness.md](docs/package-completeness.md) | 用包自带 layout 核对：**104 个条目只缺 1 个 = exe** |
+| [docs/encryption-map.md](docs/encryption-map.md) | 逐个归档的加密占比：**levels.rpf 99% 明文**，加密的只有目录表 |
 | [docs/report.md](docs/report.md) | **技术报告（叙事版）**：目标、做法、数字、缺口 |
 | [docs/exe-day-checklist.md](docs/exe-day-checklist.md) | **exe 到手当天的 10 分钟操作顺序**（含三堵预期墙） |
 | [docs/where-is-the-exe.md](docs/where-is-the-exe.md) | 全包扫描确认**没有 exe**；`gameos.xvd` 等容器里也没有 |
