@@ -22,6 +22,7 @@
 | 图形管线：root sig → PSO → draw（L3） | ✅ | `t1_triangle`，像素回读 |
 | 描述符表 + CBV + SRV + 采样器 + 深度（L4） | ✅ | `t2_textured`，两次渲染比对 |
 | **bindless：98 槽动态索引 + 64K 大堆（L5）** | ✅ | `t4_bindless`，索引 97 命中绿色 |
+| **mesh shader 管线（L6）** | ✅ | `t5_mesh`，`MeshShaderTier=10`，DispatchMesh 出图 |
 | `d3d12_xs` 导出面 | ✅ | 4 手写 + 14 原生转发 = 18 |
 | `xgameruntime` 导出面 | ✅ | 10 手写 + 482 生成桩 = 492 |
 | 游戏 exe | ❌ 缺失 | 泄露包内没有 `game_scarlett_master.exe` |
@@ -38,6 +39,7 @@ cd build
 ./t2_textured.exe          # 纹理 + CBV + 深度
 ./t3_xmem.exe              # 内存压力（10 万次 churn + 8 线程）
 ./t4_bindless.exe          # 98 槽描述符表 + 动态索引
+./t5_mesh.exe              # mesh shader（PSO 走 stream desc + DispatchMesh）
 ```
 
 五个测试全部**离屏渲染 + 像素/字节级断言**，没有显示器也能跑，`rc=0` 才有意义。
@@ -111,6 +113,7 @@ Xbgtasix/
   tests/t2_textured/           L4：描述符表 + CBV + SRV + 采样器 + 深度
   tests/t3_xmem/               内存行为回归 + 压力
   tests/t4_bindless/           L5：98 槽描述符表 + 动态索引 + 64K 大堆
+  tests/t5_mesh/               L6：mesh shader（stream PSO + DispatchMesh）
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK

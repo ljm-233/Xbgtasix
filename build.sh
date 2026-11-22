@@ -69,10 +69,13 @@ DXC=${DXC:-/c/VulkanSDK/1.4.363.1/Bin/dxc.exe}
 if [ -x "$DXC" ]; then
   for pair in "t1_triangle/triangle:VSMain:vs_6_0:PSMain:ps_6_0:triangle" \
               "t2_textured/quad:VSMain:vs_6_0:PSMain:ps_6_0:quad" \
-              "t4_bindless/bindless:VSMain:vs_6_0:PSMain:ps_6_0:bindless"; do
+              "t4_bindless/bindless:VSMain:vs_6_0:PSMain:ps_6_0:bindless" \
+              "t5_mesh/mesh:MSMain:ms_6_5:PSMain:ps_6_0:mesh"; do
     IFS=: read -r src vsname vsprof psname psprof out <<< "$pair"
     HLSL=$(cygpath -m "$PWD/tests/$src.hlsl")
-    "$DXC" -T "$vsprof" -E "$vsname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.vs.cso")" "$HLSL"
+    # 输出扩展名跟 profile 走：ms_6_5 -> .ms.cso，vs_6_0 -> .vs.cso
+    vsext=${vsprof%%_*}
+    "$DXC" -T "$vsprof" -E "$vsname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.$vsext.cso")" "$HLSL"
     "$DXC" -T "$psprof" -E "$psname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.ps.cso")" "$HLSL"
   done
 else
@@ -102,6 +105,12 @@ echo "== t4_bindless.exe"
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t4_bindless.exe"
+
+echo "== t5_mesh.exe"
+"$CXX" "${FLAGS[@]}" tests/t5_mesh/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t5_mesh.exe"
 
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \

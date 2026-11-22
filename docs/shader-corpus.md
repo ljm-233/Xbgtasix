@@ -117,6 +117,13 @@ mesh shader（NGG）能正确识别成 `[outputtopology("triangle")]` + `MSMain`
 `tests/t4_bindless` 用 98 槽描述符表 + 动态索引验证了语料里 p99=98 的绑定需求，
 顺带确认 65,536 个描述符的 GPU 可见堆能建出来。
 
+`tests/t5_mesh` 验证了 34.8% 那部分所依赖的能力：本机 `MeshShaderTier = 10`（Supported），
+用 `D3D12_PIPELINE_STATE_STREAM_DESC` 建 mesh PSO、`ID3D12GraphicsCommandList6::DispatchMesh`
+出图，中心像素 (105,130,146) 与清屏色 (5,5,5) 区分开。
+
+> 踩坑记录：手写 stream 子对象时，类型字段（4 字节）后面必须按载荷自身对齐补 padding，
+> 否则指针落在 +4 位置，D3D12 运行时用对齐指令读会直接 AV（0xC0000005）。
+
 ## 局限
 
 - 只统计了 `PS\x00\x09` 缓存里的着色器；SGD5 着色器组（`--extract-sgd5`）另外算
