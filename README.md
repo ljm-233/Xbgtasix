@@ -156,6 +156,7 @@ Xbgtasix/
   src/d3d12_xs/                手写 4 个 + forward.def 14 个转发 + 选卡缓存
   src/generated/               146 个桩（按返回类型给默认值）+ 50 个 GUID 数据
   tests/t0…t32/                31 个测试目录，全部离屏可跑
+  tools/fetch_gdk.py           从 nuget.org 拉官方 GDK 包并解出头文件/导入库
   tools/gen_stubs.py           .lib → 全量导出桩（返回类型从 GDK 头推断）
   tools/gen_guids.py           _GUID_xxx → 真 GUID 数据符号
   tools/forward_shim.py        DLL → 全量导出转发 .def
@@ -183,10 +184,11 @@ Xbgtasix/
 | 依赖 | 说明 |
 |---|---|
 | MinGW-w64 | 默认 `D:/mingw64`，`CXX=` 可覆盖 |
-| Microsoft GDK 头 + 导入库 | 放仓库旁 `../gdk/include_clean/` 与 `../gdk/lib/xgameruntime.lib`；`GDK_INC=` 可覆盖 |
+| Microsoft GDK 头 + 导入库 | **`python tools/fetch_gdk.py --out ../gdk`** 从 nuget.org 的官方 `Microsoft.GDK.Windows` 包自动取（版本 2610.0.9661）；或手工解到 `../gdk/include_clean/`；`GDK_INC=` 可覆盖 |
 | Vulkan SDK 的 `dxc.exe` | 默认 `C:/VulkanSDK/1.4.363.1/Bin/dxc.exe`，`DXC=` 可覆盖 |
 
-微软头/库不入库，需各自本地解出（`tools/find_gdk.py` 可定位）。
+微软头/库**不入库**：`fetch_gdk.py` 从 nuget.org 取官方包并解出，仓库不转发微软二进制。
+（`tools/find_gdk.py` 可扫描本机已有的 GDK 安装。）
 
 ---
 
@@ -196,7 +198,7 @@ Xbgtasix/
 |---|---|---|
 | `python-tools` | 合成样本自检 5 个 Python 工具 | 无依赖 |
 | `docs-links` | 检查 md 相对链接 | 无依赖 |
-| `windows-build` | `tools/ci_build.sh`：先跑**无 GDK 依赖**的 `xmem.dll` + `t3_xmem`（93 条断言），有 GDK 再跑全套 | 两种情况都真编译真断言；缺 GDK 时 summary 明确写"未覆盖 xgameruntime/d3d12_xs" |
+| `windows-build` | **从 NuGet 拉官方 GDK**（`tools/fetch_gdk.py`）→ `tools/ci_build.sh` 跑**完整构建 + 全套 32 项**；拉不到时退化成"无 GDK 子集"，并在 summary 写明未覆盖部分 | GDK 走微软自己的 nuget.org 源，仓库不转发微软二进制 |
 
 ---
 
