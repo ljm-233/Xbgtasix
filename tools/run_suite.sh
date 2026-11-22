@@ -60,6 +60,23 @@ run_one() {
   echo -e "$id\t$1\t$verdict\t$rc\t${ms}ms\t${key}" >> "$report"
 }
 
+# Python 步子：没有样本数据时按 SKIP 处理
+run_py() {
+  local id=$1 script=$2; shift 2
+  want "$id" || return 0
+  total=$((total + 1))
+  local t0=$(date +%s%N) out rc
+  out=$(cd "$PWD" && timeout 300 python "$script" "$@" 2>&1); rc=$?
+  local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+  local key verdict
+  key=$(echo "$out" | grep -oE 'PASS（无缺失）|加载成功 [0-9]+ / 失败 [0-9]+|FAIL[^"]{0,30}' | tail -1)
+  if [ $rc -eq 0 ]; then verdict="PASS"; pass=$((pass + 1));
+  elif [ $rc -eq 2 ]; then verdict="SKIP"; skip=$((skip + 1));
+  else verdict="FAIL"; fail=$((fail + 1)); fi
+  printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$script" "$verdict" "$ms" "${key:-（无断言输出）}"
+  echo -e "$id\t$script\t$verdict\t$rc\t${ms}ms\t${key}" >> "$report"
+}
+
 echo "== 测试套件（adapter=${XBGTASIX_ADAPTER:-best}）"
 run_one t0 t0_hello.exe --smoke
 run_one t1 t1_triangle.exe
@@ -76,6 +93,13 @@ run_one t12 t12_sheet.exe "D:/GTA6/out_ttpf" suite/sheet.png 128 10
 run_one t13 t13_caps.exe
 run_one t14 t14_vram.exe
 run_one t15 t15_budget.exe
+
+PKG=${XBGTASIX_PKG:-"D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK"}
+if [ -d "$PKG" ]; then
+  run_py t16 tools/check_real_dlls.py "$PKG"
+else
+  echo "t16  真实 DLL 加载            SKIP   缺少游戏包目录（XBGTASIX_PKG 可指定）"
+fi
 
 echo
 echo "== 汇总: $pass PASS / $skip SKIP / $fail FAIL（共 $total）"
