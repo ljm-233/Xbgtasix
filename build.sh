@@ -70,7 +70,8 @@ if [ -x "$DXC" ]; then
   for pair in "t1_triangle/triangle:VSMain:vs_6_0:PSMain:ps_6_0:triangle" \
               "t2_textured/quad:VSMain:vs_6_0:PSMain:ps_6_0:quad" \
               "t4_bindless/bindless:VSMain:vs_6_0:PSMain:ps_6_0:bindless" \
-              "t5_mesh/mesh:MSMain:ms_6_5:PSMain:ps_6_0:mesh"; do
+              "t5_mesh/mesh:MSMain:ms_6_5:PSMain:ps_6_0:mesh" \
+              "t8_model/model:VSMain:vs_6_0:PSMain:ps_6_0:model"; do
     IFS=: read -r src vsname vsprof psname psprof out <<< "$pair"
     HLSL=$(cygpath -m "$PWD/tests/$src.hlsl")
     # 输出扩展名跟 profile 走：ms_6_5 -> .ms.cso，vs_6_0 -> .vs.cso
@@ -78,6 +79,14 @@ if [ -x "$DXC" ]; then
     "$DXC" -T "$vsprof" -E "$vsname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.$vsext.cso")" "$HLSL"
     "$DXC" -T "$psprof" -E "$psname" -O3 -Fo "$(cygpath -m "$PWD/$OUT/$out.ps.cso")" "$HLSL"
   done
+  # t8 诊断用变体：绕开 MVP，直接看顶点数据
+  HLSL8=$(cygpath -m "$PWD/tests/t8_model/model.hlsl")
+  "$DXC" -T vs_6_0 -E VSMain -D DBG_VB -O3 -Fo "$(cygpath -m "$PWD/$OUT/model_dbg.vs.cso")" "$HLSL8"
+  "$DXC" -T ps_6_0 -E PSMain -D DBG_VB -O3 -Fo "$(cygpath -m "$PWD/$OUT/model_dbg.ps.cso")" "$HLSL8"
+
+  "$DXC" -T vs_6_0 -E VSMain -D DBG_HARDMVP -O3 -Fo "$(cygpath -m "$PWD/$OUT/model_hm.vs.cso")" "$HLSL8"
+  "$DXC" -T ps_6_0 -E PSMain -D DBG_HARDMVP -O3 -Fo "$(cygpath -m "$PWD/$OUT/model_hm.ps.cso")" "$HLSL8"
+
   # t6：光追库不需要 -E，导出库里所有 entry point
   "$DXC" -T lib_6_3 -O3 -Fo "$(cygpath -m "$PWD/$OUT/rt.lib.cso")" \
       "$(cygpath -m "$PWD/tests/t6_rt/rt.hlsl")"
@@ -120,6 +129,12 @@ echo "== t6_rt.exe"
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t6_rt.exe"
+
+echo "== t8_model.exe"
+"$CXX" "${FLAGS[@]}" tests/t8_model/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 -lole32 -lwindowscodecs \
+    -o "$OUT/t8_model.exe"
 
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \

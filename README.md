@@ -24,6 +24,7 @@
 | **bindless：98 槽动态索引 + 64K 大堆（L5）** | ✅ | `t4_bindless`，索引 97 命中绿色 |
 | **mesh shader 管线（L6）** | ✅ | `t5_mesh`，`MeshShaderTier=10`，DispatchMesh 出图 |
 | **光追 DXR（L7）** | ✅ | `t6_rt`，`RaytracingTier=11`（1.1），BLAS+TLAS+SBT，命中绿/未命中蓝 |
+| **模型查看器（L8）** | ✅ | `t8_model`：OBJ+PNG → 我们的管线，占屏 26.9%，输出 PNG |
 | `d3d12_xs` 导出面 | ✅ | 4 手写 + 14 原生转发 = 18 |
 | `xgameruntime` 导出面 | ✅ | 10 手写 + 482 生成桩 = 492 |
 | 游戏 exe | ❌ 缺失 | 泄露包内没有 `game_scarlett_master.exe` |
@@ -42,6 +43,7 @@ cd build
 ./t4_bindless.exe          # 98 槽描述符表 + 动态索引
 ./t5_mesh.exe              # mesh shader（PSO 走 stream desc + DispatchMesh）
 ./t6_rt.exe                # DXR：BLAS + TLAS + 状态对象 + SBT + DispatchRays
+./t8_model.exe model.obj [tex.png] out.png   # 渲染导出的游戏模型
 ```
 
 五个测试全部**离屏渲染 + 像素/字节级断言**，没有显示器也能跑，`rc=0` 才有意义。
@@ -77,6 +79,7 @@ TLS、SEH 全由系统完成 —— 我们要写的只是"这些 DLL 里该有�
 | [docs/shader-corpus.md](docs/shader-corpus.md) | 21,522 条着色器：**mesh shader 34.8%、光追 64 个、绑定槽 p99=98** |
 | [docs/d3d12xs-evidence.md](docs/d3d12xs-evidence.md) | D3D12.x 与桌面 D3D12 的差异面与哪些能用转发解决 |
 | [docs/xmem-evidence.md](docs/xmem-evidence.md) | XMem 语义的 13 条断言、来源与可信度 |
+| [docs/graphics-pitfalls.md](docs/graphics-pitfalls.md) | 五个"不报错只黑屏"的坑（stream padding / IA flag / row_major / RH 视图 / 归一化） |
 | [docs/anyps5-notes.md](docs/anyps5-notes.md) | 同类项目（AnyPS5）的分层方式与里程碑教训 |
 | [docs/gdk_api_surface.md](docs/gdk_api_surface.md) | 包内 16 个 DLL 的导入/导出面（66 个模块，只有 3 个主机专有） |
 
@@ -117,6 +120,7 @@ Xbgtasix/
   tests/t4_bindless/           L5：98 槽描述符表 + 动态索引 + 64K 大堆
   tests/t5_mesh/               L6：mesh shader（stream PSO + DispatchMesh）
   tests/t6_rt/                 L7：DXR（BLAS/TLAS/状态对象/SBT/DispatchRays）
+  tests/t8_model/              L8：OBJ+PNG 模型查看器（WIC 解码/编码）
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK
