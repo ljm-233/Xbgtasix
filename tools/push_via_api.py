@@ -47,6 +47,24 @@ def git(*args, binary=False):
 
 
 _body_path = os.path.join(ROOT, "build", "gh_api_body.json")
+STATE_PATH = os.path.join(ROOT, ".git", "xbgtasix_push.json")
+
+
+def load_state():
+    """记住上次推到的本地提交 + 已上传 blob 的映射，下次只推增量。"""
+    try:
+        with open(STATE_PATH, encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("local_head") and git("cat-file", "-t", st["local_head"]).strip() == "commit":
+            return st
+    except Exception:
+        pass
+    return {"local_head": "", "remote_head": "", "blobs": {}}
+
+
+def save_state(st):
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(st, f)
 
 
 def api(method, path, body=None, retries=4):
@@ -112,11 +130,20 @@ def main():
     ap.add_argument("--start-from", default="", help="从这个远端提交开始续传（默认全量）")
     a = ap.parse_args()
 
-    commits = git("rev-list", "--reverse", "HEAD").split()
-    print("本地提交 %d 个，开始重放到 %s（分支 %s）" % (len(commits), a.repo, a.branch))
+    state = load_state()
+    base = state.get("local_head") or a.start_from
+    if base:
+        commits = git("rev-list", "--reverse", "HEAD", "^" + base).split()
+    else:
+        commits = git("rev-list", "--reverse", "HEAD").split()
+    if not commits:
+        print("已是最新：远端 %s 已包含本地全部提交" % a.branch)
+        return 0
+    print("增量推送 %d 个提交（基线 %s）到 %s/%s" % (
+        len(commits), base[:7] if base else "无（全量）", a.repo, a.branch))
 
-    blob_cache = {}
-    parent = None
+    blob_cache = dict(state.get("blobs") or {})
+    parent = state.get("remote_head") or None
     total_blobs = 0
     for i, sha in enumerate(commits, 1):
         entries, blobs = tree_entries(sha)
@@ -152,6 +179,10 @@ def main():
 
     api("PATCH", "/repos/%s/git/refs/heads/%s" % (a.repo, a.branch),
         {"sha": parent, "force": True})
+    state["local_head"] = git("rev-parse", "HEAD").strip()
+    state["remote_head"] = parent
+    state["blobs"] = blob_cache
+    save_state(state)
     print("\n完成：%s 分支已指向 %s（上传 blob %d 个，去重后共 %d）" % (
         a.branch, parent[:7], total_blobs, len(blob_cache)))
     print("仓库: https://github.com/%s" % a.repo)
