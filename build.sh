@@ -27,7 +27,8 @@ GEN=src/generated/xgameruntime_exports.inc
 GDK_LIB_DIR="$(dirname "$GDK_INC")/lib"
 if [ ! -f "$GEN" ] && [ -f "$GDK_LIB_DIR/xgameruntime.lib" ]; then
   echo "== 生成导出桩（src/generated 不存在）"
-  EXCL=$(grep -v '^;' src/xgameruntime/exports.txt | grep . | paste -sd, -)
+  EXCL=$(cat src/xgameruntime/exports.txt src/xgameruntime/exports_*.txt 2>/dev/null \
+         | grep -v '^;' | grep . | paste -sd, -)
   python tools/gen_stubs.py "$(cygpath -m "$GDK_LIB_DIR/xgameruntime.lib")" \
       --dll xgameruntime --out src/generated --exclude "$EXCL"
 fi
@@ -50,6 +51,7 @@ fi
   echo "LIBRARY xgameruntime"
   echo "EXPORTS"
   cat src/xgameruntime/exports.txt
+  cat src/xgameruntime/exports_*.txt 2>/dev/null || true
   if [ -f src/generated/xgameruntime_exports.inc ]; then
     cat src/generated/xgameruntime_exports.inc
   else
@@ -61,7 +63,7 @@ fi
 } > "$OUT/xgameruntime.def"
 
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
-    src/xgameruntime/xgameruntime.cpp src/generated/xgameruntime_stubs.cpp \
+    src/xgameruntime/*.cpp src/generated/xgameruntime_stubs.cpp \
     src/generated/xgameruntime_guids.cpp \
     src/trace.cpp \
     "$OUT/xgameruntime.def" \
