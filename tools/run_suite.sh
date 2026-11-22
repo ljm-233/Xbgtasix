@@ -19,6 +19,7 @@ CFG=${XBGTASIX_CONFIG:-"D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK/MicrosoftGame.Confi
 PKG=${XBGTASIX_PKG:-"D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK"}
 MODEL=${XBGTASIX_MODEL:-"D:/GTA6/out_models2/pantscargo_mr1_002_disheveled_mw_long_full_dr.obj"}
 TEX=${XBGTASIX_TEXTURE:-"D:/GTA6/out_tex_all/blank_midgrey.png"}
+TTF=${XBGTASIX_TTF:-"D:/GTA6/out_ttpf"}
 # Windows 原生调用拿不了 MSYS 的 /d/... 路径，统一转成 D:/... 形式
 if command -v cygpath >/dev/null 2>&1; then
   PLS_DEFAULT=$(cygpath -m "$PWD/$BIN/pls")
@@ -49,14 +50,17 @@ run_one() {
   total=$((total + 1))
   local t0=$(date +%s%N)
   local out rc
+  skip_if_missing() {   # $1=路径 $2=说明；缺了就记 SKIP 并返回 1
+    [ -e "$1" ] && return 0
+    skip=$((skip+1))
+    printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "-" SKIP 0 "$2"
+    return 1
+  }
   case "$1" in
-    t8_model.exe)   [ -f "$MODEL" ] || { total=$((total+1)); skip=$((skip+1));
-                      printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$1" SKIP 0 "缺少模型样本（XBGTASIX_MODEL）";
-                      return 0; } ;;
-    t10_integration.exe|t11_storage.exe|t19_save.exe|t18_package.exe)
-                    [ -f "$CFG" ] || { total=$((total+1)); skip=$((skip+1));
-                      printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$1" SKIP 0 "缺少 MicrosoftGame.Config";
-                      return 0; } ;;
+    t8_model.exe)   skip_if_missing "$MODEL" "缺少模型样本（XBGTASIX_MODEL）" || return 0 ;;
+    t10_integration.exe|t11_storage.exe|t19_save.exe|t18_package.exe|t30_fakegame.exe)
+                    skip_if_missing "$CFG" "缺少 MicrosoftGame.Config（XBGTASIX_CONFIG）" || return 0 ;;
+    t12_sheet.exe)  skip_if_missing "$TTF" "缺少贴图样本目录（XBGTASIX_TTF）" || return 0 ;;
   esac
   out=$(cd "$BIN" && timeout 300 "./$@" 2>&1); rc=$?
   local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
@@ -99,7 +103,7 @@ run_one t8 t8_model.exe "$MODEL" "$TEX" suite/model.png
 run_one t9 t9_async.exe
 run_one t10 t10_integration.exe "$CFG"
 run_one t11 t11_storage.exe "$CFG"
-run_one t12 t12_sheet.exe "D:/GTA6/out_ttpf" suite/sheet.png 128 10
+run_one t12 t12_sheet.exe "$TTF" suite/sheet.png 128 10
 run_one t13 t13_caps.exe
 run_one t14 t14_vram.exe
 run_one t17 t17_async2.exe
@@ -107,7 +111,12 @@ run_one t18 t18_package.exe "$CFG"
 run_one t19 t19_save.exe "$CFG"
 run_one t20 t20_taskqueue2.exe
 run_one t21 t21_user.exe
-run_one t22 t22_extras.exe "$CFG" "$PKG"
+if [ -d "$PKG" ]; then
+  run_one t22 t22_extras.exe "$CFG" "$PKG"
+else
+  want t22 && { total=$((total + 1)); skip=$((skip + 1)); }
+  echo "t22  t22_extras.exe         SKIP   缺少游戏包目录（XBGTASIX_PKG）"
+fi
 run_one t23 t23_pkg2.exe
 run_one t24 t24_save2.exe
 run_one t25 t25_sys.exe
