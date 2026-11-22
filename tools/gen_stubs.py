@@ -111,7 +111,7 @@ def build_rettype_index(header_dir):
     import os
     import re
     idx = {}
-    pat = re.compile(r"STDAPI_?\(?\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+    pat = re.compile(r"STDAPI(?:_\(\s*([A-Za-z_][A-Za-z0-9_ \*]*)\s*\)|\s+)([A-Za-z_][A-Za-z0-9_]*)\s*\(")
     pat2 = re.compile(r"\b(HRESULT|bool|void|int32_t|uint32_t|size_t|uint64_t)\s+STDAPICALLTYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
     if not header_dir or not os.path.isdir(header_dir):
         return idx
@@ -123,6 +123,8 @@ def build_rettype_index(header_dir):
         for m in pat.finditer(text):
             ret, name = m.group(1), m.group(2)
             kind = "hresult"
+            if ret:
+                ret = ret.strip()
             if ret == "bool":
                 kind = "bool"
             elif ret == "void":
@@ -161,6 +163,9 @@ def main():
     if not syms:
         raise SystemExit("符号为空")
     excluded = {s.strip() for s in args.exclude.split(",") if s.strip()}
+    guids = [x for x in syms if x.startswith("_GUID_")]
+    syms = [x for x in syms if not x.startswith("_GUID_")]
+
     if excluded:
         before = len(syms)
         syms = [s for s in syms if s not in excluded]
@@ -171,18 +176,78 @@ def main():
 
     with open(base + ".def", "w", encoding="utf-8") as f:
         f.write("LIBRARY %s\nEXPORTS\n" % args.dll)
+        guids = [x for x in syms if x.startswith("_GUID_")]
+        syms = [x for x in syms if not x.startswith("_GUID_")]
+        if guids:
+            gpath = base + "_guids.cpp"
+            with open(gpath, "w", encoding="utf-8", newline="\n") as gf:
+                gf.write("// 自动生成：_GUID_xxx 是**数据**导出，名字本身就是 GUID 值。\n")
+                gf.write("// 曾经把它们生成为函数桩，调用方取到的是代码地址，"
+                         "所有 IsEqualGUID 静默失效。\n")
+                gf.write("#include <guiddef.h>\n\nextern \"C\" {\n")
+                for g in guids:
+                    parts = g[len("_GUID_"):].split("_")
+                    try:
+                        d1 = parts[0]
+                        d2 = parts[1]
+                        d3 = parts[2]
+                        rest = parts[3:]
+                        assert len(d1) == 8 and len(d2) == 4 and len(d3) == 4 and len(rest) == 2
+                        assert len(rest[0]) == 4 and len(rest[1]) == 12
+                    except Exception:
+                        continue
+                    b = ",".join("0x%s" % rest[0][i:i + 2] for i in range(0, 4, 2))
+                    b2 = ",".join("0x%s" % rest[1][i:i + 2] for i in range(0, 12, 2))
+                    gf.write("const GUID %s = {0x%s,0x%s,0x%s,{%s,%s}};\n"
+                             % (g, d1, d2, d3, b, b2))
+                gf.write("}  // extern \"C\"\n")
+            print("%s: %d 个 GUID 数据导出 -> %s" % (args.dll, len(guids), gpath))
+
         for i, sym in enumerate(syms):
             f.write("  %s=%s\n" % (sym, ident(sym, i)))
+        for g in guids:          # GUID 是数据符号，同名导出即可
+            f.write("  %s\n" % g)
 
     # 供与其他手写导出合并用的片段（只含 名称=内部符号 行）
     with open(base + "_exports.inc", "w", encoding="utf-8") as f:
+        guids = [x for x in syms if x.startswith("_GUID_")]
         for i, sym in enumerate(syms):
             f.write("%s=%s\n" % (sym, ident(sym, i)))
+        # GUID 是数据符号：同名导出即可，不需要别名到桩函数
+        for g in guids:
+            f.write("  %s\n" % g)
 
     with open(base + "_stubs.cpp", "w", encoding="utf-8") as f:
         f.write('// 自动生成 —— 不要手改。重新运行 gen_stubs.py 覆盖。\n')
         f.write('#include <cstdint>\n\n#include "xbgtasix/trace.h"\n\n')
         f.write('extern "C" {\n')
+        guids = [x for x in syms if x.startswith("_GUID_")]
+        syms = [x for x in syms if not x.startswith("_GUID_")]
+        if guids:
+            gpath = base + "_guids.cpp"
+            with open(gpath, "w", encoding="utf-8", newline="\n") as gf:
+                gf.write("// 自动生成：_GUID_xxx 是**数据**导出，名字本身就是 GUID 值。\n")
+                gf.write("// 曾经把它们生成为函数桩，调用方取到的是代码地址，"
+                         "所有 IsEqualGUID 静默失效。\n")
+                gf.write("#include <guiddef.h>\n\nextern \"C\" {\n")
+                for g in guids:
+                    parts = g[len("_GUID_"):].split("_")
+                    try:
+                        d1 = parts[0]
+                        d2 = parts[1]
+                        d3 = parts[2]
+                        rest = parts[3:]
+                        assert len(d1) == 8 and len(d2) == 4 and len(d3) == 4 and len(rest) == 2
+                        assert len(rest[0]) == 4 and len(rest[1]) == 12
+                    except Exception:
+                        continue
+                    b = ",".join("0x%s" % rest[0][i:i + 2] for i in range(0, 4, 2))
+                    b2 = ",".join("0x%s" % rest[1][i:i + 2] for i in range(0, 12, 2))
+                    gf.write("const GUID %s = {0x%s,0x%s,0x%s,{%s,%s}};\n"
+                             % (g, d1, d2, d3, b, b2))
+                gf.write("}  // extern \"C\"\n")
+            print("%s: %d 个 GUID 数据导出 -> %s" % (args.dll, len(guids), gpath))
+
         for i, sym in enumerate(syms):
             label = sym.replace('"', '\\"')
             kind = rettype_index.get(sym, "hresult")
