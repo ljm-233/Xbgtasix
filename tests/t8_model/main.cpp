@@ -193,18 +193,56 @@ bool load_obj(const char* path, Mesh& out) {
     }
     fclose(f);
 
+    char shade_mode[16] = {0};
+    GetEnvironmentVariableA("XBGTASIX_T8_SHADING", shade_mode, sizeof(shade_mode));
+    const bool flat = std::strcmp(shade_mode, "smooth") != 0;   // 默认平直
+
+    if (flat) {
+        // 平直着色：每个三角形用独立顶点 + 面法线，保留布料褶皱的硬边
+        std::vector<float> nv;
+        std::vector<unsigned> ni;
+        nv.reserve(out.idx.size() * 8);
+        for (size_t i = 0; i + 2 < out.idx.size(); i += 3) {
+            const size_t a = out.idx[i] * 8, b = out.idx[i + 1] * 8, c = out.idx[i + 2] * 8;
+            const float ux = out.verts[b] - out.verts[a], uy = out.verts[b + 1] - out.verts[a + 1],
+                        uz = out.verts[b + 2] - out.verts[a + 2];
+            const float vx = out.verts[c] - out.verts[a], vy = out.verts[c + 1] - out.verts[a + 1],
+                        vz = out.verts[c + 2] - out.verts[a + 2];
+            float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+            // RAGE 网格是顺时针绕序：叉积方向朝内，取反才是"朝外"的法线
+            nx = -nx; ny = -ny; nz = -nz;
+            const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 1e-9f) { nx /= len; ny /= len; nz /= len; }
+            for (size_t k : {a, b, c}) {
+                nv.push_back(out.verts[k]);
+                nv.push_back(out.verts[k + 1]);
+                nv.push_back(out.verts[k + 2]);
+                nv.push_back(out.verts[k + 3]);
+                nv.push_back(out.verts[k + 4]);
+                nv.push_back(nx);
+                nv.push_back(ny);
+                nv.push_back(nz);
+                ni.push_back(static_cast<unsigned>(ni.size()));
+            }
+        }
+        out.verts.swap(nv);
+        out.idx.swap(ni);
+    }
+
     // 逐面法线累加到顶点，再归一化
-    for (size_t i = 0; i + 2 < out.idx.size(); i += 3) {
-        const size_t a = out.idx[i] * 8, b = out.idx[i + 1] * 8, c = out.idx[i + 2] * 8;
-        const float ux = out.verts[b] - out.verts[a], uy = out.verts[b + 1] - out.verts[a + 1],
-                    uz = out.verts[b + 2] - out.verts[a + 2];
-        const float vx = out.verts[c] - out.verts[a], vy = out.verts[c + 1] - out.verts[a + 1],
-                    vz = out.verts[c + 2] - out.verts[a + 2];
-        const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-        for (size_t k : {a, b, c}) {
-            out.verts[k + 5] += nx;
-            out.verts[k + 6] += ny;
-            out.verts[k + 7] += nz;
+    if (!flat) {
+        for (size_t i = 0; i + 2 < out.idx.size(); i += 3) {
+            const size_t a = out.idx[i] * 8, b = out.idx[i + 1] * 8, c = out.idx[i + 2] * 8;
+            const float ux = out.verts[b] - out.verts[a], uy = out.verts[b + 1] - out.verts[a + 1],
+                        uz = out.verts[b + 2] - out.verts[a + 2];
+            const float vx = out.verts[c] - out.verts[a], vy = out.verts[c + 1] - out.verts[a + 1],
+                        vz = out.verts[c + 2] - out.verts[a + 2];
+            const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+            for (size_t k : {a, b, c}) {
+                out.verts[k + 5] += nx;
+                out.verts[k + 6] += ny;
+                out.verts[k + 7] += nz;
+            }
         }
     }
     for (size_t i = 0; i < out.verts.size(); i += 8) {
@@ -500,7 +538,15 @@ int main(int argc, char** argv) {
     pd.PS = {ps.data(), ps.size()};
     pd.InputLayout = {layout, mode == 4 ? 0 : 3};
     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    {
+        char cull[8] = {0};
+        const bool cull_on = GetEnvironmentVariableA("XBGTASIX_T8_CULL", cull, sizeof(cull)) == 0 ||
+                             cull[0] != '0';
+        pd.RasterizerState.CullMode = cull_on ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+        // RAGE 的网格是顺时针绕序：开剔除时要把"正面"判据也翻过来，
+        // 否则剔掉的是外表面、看到的是内壁（表现为整体变暗）
+        pd.RasterizerState.FrontCounterClockwise = cull_on ? TRUE : FALSE;
+    }
     pd.RasterizerState.FrontCounterClockwise = FALSE;
     pd.RasterizerState.DepthClipEnable = TRUE;
     pd.RasterizerState.MultisampleEnable = FALSE;
