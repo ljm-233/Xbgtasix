@@ -28,6 +28,7 @@
 #include "XGameRuntime.h"
 #include "XStore.h"
 #include "XSystem.h"
+#include "XPackage.h"
 #include "XPersistentLocalStorage.h"
 #include "XTaskQueue.h"
 #include "XUser.h"
@@ -43,6 +44,8 @@ struct RuntimeState {
     std::string store_id;
     std::string msa_app_id;
     std::string config_path;
+    std::string package_id;        // MicrosoftGame.Config 的 <Identity Name="...">
+    std::string package_root;      // 包内容所在目录（XBGTASIX_PACKAGE_ROOT 可覆盖）
     bool config_loaded = false;
 };
 RuntimeState g_rt;
@@ -85,6 +88,21 @@ void load_game_config() {
         xbgtasix::logf("[xgamert] 未找到游戏配置: %s", path);
         return;
     }
+    // <Identity Name="..." Publisher="..." Version="..." /> 是自闭合标签，单独取属性
+    {
+        const size_t idpos = xml.find("<Identity");
+        if (idpos != std::string::npos) {
+            const size_t endpos = xml.find('>', idpos);
+            const std::string tag = xml.substr(idpos, endpos == std::string::npos ? std::string::npos
+                                                                                  : endpos - idpos);
+            const size_t namepos = tag.find("Name=\"");
+            if (namepos != std::string::npos) {
+                const size_t vstart = namepos + 6;
+                const size_t vend = tag.find('"', vstart);
+                if (vend != std::string::npos) g_rt.package_id = tag.substr(vstart, vend - vstart);
+            }
+        }
+    }
     g_rt.store_id = find_tag(xml, "StoreId");
     g_rt.msa_app_id = find_tag(xml, "MSAAppId");
     const std::string title = find_tag(xml, "TitleId");
@@ -92,7 +110,20 @@ void load_game_config() {
         g_rt.title_id = static_cast<uint32_t>(std::stoul(title, nullptr, 16));
     }
     g_rt.config_loaded = true;
+    // 包内容目录：优先环境变量，否则用 config 所在目录
+    {
+        char root[MAX_PATH] = {0};
+        if (GetEnvironmentVariableA("XBGTASIX_PACKAGE_ROOT", root, MAX_PATH) > 0) {
+            g_rt.package_root = root;
+        } else {
+            std::string p = path;
+            const size_t slash = p.find_last_of("\\/");
+            g_rt.package_root = slash == std::string::npos ? "." : p.substr(0, slash);
+        }
+    }
     xbgtasix::logf("[xgamert] 配置已读: %s", path);
+    xbgtasix::logf("[xgamert]   包身份=%s", g_rt.package_id.empty() ? "?" : g_rt.package_id.c_str());
+    xbgtasix::logf("[xgamert]   包目录=%s", g_rt.package_root.c_str());
     xbgtasix::logf("[xgamert]   TitleId=0x%08lX StoreId=%s MSAAppId=%s",
                    static_cast<unsigned long>(g_rt.title_id),
                    g_rt.store_id.empty() ? "?" : g_rt.store_id.c_str(),
@@ -477,6 +508,111 @@ STDAPI XPersistentLocalStorageGetSpaceInfo(XPersistentLocalStorageSpaceInfo* inf
     info->usedBytes = used;
     info->availableFreeBytes = total > used ? total - used : 0;
     info->totalFreeBytes = info->availableFreeBytes;
+    return S_OK;
+}
+
+// ---- 包管理（XPackage） ----
+
+struct MountInstance {
+    std::string path;
+};
+
+// XAsyncBlock 里没有 result 字段（GDK 的原话是 internal-only），
+// 所以挂载结果放旁路表，按 async 指针索引。
+std::mutex g_mount_mu;
+std::unordered_map<XAsyncBlock*, XPackageMountHandle> g_pending_mount;
+
+STDAPI XPackageGetCurrentProcessPackageIdentifier(size_t bufferSize, char* buffer) noexcept {
+    if (!buffer || bufferSize == 0) return E_INVALIDARG;
+    const std::string& id = g_rt.package_id;
+    if (id.empty()) return E_FAIL;
+    if (bufferSize < id.size() + 1) return E_NOT_SUFFICIENT_BUFFER;
+    std::memcpy(buffer, id.c_str(), id.size() + 1);
+    return S_OK;
+}
+
+STDAPI_(bool) XPackageIsPackagedProcess() noexcept {
+    // 只要读到了 MicrosoftGame.Config 就当成"打包进程"
+    return g_rt.config_loaded;
+}
+
+STDAPI_(void) XPackageCloseMountHandle(XPackageMountHandle mount) noexcept {
+    delete reinterpret_cast<MountInstance*>(mount);
+}
+
+STDAPI XPackageGetMountPathSize(XPackageMountHandle mount, size_t* pathSize) noexcept {
+    if (!mount || !pathSize) return E_INVALIDARG;
+    *pathSize = reinterpret_cast<MountInstance*>(mount)->path.size() + 1;
+    return S_OK;
+}
+
+STDAPI XPackageGetMountPath(XPackageMountHandle mount, size_t pathSize, char* path) noexcept {
+    if (!mount || !path || pathSize == 0) return E_INVALIDARG;
+    const std::string& p = reinterpret_cast<MountInstance*>(mount)->path;
+    if (pathSize < p.size() + 1) return E_NOT_SUFFICIENT_BUFFER;
+    std::memcpy(path, p.c_str(), p.size() + 1);
+    return S_OK;
+}
+
+// 挂载：把包标识符解析成真实目录。
+// 主机上这是"挂载一个安装好的包"；PC 上等价于"这个包的根目录在哪"。
+static HRESULT mount_impl(const char* packageId, XPackageMountHandle* mount) {
+    if (!packageId || !mount) return E_INVALIDARG;
+    std::string dir = g_rt.package_root;
+    const std::string id(packageId);
+    if (id != g_rt.package_id && id != "*" && !id.empty()) {
+        // 允许挂载包根目录下的子目录（例如 DLC 包名 = 子目录名）
+        const std::string candidate = g_rt.package_root + "\\" + id;
+        const DWORD attr = GetFileAttributesA(candidate.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            xbgtasix::logf("[xgamert] XPackageMount(%s) 找不到 -> E_NOTFOUND", packageId);
+            return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        }
+        dir = candidate;
+    } else {
+        dir = g_rt.package_root;
+    }
+    auto* inst = new (std::nothrow) MountInstance();
+    if (!inst) return E_OUTOFMEMORY;
+    inst->path = dir;
+    *mount = reinterpret_cast<XPackageMountHandle>(inst);
+    xbgtasix::logf("[xgamert] XPackageMount(%s) -> %s", packageId, dir.c_str());
+    return S_OK;
+}
+
+STDAPI_(HRESULT STDAPICALLTYPE) XPackageMount(const char* packageIdentifier,
+                                              XPackageMountHandle* mount) noexcept {
+    return mount_impl(packageIdentifier, mount);
+}
+
+STDAPI XPackageMountWithUiAsync(const char* packageIdentifier, XAsyncBlock* async) noexcept {
+    if (!async) return E_INVALIDARG;
+    XPackageMountHandle handle = nullptr;
+    const HRESULT hr = mount_impl(packageIdentifier, &handle);
+    {
+        std::lock_guard<std::mutex> lock(g_mount_mu);
+        if (SUCCEEDED(hr)) g_pending_mount[async] = handle;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_async_mu);
+        g_async[async].done = true;
+        g_async[async].status = hr;
+    }
+    if (async->callback) async->callback(async);
+    return S_OK;
+}
+
+STDAPI XPackageMountWithUiResult(XAsyncBlock* async, XPackageMountHandle* mount) noexcept {
+    if (!async || !mount) return E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_async_mu);
+    auto it = g_async.find(async);
+    if (it == g_async.end()) return E_UNEXPECTED;
+    if (FAILED(it->second.status)) return it->second.status;
+    std::lock_guard<std::mutex> mlock(g_mount_mu);
+    auto mit = g_pending_mount.find(async);
+    if (mit == g_pending_mount.end()) return E_UNEXPECTED;
+    *mount = mit->second;
+    g_pending_mount.erase(mit);
     return S_OK;
 }
 

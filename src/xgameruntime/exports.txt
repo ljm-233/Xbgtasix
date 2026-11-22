@@ -23,3 +23,11 @@ XPersistentLocalStorageGetSpaceInfo
 XPersistentLocalStorageGetPath
 XAsyncRun
 XAsyncGetResultSize
+XPackageGetCurrentProcessPackageIdentifier
+XPackageIsPackagedProcess
+XPackageCloseMountHandle
+XPackageGetMountPathSize
+XPackageGetMountPath
+XPackageMount
+XPackageMountWithUiAsync
+XPackageMountWithUiResult

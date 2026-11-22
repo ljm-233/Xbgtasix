@@ -189,6 +189,12 @@ echo "== t17_async2.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t17_async2.exe"
 
+echo "== t18_package.exe"
+"$CXX" "${FLAGS[@]}" tests/t18_package/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t18_package.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \

@@ -4,7 +4,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 面向 Xbox Series / GDK 的**兼容层**与**资产格式研究**工具集。纯自写代码：
-17 个可断言测试、17 份带来源标注的结论文档。
+18 个可断言测试、17 份带来源标注的结论文档。
 
 > 不包含任何游戏文件、微软 GDK 头文件/库、解密密钥或绕过手段。
 
@@ -43,6 +43,7 @@
 | L15 | 预算变化通知 + 降级 | `t15_budget`，21 次通知 |
 | L16 | **真实游戏侧 DLL 加载** | `t16`，包内 16 个 DLL 全部加载成功 |
 | L17 | **通用异步机制** | `t17_async2`：`XAsyncRun`/`GetResultSize`/`Cancel` |
+| L18 | **包挂载 + 包身份** | `t18_package`：真配置的包身份、挂载到真实目录、坏包返回 `E_NOTFOUND` |
 
 **唯一缺口：游戏可执行文件**（见 [docs/package-completeness.md](docs/package-completeness.md)：
 包清单 104 条，只缺 `game_scarlett_master.exe` 一个）。
@@ -59,7 +60,7 @@
 返回码语义：`0 = PASS`、`2 = SKIP`（本机不支持该能力，如无光追）、其它 `FAIL`。
 同时写 `build/suite/report.txt`（TSV）供脚本消费。
 
-实测：**17 PASS / 0 SKIP / 0 FAIL，约 5.6 秒**（`t6_rt` 首次约 30 秒，之后走驱动缓存降到 0.4 秒）。
+实测：**18 PASS / 0 SKIP / 0 FAIL，约 5.6 秒**（`t6_rt` 首次约 30 秒，之后走驱动缓存降到 0.4 秒）。
 
 只跑子集：`./tools/run_suite.sh --only t5,t6`；强制核显：`XBGTASIX_ADAPTER=0 ./tools/run_suite.sh`。
 
@@ -72,7 +73,7 @@ TLS、SEH 全由系统完成 —— 要写的只是"这些 DLL 里该有什么"�
 
 | DLL | 导出 | 内容 |
 |---|---|---|
-| `xgameruntime.dll` | **461**（23 手写 + 438 生成桩） | 生命周期（真读 `MicrosoftGame.Config`）、任务队列、用户、持久化存储、XAsync |
+| `xgameruntime.dll` | **461**（31 手写 + 430 生成桩） | 生命周期（真读 `MicrosoftGame.Config`）、任务队列、用户、持久化存储、XAsync |
 | `xmem.dll` | 4 | `XMemAlloc/Free/VirtualQuery/GetWorkingSetStatistics`，64 KB 页语义 |
 | `d3d12_xs.dll` | 18 | 4 个手写（带日志 + 选卡）+ 14 个原生转发到系统 `d3d12.dll` |
 
