@@ -52,6 +52,17 @@ cbuffer Cam : register(b0) { row_major float4x4 g_mvp; };
 `p' = (p - center) * s`，行向量矩阵里平移行必须写 `-center * s`。
 漏乘 `s` 不会崩，只是模型偏出去一点 —— 小模型看不出来，大模型就飞出画面。
 
+## 6. 顺时针绕序 → 面法线朝内 → 整体发暗
+
+RAGE 导出的网格是**顺时针**绕序。用 `cross(b-a, c-a)` 求面法线会得到朝内的方向，
+半兰伯特光照下 `N·L ≈ 0`，整模型发暗、像背光。修法二选一：
+
+- 法线取反（`n = -cross(b-a, c-a)`）
+- 或者把 `FrontCounterClockwise` 设 TRUE 并开背面剔除
+
+`tests/t8_model` 两者都做了：默认平直着色 + 法线翻转 + `CULL_BACK`，
+`XBGTASIX_T8_SHADING=smooth` / `XBGTASIX_T8_CULL=0` 可切回对照。
+
 ## 诊断顺序（省时间的那个）
 
 1. 先用已知能画的 shader（`SV_VertexID` 三角形）跑同一套 RT/PSO → 确认管线通
