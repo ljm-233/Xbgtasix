@@ -55,7 +55,8 @@ float4 PSMain(VSOut input) : SV_Target
     // 半兰伯特：固定光方向，避免无光照时看不出体积
     const float3 L = normalize(float3(0.35, 0.75, 0.55));
     const float ndl = saturate(dot(normalize(input.nrm), L));
-    const float shade = 0.45 + 0.55 * ndl;
-    return float4(c.rgb * shade, 1.0);
+    // 提亮：很多占位贴图本身很暗，配合 0.45 的底光会糊成黑块
+    const float shade = 0.55 + 0.65 * ndl;
+    return float4(saturate(c.rgb * shade * 1.6), 1.0);
 #endif
 }
