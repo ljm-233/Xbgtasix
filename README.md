@@ -77,6 +77,7 @@ TLS、SEH 全由系统完成 —— 我们要写的只是"这些 DLL 里该有�
 | 文档 | 结论 |
 |---|---|
 | [docs/report.md](docs/report.md) | **技术报告（叙事版）**：目标、做法、数字、缺口 |
+| [docs/exe-day-checklist.md](docs/exe-day-checklist.md) | **exe 到手当天的 10 分钟操作顺序**（含三堵预期墙） |
 | [docs/where-is-the-exe.md](docs/where-is-the-exe.md) | 全包扫描确认**没有 exe**；`gameos.xvd` 等容器里也没有 |
 | [docs/rpf9-findings.md](docs/rpf9-findings.md) | RPF9 目录表加密且公开工具不解；载荷可扫描；贴图名字来自载荷内部 |
 | [docs/shader-corpus.md](docs/shader-corpus.md) | 21,522 条着色器：**mesh shader 34.8%、光追 64 个、绑定槽 p99=98** |
@@ -128,6 +129,8 @@ Xbgtasix/
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK
+  tools/analyze_exe.py         解析目标 exe 的导入表：缺哪些 shim 导出
+  tools/run_target.sh          把目标 exe 和 shim 放一起试跑，取第一个缺口
   tools/render_gallery.sh      批量渲染导出的 OBJ -> PNG
   tools/packaging/             针对游戏数据包的探针与统计（rpf9_probe / shader_stats / pe_surface）
   docs/                        证据表与结论
