@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 GH_CANDIDATES = [r"C:\Program Files\GitHub CLI\gh.exe", "gh"]
 
@@ -48,7 +49,23 @@ def git(*args, binary=False):
 _body_path = os.path.join(ROOT, "build", "gh_api_body.json")
 
 
-def api(method, path, body=None):
+def api(method, path, body=None, retries=4):
+    """带重试：网络中途被掐（stream error / CANCEL）在这类长推送里很常见。"""
+    last = ""
+    for attempt in range(1, retries + 1):
+        try:
+            return _api_once(method, path, body)
+        except SystemExit as e:
+            last = str(e)
+            if attempt == retries:
+                raise
+            wait = 2 ** attempt
+            print("    （第 %d 次失败，%ds 后重试）%s" % (attempt, wait, last.splitlines()[-1][:80]))
+            time.sleep(wait)
+    raise SystemExit(last)
+
+
+def _api_once(method, path, body=None):
     cmd = [GH, "api", "--method", method, path]
     if body is not None:
         os.makedirs(os.path.dirname(_body_path), exist_ok=True)

@@ -104,6 +104,7 @@ XBGTASIX_CONFIG=<path>  # 指定 MicrosoftGame.Config
 | [exe-day-checklist](docs/exe-day-checklist.md) | exe 到手当天的 10 分钟操作顺序 |
 | [HANDOFF](docs/HANDOFF.md) | 交接摘要（状态、复跑、下一步） |
 | [publish](docs/publish.md) | 发布到 GitHub 的步骤与认证方式 |
+| [CONTRIBUTING](CONTRIBUTING.md) | 怎么加测试 / 补 shim 导出 / 标证据等级 / 提交规范 |
 | [anyps5-notes](docs/anyps5-notes.md) | 同类项目 AnyPS5 的分层方式与教训 |
 | [gdk_api_surface](docs/gdk_api_surface.md) | 包内 16 个 DLL 的导入/导出面 |
 
