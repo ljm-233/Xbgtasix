@@ -1,1 +1,10 @@
 ; XPackage 剩余（package_more.cpp）
+; 只列 package_more.cpp 里真写了的 7 个，且都逐字对应 gdk/include_clean/XPackage.h 的声明。
+; XPackageGetIdentifier 故意不列：头文件里没有声明，签名无从核对（见 package_more.cpp 末尾）。
+XPackageGetPackageKind
+XPackageEnumerateFeatures
+XPackageRegisterPackageInstalled
+XPackageUnregisterPackageInstalled
+XPackageInstallChunks
+XPackageUninstallPackage
+XPackageUninstallUWPInstance

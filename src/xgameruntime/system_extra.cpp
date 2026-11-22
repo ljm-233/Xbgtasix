@@ -237,6 +237,11 @@ STDAPI XSystemGetAppSpecificDeviceId(size_t appSpecificDeviceIdSize,
 // 这是 Win32 句柄语义本身的性质，不是本实现能消除的。
 STDAPI_(bool) XSystemIsHandleValid(XSystemHandle handle) noexcept {
     if (!handle) return false;
+    // 实测（MinGW64 + Win10/11）：GetHandleInformation(INVALID_HANDLE_VALUE) 返回 TRUE。
+    // 原因不是 bug：INVALID_HANDLE_VALUE 就是 -1，而 -1 同时是 GetCurrentProcess() 的
+    // 伪句柄，内核把它当"合法句柄值"。但 XSystem 的句柄全是运行时资源句柄，
+    // 真句柄值永远是 4 的小倍数、不可能是 -1，所以这个哨兵必须单独挡掉。
+    if (handle == INVALID_HANDLE_VALUE) return false;
     DWORD flags = 0;
     return GetHandleInformation(static_cast<HANDLE>(handle), &flags) != 0;
 }

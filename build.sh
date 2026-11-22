@@ -235,6 +235,30 @@ echo "== t22_extras.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t22_extras.exe"
 
+echo "== t23_pkg2.exe"
+"$CXX" "${FLAGS[@]}" tests/t23_pkg2/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t23_pkg2.exe"
+
+echo "== t24_save2.exe"
+"$CXX" "${FLAGS[@]}" tests/t24_save2/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t24_save2.exe"
+
+echo "== t25_sys.exe"
+"$CXX" "${FLAGS[@]}" tests/t25_sys/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t25_sys.exe"
+
+echo "== t26_stream.exe"
+"$CXX" "${FLAGS[@]}" tests/t26_stream/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t26_stream.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
