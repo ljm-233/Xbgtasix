@@ -53,6 +53,10 @@ HRESULT WINAPI XGameUiShowWebAuthenticationAsync(void* async_block, void* user, 
                                                  const char* completion_uri);
 HRESULT WINAPI XGameUiShowWebAuthenticationResultSize(void* async_block, size_t* size);
 HRESULT WINAPI XAsyncGetStatus(void* async_block, bool wait);
+HRESULT WINAPI XGameUiSetMessageDialogUiResponse(void* handle, unsigned response);
+HRESULT WINAPI XGameUiSetTextEntryUiResponse(void* handle, const char* response);
+HRESULT WINAPI XGameUiSetErrorDialogUiResponse(void* handle);
+HRESULT WINAPI XGameUiSetUiCallbacks(const void* callbacks, bool use_system_ui);
 }
 
 namespace {
@@ -175,6 +179,12 @@ int main() {
         ok(SUCCEEDED(XGameUiShowWebAuthenticationResultSize(&wa, &wsize)) && wsize > 24,
            "WebAuth ResultSize");
         ok(XAsyncGetStatus(&wa, false) == S_OK, "WebAuth 立即完成");
+
+        // UI 回调注入与本实现兼容：不接管 UI，但调用链不能崩
+        ok(SUCCEEDED(XGameUiSetUiCallbacks(nullptr, true)), "SetUiCallbacks(nullptr)");
+        ok(SUCCEEDED(XGameUiSetMessageDialogUiResponse(nullptr, 0)), "SetMessageDialogUiResponse");
+        ok(SUCCEEDED(XGameUiSetTextEntryUiResponse(nullptr, "x")), "SetTextEntryUiResponse");
+        ok(SUCCEEDED(XGameUiSetErrorDialogUiResponse(nullptr)), "SetErrorDialogUiResponse");
     }
 
     XUserCloseHandle(u2);

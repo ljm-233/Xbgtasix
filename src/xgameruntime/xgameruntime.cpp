@@ -1202,6 +1202,59 @@ STDAPI XGameUiShowWebAuthenticationResult(XAsyncBlock* async, size_t bufferSize,
     return S_OK;
 }
 
+// ---- UI 响应回调（配套 SetUiCallbacks 的另一半） ----
+//
+// 真实 GDK 里：SetUiCallbacks 注册"怎么显示"，Show*Async 挂起等回调，
+// Set*UiResponse 由 UI 线程调用，填结果并让 async 完成。
+// 本实现走"立即完成"策略，所以这些函数到的时候 async 已完成；
+// 保留它们是为了**调用链不崩**，并且如实记录（而不是假装接管了 UI）。
+
+static HRESULT ui_response_ack(const char* name, XGameUiCallbackHandle handle) {
+    xbgtasix::logf("[xgamert] %s(handle=%p)：本实现采用立即完成策略，响应已被忽略",
+                   name, reinterpret_cast<void*>(handle));
+    return S_OK;
+}
+
+STDAPI XGameUiSetMessageDialogUiResponse(XGameUiCallbackHandle callbackHandle,
+                                         XGameUiMessageDialogButton response) noexcept {
+    (void)response;
+    return ui_response_ack("SetMessageDialogUiResponse", callbackHandle);
+}
+
+STDAPI XGameUiSetPlayerPickerUiResponse(XGameUiCallbackHandle callbackHandle, uint32_t playerCount,
+                                        const uint64_t* players) noexcept {
+    (void)playerCount;
+    (void)players;
+    return ui_response_ack("SetPlayerPickerUiResponse", callbackHandle);
+}
+
+STDAPI XGameUiSetTextEntryUiResponse(XGameUiCallbackHandle callbackHandle,
+                                     const char* response) noexcept {
+    (void)response;
+    return ui_response_ack("SetTextEntryUiResponse", callbackHandle);
+}
+
+STDAPI XGameUiSetPlayerProfileCardUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
+    return ui_response_ack("SetPlayerProfileCardUiResponse", callbackHandle);
+}
+
+STDAPI XGameUiSetSendGameInviteUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
+    return ui_response_ack("SetSendGameInviteUiResponse", callbackHandle);
+}
+
+STDAPI XGameUiSetAchievementsUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
+    return ui_response_ack("SetAchievementsUiResponse", callbackHandle);
+}
+
+STDAPI XGameUiSetMultiplayerActivityGameInviteUiResponse(
+    XGameUiCallbackHandle callbackHandle) noexcept {
+    return ui_response_ack("SetMultiplayerActivityGameInviteUiResponse", callbackHandle);
+}
+
+STDAPI XGameUiSetErrorDialogUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
+    return ui_response_ack("SetErrorDialogUiResponse", callbackHandle);
+}
+
 // ---- 系统信息 ----
 
 STDAPI_(XSystemDeviceType) XSystemGetDeviceType() noexcept {
