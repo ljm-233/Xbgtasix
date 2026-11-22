@@ -1,1 +1,29 @@
 ; XGameSave 容器式（gamesave_extra.cpp）
+; 27 个 = gdk/include_clean/XGameSave.h 的全部声明（已逐条实现，无跳过）
+XGameSaveInitializeProvider
+XGameSaveInitializeProviderAsync
+XGameSaveInitializeProviderResult
+XGameSaveCloseProvider
+XGameSaveGetRemainingQuota
+XGameSaveGetRemainingQuotaAsync
+XGameSaveGetRemainingQuotaResult
+XGameSaveDeleteContainer
+XGameSaveDeleteContainerAsync
+XGameSaveDeleteContainerResult
+XGameSaveGetContainerInfo
+XGameSaveEnumerateContainerInfo
+XGameSaveEnumerateContainerInfoByName
+XGameSaveCreateContainer
+XGameSaveCloseContainer
+XGameSaveEnumerateBlobInfo
+XGameSaveEnumerateBlobInfoByName
+XGameSaveReadBlobData
+XGameSaveReadBlobDataAsync
+XGameSaveReadBlobDataResult
+XGameSaveCreateUpdate
+XGameSaveCloseUpdate
+XGameSaveSubmitBlobWrite
+XGameSaveSubmitBlobDelete
+XGameSaveSubmitUpdate
+XGameSaveSubmitUpdateAsync
+XGameSaveSubmitUpdateResult
