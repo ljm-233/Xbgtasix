@@ -284,6 +284,12 @@ echo "== t30_fakegame.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t30_fakegame.exe"
 
+echo "== t31_swapchain.exe"
+"$CXX" "${FLAGS[@]}" tests/t31_swapchain/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t31_swapchain.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \

@@ -82,6 +82,23 @@ z' = -y*sinθ + z*cosθ
 后者不会报错、也不会空屏，只是整个模型倒过来 —— 和"绕序反了导致发暗"一样，
 属于**看着像渲染成功、其实方向错了**的静默错误。
 
+
+## 8. flip 模型下永远写 buffer 0 → 第二帧 DEVICE_REMOVED
+
+`CreateSwapChainForHwnd` 用 `DXGI_SWAP_EFFECT_FLIP_DISCARD` 时，back buffer 会轮换。
+每帧必须 `swap3->GetCurrentBackBufferIndex()` 取当前索引，用对应的资源与 RTV；
+一直写 buffer 0 会在第二帧 Present 时拿到 `0x887A0005 (DXGI_ERROR_DEVICE_REMOVED)`。
+
+**症状很像"驱动崩了"**，实际是资源状态用错。
+
+## 9. 重置 allocator 前必须等 GPU 用完
+
+`ID3D12CommandAllocator::Reset()` 在 GPU 仍在执行引用它的命令列表时调用，
+同样会得到 `DEVICE_REMOVED`（不是断言、不是崩溃）。
+
+**正确姿势**：每帧 `Signal(fence, ++fv)` + `SetEventOnCompletion` + `WaitForSingleObject`，
+再 `alloc->Reset()`。`t31_swapchain` 里两帧之间就是走这个流程。
+
 ## 诊断顺序（省时间的那个）
 
 1. 先用已知能画的 shader（`SV_VertexID` 三角形）跑同一套 RT/PSO → 确认管线通
