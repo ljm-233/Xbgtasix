@@ -23,7 +23,10 @@ import sys
 # 合法导出名：C 标识符或 C++ 装饰名（?Foo@@...），不含控制字符/空格/等号
 SANE = re.compile(r"^[A-Za-z_?$][A-Za-z0-9_?$@]*$")
 # mingw/CRT 的伪符号，不应该出现在导出表里
-JUNK_PREFIX = ("_guard_", "__guard", "___guard", "__imp_", "___ImageBase")
+JUNK_PREFIX = ("_guard_", "__guard", "___guard", "__imp_", "___ImageBase",
+               # 非 API 符号：CRT/编译器内部件、私有实现前缀、GRDK 构建标记
+               "Rtl", "PFX", "_XBLD_", "__CxxFrameHandler", "_CxxThrowException",
+               "HRESULT_FROM_WIN32", "_except_handler", "__security")
 
 
 def read_coff_archive(path):
