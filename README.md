@@ -4,7 +4,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 面向 Xbox Series / GDK 的**兼容层**与**资产格式研究**工具集。纯自写代码：
-28 个可断言测试、17 份带来源标注的结论文档。
+29 个可断言测试、17 份带来源标注的结论文档。
 
 > 不包含任何游戏文件、微软 GDK 头文件/库、解密密钥或绕过手段。
 
@@ -54,6 +54,7 @@
 | L26 | **串流 / 捕获 / 网络** | `t26_stream`：77 导出，"无串流"语义、token 非零、结构体清零 |
 | L27 | **复合任务队列** | `t27_composite`：Work 路由到 A、Completion 路由到 B、自身不排队 —— **XTaskQueue 家族桩清零** |
 | L28 | **语音合成（SAPI）** | `t28_speech`：枚举到 2 个系统语音、合成器创建；本机无可用音频输出 -> SKIP |
+| L29 | **性能基准** | `t29_perf`：启动 0.52ms、转发开销≈0、XMem 1.13x、异步往返 54µs |
 
 **唯一缺口：游戏可执行文件**（见 [docs/package-completeness.md](docs/package-completeness.md)：
 包清单 104 条，只缺 `game_scarlett_master.exe` 一个）。
@@ -70,7 +71,7 @@
 返回码语义：`0 = PASS`、`2 = SKIP`（本机不支持该能力，如无光追）、其它 `FAIL`。
 同时写 `build/suite/report.txt`（TSV）供脚本消费。
 
-实测：**27 PASS / 1 SKIP / 0 FAIL，约 12 秒（21 项）**（`t6_rt` 首次约 30 秒，之后走驱动缓存降到 0.4 秒）。
+实测：**28 PASS / 1 SKIP / 0 FAIL，约 12 秒（21 项）**（`t6_rt` 首次约 30 秒，之后走驱动缓存降到 0.4 秒）。
 
 只跑子集：`./tools/run_suite.sh --only t5,t6`；强制核显：`XBGTASIX_ADAPTER=0 ./tools/run_suite.sh`。
 
@@ -116,6 +117,7 @@ XBGTASIX_CONFIG=<path>  # 指定 MicrosoftGame.Config
 | [where-is-the-exe](docs/where-is-the-exe.md) | 全包 PE 扫描：没有 exe |
 | [exe-day-checklist](docs/exe-day-checklist.md) | exe 到手当天的 10 分钟操作顺序 |
 | [HANDOFF](docs/HANDOFF.md) | 交接摘要（状态、复跑、下一步） |
+| [feasibility](docs/feasibility.md) | **可行性判定 + 性能实测**：哪些已证、哪些只能等 exe、哪些不可行 |
 | [env-gotchas](docs/env-gotchas.md) | 环境与工具链的 7 个坑（沙箱按进程放行、路径分隔符、git TLS、mingw 头文件不一致…） |
 | [publish](docs/publish.md) | 发布到 GitHub 的步骤与认证方式 |
 | [audit-2026-11](docs/audit-2026-11.md) | 五个子代理的全项目审查记录（含未修项与优先级） |
@@ -142,7 +144,7 @@ Xbgtasix/
   src/xmem/                    XMem* → VirtualAlloc（64 KB 页语义）
   src/d3d12_xs/                手写 + forward.def（14 个原生转发）+ 选卡
   src/generated/               325 个桩 + 50 个 GUID 数据导出（生成物，勿手改）
-  tests/t0…t28/                27 个目录（t16 是 python 步），全部离屏可跑
+  tests/t0…t29/                28 个目录（t16 是 python 步），全部离屏可跑
   tools/gen_stubs.py           .lib → 全量导出桩
   tools/forward_shim.py        DLL → 全量导出转发 .def
   tools/find_gdk.py            扫盘定位 GDK
