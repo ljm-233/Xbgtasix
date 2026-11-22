@@ -67,6 +67,7 @@ fi
     src/generated/xgameruntime_guids.cpp \
     src/trace.cpp \
     "$OUT/xgameruntime.def" \
+    -lole32 -loleaut32 -loleacc -lsapi \
     -o "$OUT/xgameruntime.dll" -Wl,--out-implib,"$OUT/libxgameruntime.dll.a"
 
 build_shim xmem
@@ -264,6 +265,12 @@ echo "== t27_composite.exe"
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t27_composite.exe"
+
+echo "== t28_speech.exe"
+"$CXX" "${FLAGS[@]}" tests/t28_speech/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 -lole32 \
+    -o "$OUT/t28_speech.exe"
 
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
