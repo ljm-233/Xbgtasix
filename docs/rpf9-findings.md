@@ -78,6 +78,56 @@ f1    ...    零填充或一小段附加数据
 结论不变但更精确：**目录区加密，载荷是"部分明文 + 部分自定义压缩"**。
 所以能雕刻出载荷，拿不到名字与路径。
 
+
+## 公开进展（2026-11 检索）
+
+比我们独立探测走得更远的两个开源工具：
+
+**PercyStar**（rpatty-dev，Rust）v1.3.2 changelog 原文：
+
+> **9FPR Header Parser:** Directly parses `entry_count` (+0x24), `data_offset` (+0x04), and
+> `names_len` (+0x0C) in the RPF9 64-byte header
+
+> … and proved **static-key fixed-IV 9FPR TOC encryption** across 4 archives
+
+> **500 lifted PS_0x09 RDNA2 -> SPIR-V 1.5 shaders** validated … (500/500 vkCreateShaderModule)
+
+还提供 `--dump-textures`（20 种 DXGI 格式 + Scarlett RDNA2 4KB/64KB 反 swizzle）
+和 `data.rpf` 内的 GXT 文本表查看。
+
+**SixNG**（holdmysocks）：
+
+> sixng audio … finds the sound banks by scanning the archive: 7,160 banks, 1.6 M streams …
+> **Stream names are 29-bit hashes and are not recovered**
+
+它能导出 navmesh、道路图（63,808 节点）、音频（Opus 无损转封装），
+但明确说明**名字无法还原**。
+
+用公开字段重新读我们的包（`tools/packaging/rpf9_probe.py` 的读数）：
+
+| 文件 | data_offset | names_len | entry_count@0x24 | TOC 长度 | 每条约 |
+|---|---|---|---|---|---|
+| appdata0.rpf | 864 | 64 | 2 | 800 | 400.00 |
+| script.rpf | 608 | 128 | 2 | 544 | 272.00 |
+| common.rpf | 38272 | 14864 | 418 | 38208 | 91.41 |
+| shaders.rpf | 34368 | 160 | 3 | 34304 | 11434.67 |
+| textures.rpf | 1936 | 544 | 22 | 1872 | 85.09 |
+| data.rpf | 69728 | 22640 | 699 | 69664 | 99.66 |
+| navmeshes.rpf | 1920 | 1152 | 29 | 1856 | 64.00 |
+
+`navmeshes.rpf` 正好 64.00 B/条，其余不是整数 → 记录**变长**（内嵌名字）。
+`entry_count` 看起来是**顶层条目数**，不是递归总数。
+
+## 结论修订
+
+之前写"目录无法解出"要收紧为：
+
+- 目录区确实是加密的（我们独立验证过：熵 7.994、16 字节对齐、零重复块）
+- 但**加密方案已被公开证明是"静态密钥 + 固定 IV"**，不是每份 exe 一个密钥
+- 名字/路径仍未公开还原（SixNG 明说哈希不可逆，PercyStar 靠扫描）
+- 所以：内容可拿（贴图、音频、navmesh、文本表、甚至着色器），**文件名仍是缺口**
+
+
 ## 对项目定位的影响
 
 原始目标（让泄露版跑在 PC 上）在缺 exe + 目录加密的双重约束下不可达。
