@@ -261,7 +261,21 @@ struct TaskEntry {
     XTaskQueueCallback* callback;
 };
 
+struct WaiterReg {
+    XTaskQueuePort port;
+    HANDLE wait_handle;
+};
+
+struct MonitorReg {
+    XTaskQueuePort port;
+    void* context;
+    XTaskQueueMonitorCallback* callback;
+};
+
 struct TaskQueueState {
+    std::atomic<int> refcount{1};
+    std::vector<WaiterReg> waiters;
+    std::vector<MonitorReg> monitors;
     XTaskQueueDispatchMode work_mode = XTaskQueueDispatchMode::ThreadPool;
     XTaskQueueDispatchMode comp_mode = XTaskQueueDispatchMode::ThreadPool;
     std::mutex mu;
@@ -368,6 +382,7 @@ STDAPI XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, voi
                                XTaskQueueCallback* callback) noexcept {
     if (!queue || !callback) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    std::vector<MonitorReg> pending_monitors;
     const XTaskQueueDispatchMode mode = (port == XTaskQueuePort::Completion) ? q->comp_mode : q->work_mode;
     if (mode == XTaskQueueDispatchMode::Immediate) {
         callback(context, false);
@@ -376,8 +391,16 @@ STDAPI XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, voi
     {
         std::lock_guard<std::mutex> lock(q->mu);
         q->queue_for(port).push_back(TaskEntry{port, context, callback});
+        // 有活干了：唤醒所有登记在該端口上的 waiter，并通知 monitor
+        for (const auto& w : q->waiters) {
+            if (w.port == port && w.wait_handle) SetEvent(w.wait_handle);
+        }
+        pending_monitors = q->monitors;
     }
     q->cv.notify_all();
+    for (const auto& m : pending_monitors) {
+        if (m.callback) m.callback(m.context, queue, port);
+    }
     return S_OK;
 }
 
@@ -423,8 +446,87 @@ STDAPI XTaskQueueTerminate(XTaskQueueHandle queue, bool wait, void* context,
 STDAPI_(void) XTaskQueueCloseHandle(XTaskQueueHandle queue) noexcept {
     if (!queue) return;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    if (q->refcount.fetch_sub(1) > 1) return;   // DuplicateHandle 后要等引用计数归零
     q->shutdown(true);
     delete q;
+}
+
+STDAPI XTaskQueueDuplicateHandle(XTaskQueueHandle queueHandle, XTaskQueueHandle* duplicated) noexcept {
+    if (!queueHandle || !duplicated) return E_INVALIDARG;
+    auto* q = reinterpret_cast<TaskQueueState*>(queueHandle);
+    q->refcount.fetch_add(1);
+    *duplicated = queueHandle;   // 同一实例 + 引用计数，语义等价于"多一个句柄"
+    return S_OK;
+}
+
+// ---- waiter / monitor ----
+
+STDAPI XTaskQueueRegisterWaiter(XTaskQueueHandle queue, XTaskQueuePort port, HANDLE waitHandle,
+                                void* callbackContext, XTaskQueueCallback* callback,
+                                XTaskQueueRegistrationToken* token) noexcept {
+    if (!queue || !waitHandle || !token) return E_INVALIDARG;
+    (void)callbackContext;   // 真 GDK 里 waiter 的回调由调用方线程执行，我们只负责 signal
+    (void)callback;
+    auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    {
+        std::lock_guard<std::mutex> lock(q->mu);
+        q->waiters.push_back(WaiterReg{port, waitHandle});
+        token->token = q->waiters.size();
+    }
+    xbgtasix::logf("[xgamert] RegisterWaiter(port=%u, event=%p)", static_cast<unsigned>(port),
+                   waitHandle);
+    return S_OK;
+}
+
+STDAPI_(void) XTaskQueueUnregisterWaiter(XTaskQueueHandle queue,
+                                         XTaskQueueRegistrationToken token) noexcept {
+    if (!queue) return;
+    auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    std::lock_guard<std::mutex> lock(q->mu);
+    const size_t idx = static_cast<size_t>(token.token);
+    if (idx >= 1 && idx <= q->waiters.size()) q->waiters.erase(q->waiters.begin() + (idx - 1));
+}
+
+STDAPI XTaskQueueRegisterMonitor(XTaskQueueHandle queue, void* callbackContext,
+                                 XTaskQueueMonitorCallback* callback,
+                                 XTaskQueueRegistrationToken* token) noexcept {
+    if (!queue || !callback || !token) return E_INVALIDARG;
+    auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    {
+        std::lock_guard<std::mutex> lock(q->mu);
+        q->monitors.push_back(MonitorReg{XTaskQueuePort::Work, callbackContext, callback});
+        token->token = q->monitors.size();
+    }
+    xbgtasix::logf("[xgamert] RegisterMonitor（监听整个队列）");
+    return S_OK;
+}
+
+STDAPI_(void) XTaskQueueUnregisterMonitor(XTaskQueueHandle queue,
+                                          XTaskQueueRegistrationToken token) noexcept {
+    if (!queue) return;
+    auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    std::lock_guard<std::mutex> lock(q->mu);
+    const size_t idx = static_cast<size_t>(token.token);
+    if (idx >= 1 && idx <= q->monitors.size()) q->monitors.erase(q->monitors.begin() + (idx - 1));
+}
+
+// ---- 进程级默认队列 ----
+
+std::mutex g_proc_queue_mu;
+XTaskQueueHandle g_proc_queue = nullptr;
+
+STDAPI_(void) XTaskQueueSetCurrentProcessTaskQueue(XTaskQueueHandle queue) noexcept {
+    std::lock_guard<std::mutex> lock(g_proc_queue_mu);
+    if (queue) reinterpret_cast<TaskQueueState*>(queue)->refcount.fetch_add(1);
+    g_proc_queue = queue;
+    xbgtasix::logf("[xgamert] SetCurrentProcessTaskQueue(%p)", static_cast<void*>(queue));
+}
+
+STDAPI_(bool) XTaskQueueGetCurrentProcessTaskQueue(XTaskQueueHandle* queue) noexcept {
+    std::lock_guard<std::mutex> lock(g_proc_queue_mu);
+    if (!g_proc_queue) return false;
+    if (queue) *queue = g_proc_queue;
+    return true;
 }
 
 // ---- XAsync ----
