@@ -21,3 +21,5 @@ XAsyncCancel
 XPersistentLocalStorageGetPathSize
 XPersistentLocalStorageGetSpaceInfo
 XPersistentLocalStorageGetPath
+XAsyncRun
+XAsyncGetResultSize

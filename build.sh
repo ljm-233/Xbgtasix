@@ -183,6 +183,12 @@ echo "== t15_budget.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t15_budget.exe"
 
+echo "== t17_async2.exe"
+"$CXX" "${FLAGS[@]}" tests/t17_async2/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t17_async2.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
