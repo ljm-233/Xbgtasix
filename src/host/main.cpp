@@ -640,7 +640,7 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
 
     // 3) D3D12 能否建设备
     if (!pfn_d3d12) {
-        say("  D3D12         不可用：这台机器没有 d3d12.dll —— 游戏必然起不来");
+        say("  [!] D3D12     不可用：这台机器没有 d3d12.dll —— 游戏必然起不来");
         ++critical;
     } else {
         ID3D12Device* dev = nullptr;
@@ -650,7 +650,7 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
             say("  D3D12         可用（feature level 11_0 以上）");
             dev->Release();
         } else {
-            say("  D3D12         不可用 hr=0x%08lx", static_cast<unsigned long>(hr));
+            say("  [!] D3D12     不可用 hr=0x%08lx", static_cast<unsigned long>(hr));
             ++critical;
         }
     }
@@ -685,18 +685,33 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
     }
 
     // 6) 日志目录可写
+    // 注意：run 的日志路径是"游戏目录 -> %LOCALAPPDATA%\Xbgtasix -> 临时目录"三级回落，
+    // 只测临时目录并把它算成 critical 会造成假警报（本机就是：temp 不可写，但另外两级可写，
+    // 日志照样落盘）。这里逐级探测，只要有一级可用就算通过。
     {
-        wchar_t tmp[MAX_PATH] = {0};
-        GetTempPathW(MAX_PATH, tmp);
-        const std::wstring probe = join(tmp, L"xbgtasix_write_probe.tmp");
-        HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                               FILE_ATTRIBUTE_TEMPORARY, nullptr);
-        if (h != INVALID_HANDLE_VALUE) {
+        auto writable = [](const std::wstring& dir) {
+            const std::wstring probe =
+                join(dir, L"xbgtasix_write_probe_" +
+                              std::to_wstring(GetCurrentProcessId()) + L".tmp");
+            HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_TEMPORARY, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return false;
             CloseHandle(h);
             DeleteFileW(probe.c_str());
-            say("  可写         临时目录可写（日志能落盘）");
-        } else {
-            say("  可写         临时目录不可写，err=%lu", GetLastError());
+            return true;
+        };
+        wchar_t tmp[MAX_PATH] = {0};
+        GetTempPathW(MAX_PATH, tmp);
+        wchar_t local[MAX_PATH] = {0};
+        const DWORD nlocal = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+
+        const bool w_exe = writable(self_dir());
+        const bool w_local = nlocal > 0 && writable(std::wstring(local));
+        const bool w_tmp = writable(tmp);
+        say("  可写         程序目录 %s / LOCALAPPDATA %s / 临时目录 %s（日志至少落一处即可）",
+            w_exe ? "可写" : "不可写", w_local ? "可写" : "不可写", w_tmp ? "可写" : "不可写");
+        if (!w_exe && !w_local && !w_tmp) {
+            say("  [!]          三级都不可写 —— 日志无处落盘，排障会很困难");
             ++critical;
         }
     }
@@ -1375,18 +1390,42 @@ void pause_if_interactive() {
 }
 
 // 在 dir 及其上 3 层父目录里找含 layout_*.xml 的包目录
+// 判断一个目录里是否有 layout_*.xml（= 像游戏包的根）
+bool has_layout(const std::wstring& dir) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(join(dir, L"layout_*.xml").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    return true;
+}
+
 std::wstring find_package_near(const std::wstring& start) {
     std::wstring dir = abs_path(start);
+    // 第 1 轮：自己 + 上 3 层祖先（工具被放在包里时命中）
+    std::vector<std::wstring> ancestors;
     for (int depth = 0; depth < 4 && !dir.empty(); ++depth) {
-        WIN32_FIND_DATAW fd{};
-        HANDLE h = FindFirstFileW(join(dir, L"layout_*.xml").c_str(), &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            FindClose(h);
-            return dir;
-        }
+        if (has_layout(dir)) return dir;
+        ancestors.push_back(dir);
         const std::wstring up = dir_of(dir);
         if (up == dir) break;
         dir = up;
+    }
+    // 第 2 轮：祖先的**直接子目录**（常见情形：工具在 D:\GTA6\Xbgtasix\build，
+    // 游戏包是兄弟目录 D:\GTA6\GTA6....；只往上看永远找不到）
+    for (const auto& a : ancestors) {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(join(a, L"*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (fd.cFileName[0] == L'.') continue;   // . 与 ..
+            const std::wstring cand = join(a, fd.cFileName);
+            if (has_layout(cand)) {
+                FindClose(h);
+                return cand;
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
     }
     return {};
 }
@@ -1422,8 +1461,6 @@ void usage() {
     printf("  xbgtasix restore  <exe|包目录> [--force] [--dll-dir 目录]\n");
     printf("  xbgtasix firstrun <exe|包目录> [--dry-run] [--stop] [--timeout 秒] [--dll-dir 目录]\n");
     printf("  xbgtasix doctor\n");
-    printf("  xbgtasix restore <包目录|exe路径>\n");
-    printf("  xbgtasix firstrun <包目录|exe路径> [--dry-run] [--stop] [--timeout 秒]\n");
     printf("  xbgtasix --version\n\n");
     printf("说明：\n");
     printf("  run     把三个 DLL 放到游戏旁边，拉起进程，按退出码分类并给出下一步\n");
