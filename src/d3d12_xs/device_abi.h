@@ -661,36 +661,61 @@ uintptr_t WINAPI slot_probe_forward(void* self, uintptr_t a1 = 0, uintptr_t a2 =
 }
 
 // 建视图 / 拷贝描述符：把游戏传进来的 arena 句柄翻译成 PC 堆里的真实地址。
+//
+// **注意：这些函数目前没有绑到任何槽位。**
+// 原因是主机设备 vtable 的方法顺序与 PC 头文件不同（实测主机 14 = CreateDescriptorHeap、
+// 48 = CreateCommandQueueX、73 = 命令列表创建），按 PC 索引硬套会把 A 方法当 B 方法调。
+// 待用 XBGTASIX_SLOTPROBE=1 在真机上逐个确认主机槽位后再绑定。
 // 实测：不翻译的话游戏一建视图就崩在 D3D12Core（AV）。
+inline void log_view_handle(const char* what, D3D12_CPU_DESCRIPTOR_HANDLE given,
+                            D3D12_CPU_DESCRIPTOR_HANDLE mapped) {
+    static std::atomic<int> budget{40};
+    if (budget.fetch_sub(1) > 0) {
+        xbgtasix::logf("[d3d12_xs] 视图创建诊断 %s: 传入=%p 翻译后=%p", what,
+                       reinterpret_cast<void*>(given.ptr), reinterpret_cast<void*>(mapped.ptr));
+    }
+}
+
 inline void WINAPI create_cbv(DeviceProxy* self, const D3D12_CONSTANT_BUFFER_VIEW_DESC* d,
                               D3D12_CPU_DESCRIPTOR_HANDLE h) {
     auto* pc = static_cast<ID3D12Device*>(self->pc);
-    pc->CreateConstantBufferView(d, translate_cpu(h));
+    const auto mapped = translate_cpu(h);
+    log_view_handle("CBV", h, mapped);
+    pc->CreateConstantBufferView(d, mapped);
 }
 inline void WINAPI create_srv(DeviceProxy* self, ID3D12Resource* r,
                               const D3D12_SHADER_RESOURCE_VIEW_DESC* d,
                               D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    static_cast<ID3D12Device*>(self->pc)->CreateShaderResourceView(r, d, translate_cpu(h));
+    const auto mapped = translate_cpu(h);
+    log_view_handle("SRV", h, mapped);
+    static_cast<ID3D12Device*>(self->pc)->CreateShaderResourceView(r, d, mapped);
 }
 inline void WINAPI create_uav(DeviceProxy* self, ID3D12Resource* r,
                               const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,
                               D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    static_cast<ID3D12Device*>(self->pc)->CreateUnorderedAccessView(r, nullptr, d,
-                                                                  translate_cpu(h));
+    const auto mapped = translate_cpu(h);
+    log_view_handle("UAV", h, mapped);
+    static_cast<ID3D12Device*>(self->pc)->CreateUnorderedAccessView(r, nullptr, d, mapped);
 }
 inline void WINAPI create_rtv(DeviceProxy* self, ID3D12Resource* r,
                               const D3D12_RENDER_TARGET_VIEW_DESC* d,
                               D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    static_cast<ID3D12Device*>(self->pc)->CreateRenderTargetView(r, d, translate_cpu(h));
+    const auto mapped = translate_cpu(h);
+    log_view_handle("RTV", h, mapped);
+    static_cast<ID3D12Device*>(self->pc)->CreateRenderTargetView(r, d, mapped);
 }
 inline void WINAPI create_dsv(DeviceProxy* self, ID3D12Resource* r,
                               const D3D12_DEPTH_STENCIL_VIEW_DESC* d,
                               D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    static_cast<ID3D12Device*>(self->pc)->CreateDepthStencilView(r, d, translate_cpu(h));
+    const auto mapped = translate_cpu(h);
+    log_view_handle("DSV", h, mapped);
+    static_cast<ID3D12Device*>(self->pc)->CreateDepthStencilView(r, d, mapped);
 }
 inline void WINAPI create_sampler(DeviceProxy* self, const D3D12_SAMPLER_DESC* d,
                                   D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    static_cast<ID3D12Device*>(self->pc)->CreateSampler(d, translate_cpu(h));
+    const auto mapped = translate_cpu(h);
+    log_view_handle("Sampler", h, mapped);
+    static_cast<ID3D12Device*>(self->pc)->CreateSampler(d, mapped);
 }
 inline void WINAPI copy_descriptors_simple(DeviceProxy* self,
                                            D3D12_CPU_DESCRIPTOR_HANDLE dst, UINT dst_range,
@@ -709,13 +734,6 @@ Slot device_slot() {
     if constexpr (N == kXboxCreateCommandQueueSlot)
         return reinterpret_cast<Slot>(&create_command_queue_x);
     if constexpr (N == 14) return reinterpret_cast<Slot>(&create_descriptor_heap_x);
-    if constexpr (N == 13) return reinterpret_cast<Slot>(&create_cbv);
-    if constexpr (N == 14) return reinterpret_cast<Slot>(&create_srv);
-    if constexpr (N == 15) return reinterpret_cast<Slot>(&create_uav);
-    if constexpr (N == 16) return reinterpret_cast<Slot>(&create_rtv);
-    if constexpr (N == 17) return reinterpret_cast<Slot>(&create_dsv);
-    if constexpr (N == 18) return reinterpret_cast<Slot>(&create_sampler);
-    if constexpr (N == 20) return reinterpret_cast<Slot>(&copy_descriptors_simple);
     if constexpr (N == kCustomHeapPropertiesSlot)
         return reinterpret_cast<Slot>(&custom_heap_properties);
     if constexpr (N == kQueueOrOpenHeapSlot)
@@ -726,7 +744,10 @@ Slot device_slot() {
     if constexpr (N == 79) return reinterpret_cast<Slot>(&schedule_frame_event_x);
     if constexpr (N == 80) return reinterpret_cast<Slot>(&wait_frame_event_x);
     if constexpr (N == 81) return reinterpret_cast<Slot>(&frame_statistics_x);
-    if constexpr (N >= 82) return reinterpret_cast<Slot>(&device_extension_stub);
+    // 主机扩展槽（>= 44）在 PC 设备上**不存在**，按同号转发会把参数喂给别的方法
+    // （实测 slot 70 直接崩在 D3D12Core）。未实现的一律走"明确失败 + 记一次"，
+    // 让游戏走它自己的降级/报错路径，而不是在驱动内部炸掉。
+    if constexpr (N >= 44) return reinterpret_cast<Slot>(&device_extension_stub);
     if (slot_probe_on()) return reinterpret_cast<Slot>(&slot_probe_forward<N>);  // 仅诊断用
     return reinterpret_cast<Slot>(&forward_slot<N>);
 }

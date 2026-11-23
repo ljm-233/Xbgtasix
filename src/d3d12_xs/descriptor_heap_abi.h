@@ -38,6 +38,7 @@ struct DescriptorHeapProxy {
     // virtual_base 非空时，GetCPUDescriptorHandleForHeapStart 返回它而不是 PC 的真实地址。
     // 尚未做句柄翻译：用这个句柄建视图时还需要把 offset 映射回 PC 堆（见 docs/rendering.md）。
     SIZE_T virtual_cpu_base = 0;
+    mutable int logged_cpu_start = 0;   // 诊断：只记一次
 
     static bool supports(REFIID iid) {
         return iid == __uuidof(IUnknown) || iid == __uuidof(ID3D12Object) ||
@@ -48,7 +49,14 @@ struct DescriptorHeapProxy {
     static HRESULT WINAPI query_interface(DescriptorHeapProxy* self, REFIID iid, void** out) {
         if (!out) return E_POINTER;
         *out = nullptr;
-        if (!supports(iid)) return E_NOINTERFACE;
+        if (!DescriptorHeapProxy::supports(iid)) {
+            const auto* g = reinterpret_cast<const unsigned char*>(&iid);
+            xbgtasix::logf("[d3d12_xs] 堆 QI 被拒 iid={%08X-%04X-%04X-%02X%02X-...}（游戏在找别的接口）",
+                           *reinterpret_cast<const uint32_t*>(g),
+                           *reinterpret_cast<const uint16_t*>(g + 4),
+                           *reinterpret_cast<const uint16_t*>(g + 6), g[8], g[9]);
+            return E_NOINTERFACE;
+        }
         add_ref(self);
         *out = self;
         return S_OK;
@@ -100,8 +108,17 @@ struct DescriptorHeapProxy {
     // The title expects the handles in RAX with only the heap in RCX. Desktop
     // COM writes each handle into an explicit aggregate return buffer.
     static SIZE_T WINAPI get_cpu_start(DescriptorHeapProxy* self) {
-        if (self->virtual_cpu_base) return self->virtual_cpu_base;
-        return self->pc->GetCPUDescriptorHandleForHeapStart().ptr;
+        const SIZE_T v = self->virtual_cpu_base ? self->virtual_cpu_base
+                                                : self->pc->GetCPUDescriptorHandleForHeapStart().ptr;
+        if (!self->logged_cpu_start) {
+            self->logged_cpu_start = 1;
+            xbgtasix::logf("[d3d12_xs] 堆 proxy=%p 的 GetCPUDescriptorHandleForHeapStart -> %p"
+                           "（virtual_base=%p，真实=%p）",
+                           self, reinterpret_cast<void*>(v),
+                           reinterpret_cast<void*>(self->virtual_cpu_base),
+                           reinterpret_cast<void*>(self->pc->GetCPUDescriptorHandleForHeapStart().ptr));
+        }
+        return v;
     }
 
     static UINT64 WINAPI get_gpu_start(DescriptorHeapProxy* self) {
@@ -125,6 +142,7 @@ struct DescriptorHandleMap {
     SIZE_T real_base;         // PC 堆的 CPU 基址
     UINT64 virtual_gpu_base;  // 返回给游戏的 GPU 句柄（同样的 arena 地址）
     UINT64 real_gpu_base;     // PC 堆的 GPU 基址
+    UINT increment;           // 该堆的描述符步长（PC 上通常 32）
 };
 
 inline std::vector<DescriptorHandleMap>& handle_maps() {
@@ -134,6 +152,17 @@ inline std::vector<DescriptorHandleMap>& handle_maps() {
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE translate_cpu(D3D12_CPU_DESCRIPTOR_HANDLE h) {
     if (!h.ptr) return h;
+    // **Xbox 的句柄 ABI 允许直接传描述符序号**（实测游戏传 0、1），
+    // PC 却要求真实地址 —— 直接透传会让 D3D12 往地址 0 写描述符（崩在 0x4）。
+    // 序号判定：小于 16 MB 的值不可能是任何堆的真实地址，按"序号 x 步长"换算。
+    if (h.ptr < 0x1000000) {
+        for (const auto& m : handle_maps()) {
+            if (!m.real_base || !m.increment) continue;
+            D3D12_CPU_DESCRIPTOR_HANDLE out{};
+            out.ptr = m.real_base + h.ptr * m.increment;
+            return out;
+        }
+    }
     for (const auto& m : handle_maps()) {
         if (h.ptr >= m.virtual_base && h.ptr < m.virtual_base + m.virtual_size) {
             D3D12_CPU_DESCRIPTOR_HANDLE out{};
@@ -209,6 +238,9 @@ inline HRESULT create_descriptor_heap_proxy(ID3D12Device* pc, IUnknown* xbox_dev
             if (!m) return static_cast<ReserveFn>(nullptr);
             return reinterpret_cast<ReserveFn>(GetProcAddress(m, "XMemReserveDescriptorArena"));
         }();
+        xbgtasix::logf("[d3d12_xs] 堆创建诊断：requested=%u flags=0x%x type=%d reserve_fn=%s",
+                       desc->NumDescriptors, desc->Flags, static_cast<int>(desc->Type),
+                       reserve ? "有" : "无（xmem 未加载或缺导出）");
         if (reserve && (desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
             desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
             const UINT inc = pc->GetDescriptorHandleIncrementSize(desc->Type);
@@ -229,7 +261,7 @@ inline HRESULT create_descriptor_heap_proxy(ID3D12Device* pc, IUnknown* xbox_dev
             virtual_base, static_cast<SIZE_T>(adjusted.NumDescriptors) * inc,
             heap->GetCPUDescriptorHandleForHeapStart().ptr,
             static_cast<UINT64>(virtual_base),   // GPU 句柄也用同一 arena 值
-            heap->GetGPUDescriptorHandleForHeapStart().ptr});
+            heap->GetGPUDescriptorHandleForHeapStart().ptr, inc});
     }
     if (!proxy) {
         heap->Release();
