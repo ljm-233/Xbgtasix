@@ -1,0 +1,4 @@
+; 手柄与用户关联（input_extra.cpp）
+XUserFindForDevice
+XUserRegisterForDeviceAssociationChanged
+XUserUnregisterForDeviceAssociationChanged
