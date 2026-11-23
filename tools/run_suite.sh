@@ -81,7 +81,7 @@ run_one() {
   out=$(cd "$BIN" && timeout 300 "./$@" 2>&1); rc=$?
   local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
   local key
-  key=$(echo "$out" | grep -oE 'PASS[^"]{0,40}|93 checks, 0 failures|failures=0 -> PASS|failures=0|smoke done with 0 failure[^"]{0,10}|非背景像素 [0-9.]+%|SKIP[^"]{0,30}' | tail -1)
+  key=$(echo "$out" | grep -oE 'PASS[^"]{0,40}|[0-9]+ checks, [0-9]+ failures|failures=0 -> PASS|failures=0|smoke done with 0 failure[^"]{0,10}|非背景像素 [0-9.]+%|SKIP[^"]{0,30}' | tail -1)
   local verdict
   if [ $rc -eq 0 ]; then
     if has_evidence "$out"; then
@@ -92,6 +92,13 @@ run_one() {
     fi
   elif [ $rc -eq 2 ]; then verdict="SKIP"; skip=$((skip + 1));
   else verdict="FAIL"; fail=$((fail + 1)); fi
+  # 测试自己报了失败数却返回 0 的情况：按失败数判红，别被退出码骗过
+  if [ "$verdict" = "PASS" ]; then
+    nfail=$(echo "$out" | grep -oE '[0-9]+ checks, [0-9]+ failures' | tail -1 | grep -oE ', [0-9]+' | tr -d ', ')
+    if [ -n "${nfail:-}" ] && [ "$nfail" -gt 0 ]; then
+      verdict="FAIL"; fail=$((fail + 1)); pass=$((pass - 1)); key="测试自报 $nfail 项失败（rc=0 也不能算过）"
+    fi
+  fi
   printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$1" "$verdict" "$ms" "${key:-（无断言输出）}"
   echo -e "$id\t$1\t$verdict\t$rc\t${ms}ms\t${key}" >> "$report"
 }
@@ -187,6 +194,7 @@ run_one t39 t39_host_tool.exe
 run_one t40 t40_taskqueue3.exe
 run_one t41 t41_d3d12_device_abi.exe   # 曾是 known-fail（代理转发器 bug），已修好转正
 run_one t42 t42_launcher_backup.exe
+run_known_fail t43 "WIP: host-stall 检测，测试自报 2 项失败（GPT 在进行中）" t43_host_stall.exe
 run_one t15 t15_budget.exe
 
 if [ -d "$PKG" ]; then

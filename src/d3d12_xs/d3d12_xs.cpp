@@ -9,6 +9,7 @@
 //
 // 之后要接 vkd3d-proton 时，只需把 resolve() 的搜索路径换成随包分发的 d3d12core.dll。
 #include "xbgtasix/trace.h"
+#include "xbgtasix/host_stall.h"
 #include "device_abi.h"
 
 #include <windows.h>
@@ -138,6 +139,9 @@ __declspec(dllexport) HRESULT WINAPI D3D12CreateDevice(IUnknown* adapter,
         picked = pick_adapter();
         if (picked) adapter = picked;
     }
+    // 建设备是主机侧长操作（笔记本上枚举 + 初始化可以几秒），记账给 guest 的 Sleep 看：
+    // 这段时间不该算进标题 hang check 的睡眠预算，否则会被它误判成主线程卡死。
+    xbgtasix::host_stall::scope host_stall;
     HRESULT hr = pfn(adapter, min_level, riid, device);
     if (FAILED(hr) && picked) {
         // 挑中的独显可能不支持要求的最小 feature level 或驱动异常；
