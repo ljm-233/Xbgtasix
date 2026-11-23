@@ -46,12 +46,14 @@ void skip(const char* what) {
     ++g_skips;
 }
 
-// ---- XInput ----
-int xinput_probe() {
+// ---- XInput（运行时解析，避免静态依赖）----
+using PFN_XInputGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+
+int xinput_probe(PFN_XInputGetState get_state) {
     int found = 0;
     for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
         XINPUT_STATE st{};
-        const DWORD r = XInputGetState(i, &st);
+        const DWORD r = get_state(i, &st);
         if (r == ERROR_SUCCESS) {
             ++found;
             xbgtasix::logf("[t35] XInput 槽 %lu: 按键=0x%04X 摇杆L=(%d,%d) 扳机=(%u,%u)", i,
@@ -77,7 +79,11 @@ int main() {
         ok(true, "系统存在 XInput DLL");
     }
     if (xi) {
-        const int n = xinput_probe();
+        auto get_state = reinterpret_cast<PFN_XInputGetState>(GetProcAddress(xi, "XInputGetState"));
+        if (!get_state) {
+            skip("XInput DLL 里没有 XInputGetState");
+        }
+        const int n = get_state ? xinput_probe(get_state) : 0;
         xbgtasix::logf("[t35] XInput 找到 %d 个手柄", n);
         if (n == 0) {
             skip("XInput 没有检测到手柄（未连接或已被其他进程独占）");
@@ -100,8 +106,18 @@ int main() {
     }
 
     IGameInput* gameInput = nullptr;
+    // 关键：不能静态链接 GameInput.lib —— 没有这个 DLL 的机器上进程**根本起不来**
+    // （0xC0000135），连"跳过"的机会都没有。改为运行时解析。
+    using PFN_GameInputCreate = HRESULT(WINAPI*)(IGameInput**);
+    PFN_GameInputCreate create_fn = nullptr;
     if (gi) {
-        const HRESULT hr = GameInputCreate(&gameInput);
+        create_fn = reinterpret_cast<PFN_GameInputCreate>(GetProcAddress(gi, "GameInputCreate"));
+        if (!create_fn) {
+            skip("GameInput.dll 里没有 GameInputCreate（版本太旧）");
+        }
+    }
+    if (create_fn) {
+        const HRESULT hr = create_fn(&gameInput);
         if (SUCCEEDED(hr) && gameInput) {
             ok(true, "GameInputCreate 成功");
         } else {

@@ -310,21 +310,13 @@ echo "== t34_residency.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t34_residency.exe"
 
-# GameInput.lib 只在 NuGet 版 GDK 里有（本地 GDK 安装可能不带），两种位置都试
-GAMEINPUT_LIB=""
-for cand in "$GDK_LIB_DIR/GameInput.lib" "build/gdk/lib/GameInput.lib"; do
-  [ -f "$cand" ] && { GAMEINPUT_LIB=$cand; break; }
-done
-if [ -n "$GAMEINPUT_LIB" ]; then
-  echo "== t35_gamepad.exe"
-  "$CXX" "${FLAGS[@]}" tests/t35_gamepad/main.cpp src/trace.cpp \
-      -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
-      -ldxgi -ldxguid -ld3d12 -lole32 -lxinput \
-      "$GAMEINPUT_LIB" \
-      -o "$OUT/t35_gamepad.exe"
-else
-  echo "== t35_gamepad.exe 跳过（找不到 GameInput.lib；跑 tools/fetch_gdk.py 可补上）"
-fi
+echo "== t35_gamepad.exe"
+# 不链接 GameInput.lib：缺这个 DLL 的机器上进程会起不来（0xC0000135）。
+# 测试内部用 LoadLibrary + GetProcAddress 运行时解析（XInput 走同一思路）。
+"$CXX" "${FLAGS[@]}" tests/t35_gamepad/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 -lole32 \
+    -o "$OUT/t35_gamepad.exe"
 
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
