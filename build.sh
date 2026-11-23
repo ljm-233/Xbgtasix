@@ -69,7 +69,7 @@ fi
     src/generated/xgameruntime_guids.cpp \
     src/trace.cpp \
     "$OUT/xgameruntime.def" \
-    -lole32 -loleaut32 -loleacc -lsapi \
+    -ld3d12 -ldxgi -ldxguid -lole32 -loleaut32 -loleacc -lsapi \
     -o "$OUT/xgameruntime.dll" -Wl,--out-implib,"$OUT/libxgameruntime.dll.a"
 
 build_shim xmem
@@ -323,6 +323,12 @@ echo "== t36_ui_host.exe"
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t36_ui_host.exe"
+
+echo "== t37_system_ui.exe"
+"$CXX" "${FLAGS[@]}" tests/t37_system_ui/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t37_system_ui.exe"
 
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
