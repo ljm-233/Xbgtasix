@@ -1,0 +1,222 @@
+// t39_host_tool —— 验证 xbgtasix.exe（启动器）的四条命令
+//
+// 用 C++ 写测试的理由（和用户要求一致）：项目里不引入 Python 依赖。
+// 测试本身就是个 exe：起子进程、抓输出、对断言。
+//
+// 覆盖：
+//   1. --version
+//   2. check  ：对表（对 t0_hello，它只导入我们自己的符号）
+//   3. verify ：按 layout 清单报告缺失
+//   4. run    ：正常程序 -> PASS
+//   5. run    ：未实现 API + --stop -> UNIMPL
+//   6. run    ：目标不存在 -> 退出码 2
+//   7. doctor ：输出各检查项
+#include <windows.h>
+
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "xbgtasix/trace.h"
+
+namespace {
+
+int g_fail = 0;
+void ok(bool cond, const char* what, const std::string& detail = "") {
+    if (cond) {
+        xbgtasix::logf("[t39]   PASS  %-46s %s", what, detail.c_str());
+    } else {
+        xbgtasix::logf("[t39]   FAIL  %-46s %s", what, detail.c_str());
+        ++g_fail;
+    }
+}
+
+std::string dir_of(const std::string& p) {
+    const size_t pos = p.find_last_of("\\/");
+    return pos == std::string::npos ? std::string(".") : p.substr(0, pos);
+}
+
+std::string self_dir() {
+    char buf[MAX_PATH] = {0};
+    GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    return dir_of(buf);
+}
+
+bool file_exists(const std::string& p) {
+    const DWORD a = GetFileAttributesA(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+std::string join(const std::string& a, const std::string& b) {
+    if (a.empty()) return b;
+    if (a.back() == '\\' || a.back() == '/') return a + b;
+    return a + "\\" + b;
+}
+
+bool contains(const std::string& hay, const char* needle) {
+    return hay.find(needle) != std::string::npos;
+}
+
+struct RunResult {
+    unsigned long code = 0;
+    std::string output;
+};
+
+// 起子进程并抓 stdout+stderr（重定向到同一个管道）
+RunResult run_capture(const std::string& exe, const std::vector<std::string>& args,
+                      const std::string& cwd) {
+    RunResult r;
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 1 << 20)) return r;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+    std::string cmd = "\"" + exe + "\"";
+    for (const auto& a : args) cmd += " \"" + a + "\"";
+
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessA(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                                        cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+    if (!started) {
+        CloseHandle(rd);
+        CloseHandle(wr);
+        return r;
+    }
+    CloseHandle(wr);
+
+    char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(rd, buf, sizeof(buf) - 1, &got, nullptr) && got > 0) {
+        buf[got] = 0;
+        r.output.append(buf, got);
+    }
+    WaitForSingleObject(pi.hProcess, 120000);
+    DWORD ec = 0;
+    GetExitCodeProcess(pi.hProcess, &ec);
+    r.code = ec;
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(rd);
+    return r;
+}
+
+}  // namespace
+
+int main() {
+    const std::string dir = self_dir();
+    const std::string host = join(dir, "xbgtasix.exe");
+    if (!file_exists(host)) {
+        xbgtasix::logf("[t39] 找不到 %s -> SKIP（先 build.sh）", host.c_str());
+        return 2;
+    }
+    const std::string t0 = join(dir, "t0_hello.exe");
+    const std::string probe_ok = join(dir, "probe_ok.exe");
+    const std::string probe_un = join(dir, "probe_unimpl.exe");
+
+    // ---- 1) --version ----
+    {
+        RunResult r = run_capture(host, {"--version"}, dir);
+        ok(r.code == 0 && contains(r.output, "xbgtasix"), "--version 正常",
+           "rc=" + std::to_string(r.code));
+    }
+
+    // ---- 2) check ----
+    if (file_exists(t0)) {
+        RunResult r = run_capture(host, {"check", t0, "--dll-dir", dir}, dir);
+        ok(r.code == 0 && contains(r.output, "PASS"), "check 报告覆盖完整",
+           "rc=" + std::to_string(r.code));
+        ok(contains(r.output, "导入模块"), "check 输出了模块统计");
+    } else {
+        xbgtasix::logf("[t39] 缺 t0_hello.exe，跳过 check 用例");
+    }
+
+    // ---- 3) verify（造一个只有 1/2 文件的假包）----
+    {
+        // 不用 %TEMP%：本项目进程在某些环境下对临时目录没有写权限（实测 err=5），
+        // 用自己所在的 build 目录更可靠
+        const std::string pkg = join(dir, "t39_pkg");
+        CreateDirectoryA(pkg.c_str(), nullptr);
+        const std::string layout = join(pkg, "layout_test.xml");
+        FILE* f = fopen(layout.c_str(), "wb");
+        if (f) {
+            fprintf(f,
+                    "<?xml version=\"1.0\"?>\n<Package>\n  <Chunk Id=\"1\">\n"
+                    "    <FileGroup SourcePath=\".\\\" DestinationPath=\"\\\" Include=\"present.dll\" />\n"
+                    "    <FileGroup SourcePath=\".\\\" DestinationPath=\"\\\" "
+                    "Include=\"missing_file.exe\" />\n"
+                    "  </Chunk>\n</Package>\n");
+            fclose(f);
+        }
+        const std::string present = join(pkg, "present.dll");
+        FILE* g = fopen(present.c_str(), "wb");
+        if (g) { fputc('x', g); fclose(g); }
+
+        RunResult r = run_capture(host, {"verify", pkg}, dir);
+        ok(r.code == 1, "verify 发现缺失时退出码为 1", "rc=" + std::to_string(r.code));
+        ok(contains(r.output, "missing_file.exe"), "verify 列出了缺失文件名");
+        ok(contains(r.output, "清单 2 项") && contains(r.output, "缺失 1"),
+           "verify 统计正确（2 项 / 缺 1）");
+        DeleteFileA(layout.c_str());
+        DeleteFileA(present.c_str());
+        RemoveDirectoryA(pkg.c_str());
+    }
+
+    // ---- 4) run 正常程序 ----
+    if (file_exists(probe_ok)) {
+        RunResult r = run_capture(host,
+                                  {"run", probe_ok, "--timeout", "30", "--log",
+                                   join(dir, "t39_tool_ok.log")},
+                                  dir);
+        ok(r.code == 0, "run 正常程序退出码 0", "rc=" + std::to_string(r.code));
+        ok(contains(r.output, "分类          PASS"), "分类为 PASS");
+        ok(contains(r.output, "已放置        3/3"), "三个 DLL 都放到位");
+    } else {
+        xbgtasix::logf("[t39] 缺 probe_ok.exe，跳过该用例");
+    }
+
+    // ---- 5) run 未实现 + --stop ----
+    if (file_exists(probe_un)) {
+        // 指定独立日志：测试进程自己也占着 build\xbgtasix.log，
+        // 不分开的话工具的 CREATE_ALWAYS 会撞共享冲突，读不到子进程日志
+        RunResult r = run_capture(host,
+                                  {"run", probe_un, "--stop", "--timeout", "30", "--log",
+                                   join(dir, "t39_tool.log")},
+                                  dir);
+        ok(r.code == 1, "run 未实现时退出码 1", "rc=" + std::to_string(r.code));
+        ok(contains(r.output, "分类          UNIMPL"), "分类为 UNIMPL");
+        ok(contains(r.output, "XLaunchRestartOnCrash"), "列出撞到的 API 名字");
+        ok(contains(r.output, "频次"), "给出未实现频次表");
+    } else {
+        xbgtasix::logf("[t39] 缺 probe_unimpl.exe，跳过该用例");
+    }
+
+    // ---- 6) run 目标不存在 ----
+    {
+        RunResult r = run_capture(host, {"run", "Z:\\definitely_not_here.exe"}, dir);
+        ok(r.code == 2, "目标不存在时退出码 2", "rc=" + std::to_string(r.code));
+        ok(contains(r.output, "找不到"), "给出了明确错误信息");
+    }
+
+    // ---- 7) doctor ----
+    {
+        RunResult r = run_capture(host, {"doctor"}, dir);
+        ok(r.code == 0 || r.code == 1, "doctor 能跑完", "rc=" + std::to_string(r.code));
+        const char* keys[] = {"OS", "GPU", "D3D12", "VC 运行库", "shim", "交互桌面"};
+        for (const char* k : keys) {
+            ok(contains(r.output, k), (std::string("doctor 输出了「") + k + "」").c_str());
+        }
+    }
+
+    xbgtasix::logf("[t39] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");
+    return g_fail ? 1 : 0;
+}

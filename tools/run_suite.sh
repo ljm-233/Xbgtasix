@@ -133,6 +133,7 @@ run_one t35 t35_gamepad.exe
 run_one t36 t36_ui_host.exe
 run_one t37 t37_system_ui.exe
 run_one t38 t38_xboxui.exe --shot suite/xboxui.bmp
+run_one t39 t39_host_tool.exe
 run_one t15 t15_budget.exe
 
 if [ -d "$PKG" ]; then
