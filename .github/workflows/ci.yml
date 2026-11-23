@@ -44,9 +44,26 @@ jobs:
       - name: 安装 MinGW 与 Vulkan SDK（dxc）
         shell: bash
         run: |
-          choco install mingw --no-progress -y
-          choco install vulkan-sdk --no-progress -y
+          # chocolatey 的 CDN 偶发 504（实测遇到一次），装不上就会导致没有 dxc、
+          # 进而 build.sh 按新断言直接失败。这里重试 3 次并显式报告结果。
+          retry() {
+            local what="$1"; shift
+            for i in 1 2 3; do
+              echo "== $what（第 $i 次）"
+              if "$@"; then return 0; fi
+              echo "   失败，15 秒后重试"
+              sleep 15
+            done
+            echo "::error::$what 连续 3 次失败"
+            return 1
+          }
+          retry "安装 MinGW" choco install mingw --no-progress -y
+          retry "安装 Vulkan SDK" choco install vulkan-sdk --no-progress -y
           echo "/c/ProgramData/mingw64/mingw64/bin" >> "$GITHUB_PATH"
+          # 把 dxc 的实际位置打出来：以后找不到时能一眼看出是路径还是没装上
+          echo "== dxc 位置"
+          ls -1 /c/VulkanSDK/*/Bin/dxc.exe 2>/dev/null || echo "（/c/VulkanSDK 下没有 dxc）"
+          command -v dxc || true
 
       - name: 缓存 GDK nupkg
         uses: actions/cache@v4
