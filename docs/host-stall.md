@@ -52,6 +52,41 @@ xmem.dll 没加载时 `scope` 是空操作；thunk 里不写日志、不分配�
   [device_abi.h](../src/d3d12_xs/device_abi.h) 里 `device_extension_stub_n` 上方的警告——
   谁实现那段，谁负责把驱动编译包进 `scope`。不包就是 30 秒后被杀。
 
+### 接线骨架（照抄即可）
+
+```cpp
+#include "xbgtasix/host_stall.h"
+
+// 主机 PSO 创建（设备槽 60–67 里 graphics/compute 的那个）
+HRESULT WINAPI create_graphics_pipeline_state_x(DeviceProxy* self, /* 主机参数 */) {
+    // 这一句是全部工作：把"这段是驱动在干活，不是标题主线程卡死"告诉账本。
+    // xmem.dll 没加载时它是空操作，不影响任何现有行为。
+    xbgtasix::host_stall::scope host_stall;
+
+    return static_cast<ID3D12Device*>(self->pc)->CreateGraphicsPipelineState(/* ... */);
+}
+```
+
+三条纪律：
+
+1. **只包"驱动真在干活"的那一句**，不要包整个函数、更不要包循环——包大了会把
+   正常的等待也算成停顿，标题的计数被无谓重置，反而更晚发现问题；
+2. `scope` 可重入/可嵌套，但**不要跨线程**生存（账本是单调累加的，跨线程会重复计入）；
+3. 别在 `Sleep` thunk 或短调用上加 —— 只对 `n >= 1 s` 的 guest 睡眠有意义。
+
+### 真机上怎么确认它生效
+
+```bash
+grep "\[host_stall\]" run.log
+# 期望两条以上：
+#   [host_stall] Sleep 钩子已装：主机侧停顿不计入 guest 的睡眠预算
+#   [host_stall] 主机侧停顿 12.34 s（累计 12.34 s）—— 已从 guest 的 Sleep 预算里扣除
+```
+
+只看到第一条、没有第二条 → 我们没有任何长停顿被记账（要么 PSO 还没走到，要么
+`scope` 忘了加）。第一条都没有 → 主 exe 没导入 `Sleep` 或 xmem.dll 没被执行，
+机制根本没生效，此时游戏活过 30 秒只能算运气。
+
 ## 验证
 
 `tests/t43_host_stall`（离屏、无 GPU、无游戏，7 项断言）：
