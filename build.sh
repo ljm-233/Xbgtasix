@@ -330,6 +330,18 @@ echo "== t37_system_ui.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t37_system_ui.exe"
 
+echo "== t38_xboxui（UI 着色器 + 自绘窗口）"
+if [ -x "$DXC" ] || command -v "$DXC" >/dev/null 2>&1; then
+  "$DXC" -T vs_6_0 -E VSMain tests/t38_xboxui/ui.hlsl -Fo "$OUT/ui.vs.cso" 2>&1 | head -2
+  "$DXC" -T ps_6_0 -E PSMain tests/t38_xboxui/ui.hlsl -Fo "$OUT/ui.ps.cso" 2>&1 | head -2
+  "$CXX" "${FLAGS[@]}" tests/t38_xboxui/main.cpp src/trace.cpp \
+      -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+      -ldxgi -ldxguid -ld3d12 -ld3dcompiler -lgdi32 -luser32 \
+      -o "$OUT/t38_xboxui.exe"
+else
+  echo "  跳过（找不到 dxc）"
+fi
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
