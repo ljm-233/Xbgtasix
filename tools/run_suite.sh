@@ -186,6 +186,7 @@ run_one t38 t38_xboxui.exe --shot suite/xboxui.bmp
 run_one t39 t39_host_tool.exe
 run_one t40 t40_taskqueue3.exe
 run_one t41 t41_d3d12_device_abi.exe   # 曾是 known-fail（代理转发器 bug），已修好转正
+run_one t42 t42_launcher_backup.exe
 run_one t15 t15_budget.exe
 
 if [ -d "$PKG" ]; then

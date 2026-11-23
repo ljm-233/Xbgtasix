@@ -552,6 +552,11 @@ echo "== t41_d3d12_device_abi.exe"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t41_d3d12_device_abi/main.cpp \
     -L"$OUT" -ld3d12_xs -ldxgi -ldxguid -o "$OUT/t41_d3d12_device_abi.exe"
 
+# 黑盒测启动器的备份/还原决策：不链接 shim，只要求 xbgtasix.exe 已经在 $OUT 里
+echo "== t42_launcher_backup.exe"
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t42_launcher_backup/main.cpp \
+    -o "$OUT/t42_launcher_backup.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
