@@ -133,7 +133,12 @@ UnimplMode unimpl_mode() {
     return UnimplMode::Stop;
 }
 
+void maybe_install_veh();   // 定义在下方
+
 void logf(const char* fmt, ...) {
+    // 第一次写日志时装异常钩子：它必须在"游戏还没调用任何 shim 初始化"时就已经就位，
+    // 否则游戏在更早的位置崩溃就抓不到（实测挂在 set_game_root 上装，游戏没走到那）。
+    maybe_install_veh();
     // 先在锁外把整行格式化好，再在锁内一次 WriteFile：
     // 原来持锁 fprintf+fflush，stderr 若接的是无人读的管道会整段卡死
     char line[2048];
@@ -161,6 +166,58 @@ void logf(const char* fmt, ...) {
 UnimplMode unimpl_mode_cached() {
     static const UnimplMode mode = unimpl_mode();
     return mode;
+}
+
+// ---------------------------------------------------------------------------
+// 异常钩子：把首次致命异常（断言断点/非法访问）的地址符号化成 模块+RVA。
+// 没有它，游戏崩了只会给一个退出码；有了它可以直接 objdump 出是哪个函数。
+// 用 XBGTASIX_VEH=1 打开（默认关闭：它改变异常处理路径）。
+// ---------------------------------------------------------------------------
+LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
+    static bool once = false;
+    if (once) return EXCEPTION_CONTINUE_SEARCH;
+    once = true;
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    // 只报"致命类"：断言断点与访问冲突
+    if (code != EXCEPTION_BREAKPOINT && code != EXCEPTION_ACCESS_VIOLATION &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    void* addr = info->ExceptionRecord->ExceptionAddress;
+    HMODULE mod = nullptr;
+    char name[256] = "<unknown>";
+    unsigned long long rva = reinterpret_cast<unsigned long long>(addr);
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(addr), &mod) &&
+        mod) {
+        char full[MAX_PATH] = {0};
+        GetModuleFileNameA(mod, full, MAX_PATH - 1);
+        const char* base = full;
+        for (const char* q = full; *q; ++q) {
+            if (*q == '\\' || *q == '/') base = q + 1;
+        }
+        strncpy(name, base, sizeof(name) - 1);
+        rva = reinterpret_cast<unsigned long long>(addr) - reinterpret_cast<unsigned long long>(mod);
+    }
+    logf("[xbgtasix] FATAL 异常 0x%08lX at %s+0x%llX", code, name, rva);
+    if (code == EXCEPTION_BREAKPOINT) {
+        logf("[xbgtasix] 这是断点指令：通常是游戏自己的断言失败");
+    } else if (code == EXCEPTION_ACCESS_VIOLATION && info->ExceptionRecord->NumberParameters >= 2) {
+        logf("[xbgtasix] 访问类型=%llu 地址=%p", info->ExceptionRecord->ExceptionInformation[0],
+             reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1]));
+    }
+    return EXCEPTION_CONTINUE_SEARCH;   // 继续原处理，不改变游戏行为
+}
+
+void maybe_install_veh() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    char buf[8] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_VEH", buf, sizeof(buf)) == 0 || buf[0] != '1') return;
+    AddVectoredExceptionHandler(1, on_fatal);
+    logf("[xbgtasix] 已安装异常钩子（XBGTASIX_VEH=1）");
 }
 
 void unimpl(const char* api) {
@@ -194,6 +251,7 @@ void unimpl(const char* api) {
 }
 
 void set_game_root(const char* path) {
+    maybe_install_veh();
     std::lock_guard<std::mutex> lock(g_mu);
     strncpy(g_root, path ? path : "", MAX_PATH - 1);
 }
