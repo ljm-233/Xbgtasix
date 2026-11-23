@@ -8,8 +8,10 @@
 //   xbgtasix check  <exe>         导入面 vs 我们的导出面（缺哪些名字）
 //   xbgtasix verify <包目录>      按包自带 layout 清单核对完整性
 //   xbgtasix doctor               环境自检（显卡/驱动/运行库/权限）
+//   xbgtasix restore <包|exe>    撤销 run 的写入（还原备份 / 删掉我们放的 DLL）
+//   xbgtasix firstrun <包|exe>   verify -> doctor -> check -> run 一次走完
 //
-// 设计取向：只做这四件事。不加 UI、不加注入、不加配置系统。
+// 设计取向：只做这几件事。不加 UI、不加注入、不加配置系统。
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -1145,6 +1147,209 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     return (kind == "PASS") ? 0 : 1;
 }
 
+// ---------------------------------------------------------------- restore
+// run 只会写三样东西：备份同名 DLL、覆盖、写日志。restore 就是它的撤销。
+// 判定表（三个 shim 逐个走）：
+//   备份在          -> 删掉当前 shim（我们放的那份），再把备份改回原名   "已还原"
+//   备份不在、DLL 在 -> 这个位置原本是空的，现在这个文件是我们放的：直接删 "已移除"
+//   两个都不在      -> 没事可做，跳过
+// 顺序很重要：必须先删 dst 再 MoveFile，否则备份改不回原名。
+// 不碰包里其它文件（尤其是 xbgtasix.log：它是排障证据，不是我们放的 DLL）。
+// 两个文件内容是否完全相同（先比大小，再比内容）。
+// restore 用它判断"这个 DLL 到底是不是我们放的那份"。
+bool same_content(const std::wstring& a, const std::wstring& b) {
+    HANDLE ha = CreateFileW(a.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0,
+                            nullptr);
+    if (ha == INVALID_HANDLE_VALUE) return false;
+    HANDLE hb = CreateFileW(b.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0,
+                            nullptr);
+    if (hb == INVALID_HANDLE_VALUE) {
+        CloseHandle(ha);
+        return false;
+    }
+    LARGE_INTEGER sa{}, sb{};
+    bool same = GetFileSizeEx(ha, &sa) && GetFileSizeEx(hb, &sb) && sa.QuadPart == sb.QuadPart;
+    std::vector<char> ba(65536), bb(65536);
+    while (same) {
+        DWORD ra = 0, rb = 0;
+        if (!ReadFile(ha, ba.data(), static_cast<DWORD>(ba.size()), &ra, nullptr)) { same = false; break; }
+        if (!ReadFile(hb, bb.data(), static_cast<DWORD>(bb.size()), &rb, nullptr)) { same = false; break; }
+        if (ra != rb || (ra && std::memcmp(ba.data(), bb.data(), ra) != 0)) { same = false; break; }
+        if (ra == 0) break;   // 两边都读完
+    }
+    CloseHandle(ha);
+    CloseHandle(hb);
+    return same;
+}
+
+int cmd_restore(const std::wstring& target_in, std::wstring dll_dir, bool force = false) {
+    std::wstring dir;
+    if (dir_exists(target_in)) {
+        dir = abs_path(target_in);
+    } else if (file_exists(target_in)) {
+        // 也允许直接给 exe：DLL 就在 exe 旁边（run 就是这么放的）
+        dir = dir_of(abs_path(target_in));
+    } else {
+        say("错误：找不到 %s", to_utf8(target_in).c_str());
+        say("      用法：xbgtasix restore <包目录|exe路径>");
+        return 2;
+    }
+
+    section("还原");
+    say("目标目录      %s", to_utf8(dir).c_str());
+
+    int restored = 0;   // 备份改回原名
+    int removed = 0;    // 没有备份，直接删掉我们放的 DLL
+    int failed = 0;
+    int skipped = 0;   // 无备份且内容不像我们的 -> 拒绝删除
+    for (const wchar_t* s : kShims) {
+        const std::wstring dst = join(dir, s);
+        const std::wstring bak = dst + L".xbgtasix-backup";
+        const bool have_dst = file_exists(dst);
+        const bool have_bak = file_exists(bak);
+        if (have_bak) {
+            // 先把我们放的那份删掉：MoveFile 到已存在的目标会失败
+            if (have_dst && !DeleteFileW(dst.c_str())) {
+                say("  ! 删除 %s 失败 err=%lu —— 备份还在，排除占用后重试", to_utf8(s).c_str(),
+                    GetLastError());
+                ++failed;
+                continue;
+            }
+            if (MoveFileW(bak.c_str(), dst.c_str())) {
+                say("已还原        %s（原件已回到原位）", to_utf8(s).c_str());
+                ++restored;
+            } else {
+                say("  ! 还原 %s 失败 err=%lu —— 备份仍在 %s，可手工改名", to_utf8(s).c_str(),
+                    GetLastError(), to_utf8(bak).c_str());
+                ++failed;
+            }
+        } else if (have_dst) {
+            // 没有备份时，"这个 DLL 到底是不是我们放的"无法凭空判断：
+            // 如果用户从没 run 过，目录里可能就是游戏自带的原版 DLL，直接删掉会造成损坏。
+            // 所以先跟本工具目录里的同名 shim 比内容：一致才删，不一致就拒绝并提示 --force。
+            const std::wstring ours = join(resolve_dll_dir(dll_dir), s);
+            const bool is_ours = file_exists(ours) && same_content(dst, ours);
+            if (!is_ours && !force) {
+                say("  ? 跳过 %s：没有备份，且内容与本工具的 shim 不同 —— 可能是游戏自带原版",
+                    to_utf8(s).c_str());
+                say("             确认它确实是上次 run 放进来的，可加 --force 强制删除");
+                ++skipped;
+                continue;
+            }
+            if (DeleteFileW(dst.c_str())) {
+                say("已移除        %s（%s）", to_utf8(s).c_str(),
+                    is_ours ? "确认是我们放的副本" : "--force 强制删除");
+                ++removed;
+            } else {
+                say("  ! 移除 %s 失败 err=%lu（可能被游戏或杀软占用）", to_utf8(s).c_str(),
+                    GetLastError());
+                ++failed;
+            }
+        } else {
+            say("  %s 不在这个目录里，跳过", to_utf8(s).c_str());
+        }
+    }
+
+    // 收尾：目录里还有没有别的 *.xbgtasix-backup（不是三个 shim 的，或刚才没还原成功的）。
+    // 有就列出来——要不要动得人自己判断，不能静默当"全好了"。
+    std::vector<std::string> leftover;
+    {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(join(dir, L"*.xbgtasix-backup").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    leftover.push_back(to_utf8(fd.cFileName));
+                }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+
+    section("结论");
+    say("已还原 %d 个，已移除 %d 个，跳过 %d 个，失败 %d 个", restored, removed, skipped, failed);
+    if (!leftover.empty()) {
+        say("");
+        say("目录里还剩 %d 个备份文件（需要人工判断，可能里面才是原件）：",
+            static_cast<int>(leftover.size()));
+        for (size_t i = 0; i < leftover.size() && i < 20; ++i) {
+            say("  ? %s", leftover[i].c_str());
+        }
+        if (leftover.size() > 20) say("  ...（共 %zu 个）", leftover.size());
+    }
+    if (failed > 0) {
+        say("FAIL：%d 项没还原成功（见上面 ! 行）", failed);
+        return 1;
+    }
+    if (restored + removed == 0 && skipped == 0) {
+        say("PASS：这个目录里没有我们放的 DLL，也没有备份 —— 无需还原");
+    } else if (skipped > 0 && restored + removed == 0) {
+        say("PASS：跳过 %d 个（内容不像我们的 shim，未动）—— 如需强制删除加 --force", skipped);
+    } else {
+        say("PASS：%d 个原件已归位、%d 个多余 DLL 已清掉", restored, removed);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- firstrun
+// 拿到 exe 时最顺的四步：verify -> doctor -> check -> run。
+// 前三步只报告，不拦路（缺文件/缺符号恰恰是最常见的开局，先让人看全）；
+// 唯一的硬失败是"目标 exe 根本不存在"——没有它，后面三步全是空谈，直接返回 2。
+int cmd_firstrun(const std::wstring& target_in, const RunOptions& opt) {
+    say("######## 首次运行：verify -> doctor -> check -> run ########");
+
+    // 1) 包完整性：缺失/非法/0 字节只警告，不中断
+    section("第 1/4 步：包完整性（verify）");
+    int rc_verify = 0;
+    if (dir_exists(target_in)) {
+        rc_verify = cmd_verify(abs_path(target_in));
+    } else if (file_exists(target_in)) {
+        say("给的是 exe 而不是包目录：完整性核对需要包目录，这一步跳过");
+    } else {
+        say("目标还不存在，先定位它（下一步就是硬失败点）");
+    }
+    if (rc_verify != 0) {
+        say("第 1 步没 PASS（见上）：先记下缺什么，继续往下走 —— 缺文件不等于不用试");
+    }
+
+    // 定位目标 exe。它不存在就直接停：exit 2 = 参数/自身问题，与 run 的 2 一致
+    std::wstring exe;
+    if (dir_exists(target_in)) {
+        exe = find_exe_in_dir(abs_path(target_in));
+        if (!exe.empty() && !file_exists(exe)) {
+            say("错误：layout 声明了 %s，但文件不存在", to_utf8(base_of(exe)).c_str());
+            say("      先按第 1 步的缺失清单把文件补齐，再重跑 firstrun");
+            return 2;
+        }
+    } else if (file_exists(target_in)) {
+        exe = abs_path(target_in);
+    }
+    if (exe.empty()) {
+        say("错误：找不到 %s", to_utf8(target_in).c_str());
+        say("      用法：xbgtasix firstrun <包目录|exe路径> [--dry-run] [--stop] [--timeout 秒]");
+        return 2;
+    }
+
+    // 2) 环境自检：critical 只警告
+    section("第 2/4 步：环境自检（doctor）");
+    const int rc_doctor = cmd_doctor(opt.dll_dir);
+    if (rc_doctor != 0) {
+        say("环境有 critical 项（见上）：下面可能起不来，先按提示处理再跑");
+    }
+
+    // 3) 导入面：缺符号只警告
+    section("第 3/4 步：导入面（check）");
+    const int rc_check = cmd_check(exe, opt.dll_dir);
+    if (rc_check != 0) {
+        say("导入面有缺口（见上）：能启动也可能半路崩在缺符号上");
+    }
+
+    // 4) 真正运行。--dry-run/--stop/--timeout/--dll-dir/--log 原样传下去：
+    //    dry-run 时 cmd_run 只做预检，不写任何文件、不启动进程
+    section(opt.dry_run ? "第 4/4 步：运行（run，--dry-run 只预检）" : "第 4/4 步：运行（run）");
+    return cmd_run(exe, opt);
+}
+
 // ---------------------------------------------------------------- 交互
 // 双击启动时，控制台只有我们自己（就绪即退出会"一闪而过"）。
 // 这个判断决定要不要在结束前等一次回车。
@@ -1189,7 +1394,8 @@ std::wstring find_package_near(const std::wstring& start) {
 int interactive_menu() {
     printf("\n");
     printf("  1) 运行游戏        2) 检查导入面\n");
-    printf("  3) 核对包完整性    4) 环境自检    0) 退出\n");
+    printf("  3) 核对包完整性    4) 环境自检\n");
+    printf("  5) 还原(撤销 run)  6) 首次运行(四步走)    0) 退出\n");
     printf("选择: ");
     fflush(stdout);
     char line[256] = {0};
@@ -1199,6 +1405,8 @@ int interactive_menu() {
         case '2': return 2;
         case '3': return 3;
         case '4': return 4;
+        case '5': return 5;   // 还原
+        case '6': return 6;   // 首次运行
         default: return 0;
     }
 }
@@ -1211,13 +1419,20 @@ void usage() {
            " [--dll-dir 目录] [--log 文件]\n");
     printf("  xbgtasix check  <exe> [--dll-dir 目录]\n");
     printf("  xbgtasix verify <包目录>\n");
+    printf("  xbgtasix restore  <exe|包目录> [--force] [--dll-dir 目录]\n");
+    printf("  xbgtasix firstrun <exe|包目录> [--dry-run] [--stop] [--timeout 秒] [--dll-dir 目录]\n");
     printf("  xbgtasix doctor\n");
+    printf("  xbgtasix restore <包目录|exe路径>\n");
+    printf("  xbgtasix firstrun <包目录|exe路径> [--dry-run] [--stop] [--timeout 秒]\n");
     printf("  xbgtasix --version\n\n");
     printf("说明：\n");
     printf("  run     把三个 DLL 放到游戏旁边，拉起进程，按退出码分类并给出下一步\n");
     printf("  check   解析游戏的导入表，跟我们的导出面逐名字对表\n");
     printf("  verify  按包自带 layout 清单核对文件完整性\n");
     printf("  doctor  显卡/驱动/VC 运行库/写权限/交互桌面自检\n");
+    printf("  restore 撤销 run 的写入：有备份就改回原名，没有备份的我们放的 DLL 直接删\n");
+    printf("          （不碰包里其它文件，也不删 xbgtasix.log；末尾会列出剩下的备份）\n");
+    printf("  firstrun 四步走：verify -> doctor -> check -> run；前两步只警告，exe 不存在才停\n");
 }
 
 }  // namespace
@@ -1296,6 +1511,29 @@ int main(int argc, char** argv) {
             pause_if_interactive();
             return rc;
         }
+        if (pick == 5) {
+            // 还原：撤销 run 写进包里的三个 DLL（有备份就改回原名）
+            if (pkg.empty()) {
+                printf("没有可还原的包\n");
+                pause_if_interactive();
+                return 2;
+            }
+            const int rc = cmd_restore(pkg, L"", false);
+            pause_if_interactive();
+            return rc;
+        }
+        if (pick == 6) {
+            // 首次运行：四步走，最后一步真跑（想只预检就用命令行 firstrun --dry-run）
+            if (pkg.empty()) {
+                printf("没有可首次运行的包\n");
+                pause_if_interactive();
+                return 2;
+            }
+            RunOptions fro;
+            const int rc = cmd_firstrun(pkg, fro);
+            pause_if_interactive();
+            return rc;
+        }
         pause_if_interactive();
         return 2;
     }
@@ -1311,6 +1549,7 @@ int main(int argc, char** argv) {
     }
 
     std::wstring dll_dir;
+    bool force_flag = false;
     std::vector<std::string> pos;
     RunOptions ro;
     for (int i = 2; i < argc; ++i) {
@@ -1329,6 +1568,8 @@ int main(int argc, char** argv) {
             return 2;
         } else if (a == "--log" && i + 1 < argc) {
             ro.log_path = to_wide(argv[++i]);
+        } else if (a == "--force") {
+            force_flag = true;
         } else if (a == "--stop") {
             ro.stop_mode = true;
         } else if (a == "--timeout" && i + 1 < argc) {
@@ -1368,6 +1609,15 @@ int main(int argc, char** argv) {
     if (cmd == "run") {
         if (pos.empty()) { printf("run 需要一个 exe 或包目录\n"); return 2; }
         return cmd_run(to_wide(pos[0]), ro);
+    }
+    if (cmd == "restore") {
+        if (pos.empty()) { printf("restore 需要一个包目录或 exe 路径\n"); return 2; }
+        return cmd_restore(to_wide(pos[0]), dll_dir, force_flag);
+    }
+    if (cmd == "firstrun") {
+        if (pos.empty()) { printf("firstrun 需要一个包目录或 exe 路径\n"); return 2; }
+        // ro 里已经带着 --dry-run/--stop/--timeout/--dll-dir/--log：一路传到底
+        return cmd_firstrun(to_wide(pos[0]), ro);
     }
 
     printf("未知命令：%s\n\n", cmd.c_str());

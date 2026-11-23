@@ -1,11 +1,27 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""exe 到手后第一件事：把它需要的东西列清楚。
+"""静态对表工具的 Python 版 —— **以 C++ 的 `check` 为准，这个脚本只是补充**。
 
-解析 PE 的导入表，按模块分组，重点回答三个问题：
-  1. 它导入了哪些 GDK 模块（xgameruntime / xmem / d3d12_xs / XAudio2_9 …）
-  2. 这些导入里，我们现有的 shim 已经覆盖了哪些、还缺哪些
-  3. 缺的按"阻塞优先级"排序（进程启动前解析失败 = 致命）
+权威实现是 `src/host/main.cpp` 的 `cmd_check()`（命令行 `xbgtasix check <exe>`）。
+两者做的是同一件事：解析目标 PE 的导入表，跟三个 shim 的导出表逐名字对表。
+凡是两者结论不一致，一律以 `xbgtasix check` 为准（它能真去解析依赖模块、
+能判 shim 文件损坏、能区分按序号导入）。
+
+那这个脚本为什么还留着？它有三件 C++ `check` 做不到/不做的事：
+
+  1. **不需要 Windows、不需要构建产物**：纯标准库解 PE，任何系统上都跑得起来。
+     `xbgtasix.exe` 是 Windows 程序，`check` 还要求三个 shim 已经编译出来；
+     拿一个 exe 在 Linux/别的机器上先做静态分诊时，只能用这个脚本。
+  2. **shim 缺失时降级而不是报错**：`check` 找不到 shim 会直接 exit 2；
+     脚本把找不到的那份当成"0 个导出"，照样把导入面列全。
+  3. **把非 shim 的未知模块单独列出来**（"未知模块，按原生处理，需确认"），
+     方便人判断"这个模块到底该不该由我们提供"；`check` 则是直接探测能否解析。
+
+已知缺陷（故意不再修，因为它只是补充工具；要准确结论用 `check`）：
+  - `SHIMMED` 是硬编码常量，只认 5 个名字，其中一个（`xgameplatform.dll`）
+    我们根本不构建 —— 真按它判断会得到"全缺"的假结论。
+  - 按序号导入（`ordinal#N`）会被算进缺失，而 `check` 明确不把序号算缺失。
+  - 不探测非 shim 模块能否解析，所以查不出运行期的 `0xC0000135`。
 
 用法：
     python analyze_exe.py <game.exe> [--shim-dir ../../Xbgtasix/build]

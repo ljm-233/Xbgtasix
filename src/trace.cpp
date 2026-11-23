@@ -57,6 +57,73 @@ void ensure_open() {
     if (!try_open(path)) g_open_failed = true;
 }
 
+// ---------- 栈帧符号化 ----------
+// ASLR 下裸地址每重启一次就变、没有 PDB 时根本没法定位"谁调了未实现 API"。
+// 把帧换算成 模块文件名+0xRVA 之后，只要事后对同一份 exe/dll 跑 objdump -d，
+// 就能把 RVA 对回具体代码位置。
+constexpr DWORD kNameW = 512;      // 模块全路径（宽字符）缓冲
+constexpr size_t kNameU8 = 1600;   // UTF-8 文件名缓冲（最坏 3 字节/宽字符 + '\0'）
+
+// 取模块的"仅文件名"（UTF-8）。日志里不需要长路径，而且各机器安装路径不同，
+// 只有文件名在排障时才有意义。
+bool module_short_name_utf8(HMODULE mod, char* out, size_t out_size) {
+    if (!mod || !out || out_size == 0) return false;
+    wchar_t wpath[kNameW] = {0};
+    const DWORD nw = GetModuleFileNameW(mod, wpath, kNameW);
+    if (nw == 0) return false;          // 句柄无效/路径取不到：交给调用方兜底
+    if (nw >= kNameW) return false;     // 路径过长被截断：丢了文件名还不如直接兜底
+    const DWORD len = nw;               // 未截断时 wpath[nw] 已经是 '\0'
+    // 只保留文件名：同时认 '\\' 和 '/'，别的地方灌进来的路径可能是混合分隔符
+    const wchar_t* base = wpath;
+    for (DWORD i = 0; i < len; ++i) {
+        if (wpath[i] == L'\\' || wpath[i] == L'/') base = wpath + i + 1;
+    }
+    if (*base == L'\0') return false;
+    // 宽字符 -> UTF-8（项目日志统一 UTF-8）。cchWideChar 传 -1 让 API 自己算长度，
+    // 不要手工按 n-1 传，否则会掉最后一个字符；返 byte 数含结尾 '\0'，直接可用。
+    const int nb = WideCharToMultiByte(CP_UTF8, 0, base, -1, out, static_cast<int>(out_size),
+                                       nullptr, nullptr);
+    if (nb <= 0) return false;   // 缓冲不足（名字过长）时同样走兜底
+    return true;
+}
+
+// 打一帧：#<序号> <模块文件名>+0x<RVA>；解析不到模块时打 <unknown>+0x<原始地址>。
+// 注意：本函数不持有 g_mu —— logf 内部自己加锁，外面再套一把会死锁。
+void log_frame(unsigned index, void* addr) {
+    const uintptr_t u = reinterpret_cast<uintptr_t>(addr);
+    if (addr) {
+        HMODULE mod = nullptr;
+        // GetModuleHandleExW 第一参数声明是 LPCWSTR，但 FROM_ADDRESS 模式下传的其实是
+        // "地址"而不是字符串；按 Windows API 惯例直接 reinterpret_cast 强转（API 内部
+        // 不会解引用它），这也是微软文档示例的标准写法。
+        const BOOL ok = GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(addr), &mod);
+        if (ok && mod) {
+            char name[kNameU8] = {0};
+            if (module_short_name_utf8(mod, name, sizeof(name))) {
+                logf("[xbgtasix]   #%-2u %s+0x%llX", index, name,
+                     static_cast<unsigned long long>(u - reinterpret_cast<uintptr_t>(mod)));
+                return;
+            }
+        }
+    }
+    // 解析不到模块（JIT 生成代码、手工映射的内存、句柄获取失败）：保留原始地址，
+    // 至少还能在调试器里对着地址下断点；这里不 return，每一帧都要打出去。
+    logf("[xbgtasix]   #%-2u <unknown>+0x%llX", index, static_cast<unsigned long long>(u));
+}
+
+// 主模块基址：事后用 objdump 把上面的 RVA 映射回代码时要用。
+// 只打主模块，枚举全部模块会让日志长得没法看。
+void log_main_module_base() {
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (!exe) return;
+    char name[kNameU8] = {0};
+    if (!module_short_name_utf8(exe, name, sizeof(name))) strcpy(name, "<unknown>");
+    logf("[xbgtasix]   模块基址: %s=0x%016llX", name,
+         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(exe)));
+}
+
 }  // namespace
 
 UnimplMode unimpl_mode() {
@@ -109,8 +176,9 @@ void unimpl(const char* api) {
         // 退出前先留下"谁调的"：只有 API 名对定位没帮助，栈比名字有用得多。
         void* frames[24] = {0};
         const USHORT n = RtlCaptureStackBackTrace(0, 24, frames, nullptr);
+        log_main_module_base();   // 先给基址，再把每帧换算成 模块+0xRVA
         for (USHORT i = 0; i < n; ++i) {
-            logf("[xbgtasix]   #%-2u %p", i, frames[i]);
+            log_frame(i, frames[i]);   // 逐帧 logf；解析失败走 <unknown> 兜底，不中断
         }
         logf("[xbgtasix] stop (set XBGTASIX_UNIMPL=log to continue)");
         // ExitProcess 会等所有 DLL 的 DllMain(detach)：若我们此刻正持有 loader lock，

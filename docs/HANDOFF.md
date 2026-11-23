@@ -9,15 +9,16 @@
 
 | 项 | 值 |
 |---|---|
-| 提交 | 94 |
-| 测试 | **38 PASS / 1 SKIP / 0 FAIL**（39 步，约 20 秒） |
+| 提交 | 103 |
+| 测试 | **38 PASS / 2 SKIP / 0 FAIL**（40 步，约 20 秒） |
 | 导出面 | 461 = 268 手写 + 143 生成桩 + 50 个 GUID 数据 |
-| 文档 | 27 份 |
-| 代码 | 18,360 行（C++ / HLSL，按 `HEAD` 已提交内容统计） |
-| CI | 四个 job 全绿；`windows-build` 从 NuGet 拉官方 GDK，完整构建 + 全套 39 步测试（约 4 分钟） |
+| 文档 | 28 份 |
+| 代码 | 20,145 行（C++ / HLSL：`git ls-files '*.cpp' '*.h' '*.hlsl'` 67 个文件，按 `HEAD` 已提交内容统计，含 205 行生成代码） |
+| CI | 四个 job 全绿；`windows-build` 从 NuGet 拉官方 GDK，完整构建 + 全套 40 步测试（约 4 分钟） |
 | 干净克隆 | `git clone` → `./build.sh` → `./tools/run_suite.sh` 全部通过（已验证） |
 
-那个 SKIP 是 `t28_speech`：语音合成器创建/枚举正常，但本机会话没有音频输出，`Speak` 失败。
+两个 SKIP 都是"本机没有该能力"，不是失败：`t28_speech`（语音合成器创建/枚举正常，
+但本机会话没有音频输出，`Speak` 失败）与 `t35_gamepad`（部分项依赖真实手柄设备）。
 
 ---
 
@@ -30,7 +31,8 @@
 - **异步/队列**：`XAsyncRun`、条件变量等待（约 53 µs）、waiter/monitor、复合队列 —— 家族桩清零
 - **平台**：包挂载、存档（目录式 + 容器式）、用户、UI 面板、串流/捕获/网络、语音、
   `XLaunchUri`（真 `ShellExecute`）、无障碍字幕
-- **启动链路**：`tools/launch.sh` 分类失败原因；`t30_fakegame` 排练整条启动序列
+- **启动链路**：`build/xbgtasix.exe` 六条命令（run / check / verify / doctor / restore / firstrun，
+  纯 C++ 零运行时依赖）；`tools/launch.sh` 分类失败原因；`t30_fakegame` 排练整条启动序列
 
 ---
 
@@ -44,7 +46,7 @@
 ```bash
 cd D:/GTA6/Xbgtasix
 ./build.sh                                   # 约 90 秒
-python tools/analyze_exe.py <exe>            # 10 秒：导入面 vs 我们的导出面
+build/xbgtasix.exe check <exe>               # 10 秒：导入面 vs 我们的导出面（权威）
 ./tools/launch.sh <exe> --timeout 180        # log 模式跑，拿 UNIMPLEMENTED 清单
 ```
 
@@ -78,7 +80,7 @@ python tools/analyze_exe.py <exe>            # 10 秒：导入面 vs 我们的�
 
 | 不做 | 原因 |
 |---|---|
-| `XStore` 购买/授权链路（77 个桩） | 不伪造授权，是设计决定 |
+| `XStore` 购买/授权链路（77 个生成桩 + 1 个手写，共 78 个导出） | 不伪造授权，是设计决定（见 [license-and-store.md](license-and-store.md)） |
 | 需要 XBL token 的功能 | token 由微软服务按用户签发，离线不可能 |
 | 主机统一内存 / residency 精确语义 | `ID3D12DeviceX` 在 NDA 内；已确认 `XMem*` 在两个公开 lib 里都是 0 符号 |
 | 获取/破解 exe 或密钥 | 法律红线，且不解决"能不能跑"的问题 |
@@ -108,7 +110,7 @@ python tools/analyze_exe.py <exe>            # 10 秒：导入面 vs 我们的�
 
 ```bash
 ./build.sh                    # 90 秒
-./tools/run_suite.sh          # 39 步，约 20 秒
+./tools/run_suite.sh          # 40 步，约 20 秒
 ./tools/ci_build.sh           # CI 同款（无 GDK 也能验 xmem 子集）
 python tools/selftest_tools.py  # Python 工具自检
 python tools/check_docs.py      # 文档相对链接
@@ -120,6 +122,8 @@ bash tools/ci_watch.sh 240 --jobs  # 查 CI，最多等 4 分钟
 | 想做什么 | 看这里 |
 |---|---|
 | 加一个测试 | [CONTRIBUTING.md](../CONTRIBUTING.md) |
+| 起不来时怎么分诊（run / check / restore / firstrun） | [launcher.md](launcher.md) |
+| 卡在授权（`XStore*`）是不是 bug | [license-and-store.md](license-and-store.md) |
 | 补一个导出 | `src/xgameruntime/*.cpp` + `exports*.txt`，然后 `rm -rf src/generated && ./build.sh` |
 | 了解某条结论的依据 | `docs/*-evidence.md`（每条标 `[事实]/[推断]/[自定]`） |
 | 知道还剩哪些桩 | `grep -c '=' src/generated/xgameruntime_exports.inc` + `docs/audit-2026-11.md` |

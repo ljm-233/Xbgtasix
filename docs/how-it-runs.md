@@ -60,8 +60,9 @@ game_scarlett_master.exe
 cd D:/GTA6/Xbgtasix && ./build.sh
 
 # 1) 静态对表：它要的符号我们有吗（10 秒，不用跑）
-python tools/analyze_exe.py "<包>/game_scarlett_master.exe"
-#    看到"缺失导入 0"就可以往下；否则先按列出的名字补桩
+build/xbgtasix.exe check "<包>/game_scarlett_master.exe"
+#    权威实现；没有构建产物时可用纯 Python 的 python tools/analyze_exe.py <exe> 顶替
+#    看到 PASS 就可以往下；否则先按列出的名字补桩
 
 # 2) 拉起：建 staging、拷 shim、设环境、跑、按退出码分类
 ./tools/launch.sh "<包>/game_scarlett_master.exe" --timeout 180
@@ -77,9 +78,9 @@ grep UNIMPLEMENTED build/launch/xbgtasix.log | sort | uniq -c | sort -rn
 
 | # | 检查点 | 失败表现 | 判据 / 对策 |
 |---|---|---|---|
-| 1 | PE 头合法 | `0xC000007B`（映像格式无效） | `analyze_exe` 能解析即可 |
+| 1 | PE 头合法 | `0xC000007B`（映像格式无效） | `check` 能解析即可 |
 | 2 | 依赖模块都能找到 | `0xC0000135`（找不到模块） | 把包内同名 DLL 拷进 staging |
-| 3 | 导入符号都存在 | `0xC0000139`（入口点未找到） | `analyze_exe` 的缺失列表；补桩 |
+| 3 | 导入符号都存在 | `0xC0000139`（入口点未找到） | `check` 的缺失列表；补桩 |
 | 4 | DllMain / TLS 不炸 | 启动瞬间崩溃 | 日志最后一行 + 栈 |
 | 5 | 行为正确（不崩但不干活） | 窗口出现但黑屏 / 卡在异步 | `graphics-pitfalls` 9 条 + `UNIMPLEMENTED` 清单 |
 
@@ -97,5 +98,5 @@ grep UNIMPLEMENTED build/launch/xbgtasix.log | sort | uniq -c | sort -rn
 ## 一句话总结
 
 **容器不用造（Windows 的加载器就是），要造的是容器里的东西。**
-461 个导出、16/16 真实 DLL 可加载、39 步测试，都是在证明"容器里的东西够用"——
+461 个导出、16/16 真实 DLL 可加载、40 步测试，都是在证明"容器里的东西够用"——
 但"够不够用"的最终判据只有一个：那个 exe 跑起来。
