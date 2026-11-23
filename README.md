@@ -141,6 +141,7 @@ build/xbgtasix.exe firstrun "<包目录>"  # verify → doctor → check → run
 | [arch-linux](docs/arch-linux.md) | **Arch Linux**：交叉编译已通，运行时靠 Wine/Proton；mesh 与光追是未知数 |
 | [ui-references](docs/ui-references.md) | **现成方案调研**：Game Bar SDK / Theseus / recomp-ui / DirectComposition 覆盖窗，含许可对比 |
 | [ui-host](docs/ui-host.md) | **UI 两种模式**：立即完成 vs 交给宿主（挂起/回填链路） |
+| [audio-video](docs/audio-video.md) | **音视频**：Bink 只依赖 xmem+XAudio2_9（无主机解码器）；缺 XAudio2_9 会在加载 Bink 时 0xC0000135 |
 | [input](docs/input.md) | **手柄**：XInput / GameInput 都是原生，只有"设备↔用户关联"需要兼容层 |
 | [audit-2026-11](docs/audit-2026-11.md) | 五路子代理的全项目审查记录（含未修项与优先级） |
 | [xmem-evidence](docs/xmem-evidence.md) | XMem 语义，每条标 `[事实]/[推断]/[自定]` |
