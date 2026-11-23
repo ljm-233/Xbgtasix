@@ -117,3 +117,45 @@ D3D12 走 **vkd3d-proton**（Proton 自带，或 `vkd3d-proton` 包 + `VKD3D_CON
 # 或指定编译器/头文件位置
 CXX=x86_64-w64-mingw32-g++ GDK_INC=/opt/gdk/include_clean ./tools/build_linux_cross.sh
 ```
+
+---
+
+## 在哪恢复（下次换到 Linux 时从这里开始）
+
+**当前进度**：构建已验证（CI 的 `linux-cross` job 在真实 Ubuntu 上跑过，
+三个 DLL 导出数 461/4/18 与 Windows 构建一致）。**运行侧完全未验证。**
+
+换到 Linux 后按这三步走，不要重新调研：
+
+```bash
+# 1) 装环境 + 交叉编译（约 3 分钟，GDK 包 280MB 会缓存在 build/gdk/_pkg）
+sudo pacman -S mingw-w64-gcc python wine
+git clone https://github.com/ljm-233/Xbgtasix && cd Xbgtasix
+python tools/fetch_gdk.py --out ../gdk
+./tools/build_linux_cross.sh
+
+# 2) 先验"能不能装进 Wine"（不含渲染）：跑最小的那个测试
+WINEPREFIX=~/.wine-test wine build/t0_hello.exe --smoke
+#    成功判据：打印 "smoke done with 0 failure"
+
+# 3) 再验渲染（这一步才暴露 vkd3d 的真实覆盖度）
+WINEPREFIX=~/.wine-test wine build/t1_triangle.exe
+WINEPREFIX=~/.wine-test wine build/t5_mesh.exe      # mesh shader：高风险项
+WINEPREFIX=~/.wine-test wine build/t6_rt.exe        # 光追：高风险项
+```
+
+**注意**：`build/*.exe` 是 Windows PE，Wine 能直接跑——这才是最快的探针，
+不需要先等游戏。t0/t1 过了说明链路通，t5/t6 的结果直接回答"mesh 与光追在
+vkd3d-proton 上到底行不行"。
+
+**预期**（基于风险表）：
+
+| 测试 | 预期 |
+|---|---|
+| t0 / t1 / t2 / t3 / t4（基础渲染与内存） | 大概率 PASS |
+| t5 mesh / t6 光追 | **可能 FAIL 或 SKIP** —— 这就是要量出来的东西 |
+| t14 / t15（显存预算） | 可能 SKIP（vkd3d 的 `IDXGIAdapter3` 覆盖有限） |
+| t28 语音 | 大概率 SKIP（Wine 的 SAPI 很薄） |
+| t35 手柄 | XInput 走 SDL 应该 PASS；GameInput.dll 不存在会 SKIP |
+
+跑完把 `build/suite/report.txt` 存下来，那就是 Wine 覆盖度的第一份实测矩阵。
