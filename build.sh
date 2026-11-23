@@ -362,6 +362,16 @@ echo "== xbgtasix.exe（启动器/诊断工具）"
     -Id3d12 -ld3d12 -ldxgi -ldxguid -static \
     -o "$OUT/xbgtasix.exe"
 
+# 重新构建会覆盖 exe，之前的签名随之失效。若本机已装过自签名证书，就顺手重签。
+# （首次签名：powershell -ExecutionPolicy Bypass -File tools\sign_local.ps1）
+if [ -f "$OUT/xbgtasix.exe" ] && command -v powershell >/dev/null 2>&1; then
+  SUBJ="CN=Xbgtasix Local Dev"
+  if powershell -NoProfile -Command "if (Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue | Where-Object { \$_.Subject -eq '$SUBJ' }) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
+    echo "== 重新签名 xbgtasix.exe（构建会覆盖旧签名）"
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools/sign_local.ps1 2>&1 | grep -E "签名|状态|主体" | head -4
+  fi
+fi
+
 echo
 echo "done: $OUT/"
 # 注意：set -e 下 `ls *.cso` 在没有 shader 产出时会非零退出，把成功构建变成失败
