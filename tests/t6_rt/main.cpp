@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t6_rt — L7：DXR 1.0（BLAS + TLAS + 状态对象 + SBT + DispatchRays）
 //
 // 依据：docs/shader-corpus.md 统计出 64 个 BVH64 光追着色器，说明光追是渲染管线的一部分。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // speech_extra.cpp —— XSpeechSynthesizer 用 Windows SAPI 真实现
 //
 // 主机上这是系统语音合成；PC 上最接近的等价物就是 SAPI（ISpVoice）。

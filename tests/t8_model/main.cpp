@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t8_model — 用我们自己的 D3D12 管线渲染从游戏包里导出的模型
 //
 // 输入：OBJ（v / vt / f）+ PNG（可选，WIC 解码）

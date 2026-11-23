@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // pe.h —— 极简 PE 解析：只做三件事（判断是不是 PE、读导入、读导出）
 //
 // 为什么要自己写：`check` 命令要在**没有 Python 的机器**上对表，

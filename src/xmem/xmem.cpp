@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // xmem.dll shim — 主机内存 API → VirtualAlloc
 //
 // 证据等级标记（每条断言后面标）：

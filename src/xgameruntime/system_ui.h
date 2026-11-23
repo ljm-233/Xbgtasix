@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // system_ui.h —— 系统侧 UI（游戏没注册回调时，由我们画）
 //
 // 两个角色要分清（见 docs/ui-references.md）：

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // package_more.cpp —— XPackage 剩余接口（第二批：包种类 / 特性枚举 / 安装注册 / 卸载）
 //
 // 原则与 package_extra.cpp 完全一致：

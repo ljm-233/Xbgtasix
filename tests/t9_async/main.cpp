@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t9_async — 验证 XTaskQueue 真的在派发回调、XUser 流程能走通
 //
 // 这两块之前是桩（一调用就退出）。现在：

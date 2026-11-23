@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t39_host_tool —— 验证 xbgtasix.exe（启动器）的四条命令
 //
 // 用 C++ 写测试的理由（和用户要求一致）：项目里不引入 Python 依赖。

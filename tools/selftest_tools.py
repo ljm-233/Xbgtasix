@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Python 工具自检：不依赖任何游戏文件，用合成样本验证工具链本身。
 
 CI 的门槛用这个 —— 因为完整构建需要微软 GDK 头文件（不能入库），

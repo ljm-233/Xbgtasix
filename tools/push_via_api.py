@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """用 GitHub REST API 推送完整提交历史（当 git 的 TLS 后端不可用时）。
 
 背景：某些环境下 git 的 schannel 会报 `AcquireCredentialsHandle failed`，

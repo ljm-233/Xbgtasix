@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """从 .lib / 符号表生成"全量导出但全部抛异常"的 shim 桩。
 
 用途：拿到 Microsoft GDK 的导入库（xgameruntime.lib 等）后，一条命令生成

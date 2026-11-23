@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """定位本机 Microsoft GDK 的头文件与导入库，并可一键生成导出桩。
 
 GDK 装到哪没有固定路径（安装器版本不同、还有 NuGet 分发），所以这里扫全部已知根目录，

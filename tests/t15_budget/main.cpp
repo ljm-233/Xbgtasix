@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t15_budget — 显存预算变化通知 + 简单降级策略
 //
 // 为什么重要：WDDM 会在系统显存吃紧时下调我们进程的 budget。游戏如果只顾分配、

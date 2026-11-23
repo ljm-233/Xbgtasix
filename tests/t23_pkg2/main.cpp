@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t23_pkg2 — package_more.cpp（第二批 XPackage 接口）的独立冒烟测试
 //
 // 覆盖 7 个同步 API：GetPackageKind / EnumerateFeatures / RegisterPackageInstalled /

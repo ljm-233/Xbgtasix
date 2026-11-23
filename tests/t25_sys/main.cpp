@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t25_sys — XSystem / XDisplay / XThread 的"PC 真实语义"验证
 //
 // 与 t22_extras 的写法差异（有意为之）：这里**直接 include GDK 真头文件**，不手抄声明。

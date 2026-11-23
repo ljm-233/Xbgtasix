@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 // xbgtasix: 共享的日志/未实现 API 策略
 #include <cstdarg>

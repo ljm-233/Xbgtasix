@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // pe.cpp —— PE 导入/导出表解析（只支持 PE32 / PE32+，够用即可）
 //
 // 健壮性约定（针对畸形/截断输入的加固，逻辑仍是"极简解析"，不是重写）：

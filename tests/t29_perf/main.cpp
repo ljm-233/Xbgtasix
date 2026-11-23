@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t29_perf — 兼容层性能基准
 //
 // 只测**现在能测的**：

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // system_ui.cpp —— 系统侧 UI 的实现：Win32 窗口 + D3D12 flip 交换链 + 原生子控件
 //
 // 为什么这么组合：

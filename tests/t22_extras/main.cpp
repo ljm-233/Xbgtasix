@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t22_extras — 两个子代理新实现的冒烟测试
 //
 // 重点验证三件容易"写完了但没用"的事：

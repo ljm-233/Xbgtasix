@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t36_ui_host — UI 两种模式：立即完成 vs 交给宿主
 //
 // 这个测试验证"UI 可以被外面接管"这件事到底成立不成立：

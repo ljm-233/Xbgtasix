@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t37_system_ui — 系统侧 UI：游戏没注册回调时，由我们真的开窗画面板
 //
 // 这是"第二个角色"（docs/ui-references.md）：

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t20_taskqueue2 — waiter / monitor / 引用计数 / 进程级队列
 //
 // 补齐 XTaskQueue 的调度闭环：

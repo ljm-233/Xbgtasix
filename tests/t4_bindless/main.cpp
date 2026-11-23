@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t4_bindless — 98 槽描述符表 + 动态索引
 //
 // 依据：docs/shader-corpus.md 统计出 21,522 条着色器的绑定槽 中位 14 / p90 46 / p99 98，

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t32_window — 真实窗口生命周期：消息循环 + 尺寸变化 + ResizeBuffers
 //
 // t31 只验证了"能拿交换链并 Present"。真实游戏还有三件事必须成立：

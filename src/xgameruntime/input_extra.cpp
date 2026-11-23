@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // input_extra.cpp —— 手柄与用户的关联（GDK 里唯一需要兼容层参与的一步）
 //
 // 手柄读取本身在 PC 上是原生能力，不需要我们转译：

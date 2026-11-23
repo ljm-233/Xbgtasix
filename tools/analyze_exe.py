@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """exe 到手后第一件事：把它需要的东西列清楚。
 
 解析 PE 的导入表，按模块分组，重点回答三个问题：

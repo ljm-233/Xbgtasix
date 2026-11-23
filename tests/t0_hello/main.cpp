@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t0_hello — 测试靶子
 //
 // 目的：在没有游戏 exe 的情况下，验证"导入 shim DLL → 初始化 → 建 D3D12 设备 → 出帧"整条链路。

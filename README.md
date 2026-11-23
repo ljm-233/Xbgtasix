@@ -1,7 +1,7 @@
 # Xbgtasix
 
 [![ci](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml/badge.svg)](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
 面向 Xbox GDK 程序的 **Windows 兼容层**，加上配套的**资产格式研究**工具。
 自写代码、可断言的测试、带证据标注的结论文档。
@@ -234,7 +234,15 @@ Xbgtasix/
 
 ## 许可证
 
-[MIT](LICENSE) —— 代码与文档可自由使用、修改、再分发（保留版权声明）。
+[GPL-3.0](LICENSE)（`GPL-3.0-or-later`）。
+
+选用它的两个实际后果，先说清楚：
+
+- **对使用者**：可以自由使用、修改、再分发，但**分发时必须一并提供源码**并保留同样的许可。
+  个人本地使用、自己编译自己跑，不受限制。
+- **对本项目**：因为同是 GPL-3.0，**现在可以合法借鉴/移植其他 GPL-3.0 项目的代码**
+  （例如 Theseus/UIX、uLaunch、SwitchU 这些此前只能"看思路"的仓库）。
+  但**无许可**（默认保留一切权利）的项目仍然不能抄。
 
 许可范围仅限本仓库内容：游戏资产、微软 GDK 头/库、第三方工具都不在其中。
 

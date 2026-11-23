@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t35_gamepad — 手柄两条路径：XInput（老）与 GameInput（GDK 用的新 API）
 //
 // 这是"手柄支持"的事实基线：

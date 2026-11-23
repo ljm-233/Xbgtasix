@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t40_taskqueue3 —— 任务队列生命周期与终止语义（回归测试）
 //
 // 这些场景对应审查里"任务队列"那一组严重问题，改动大且没有测试钉住：

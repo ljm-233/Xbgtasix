@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // system_extra.cpp —— XSystem / XDisplay / XThread 里"PC 上有真语义"的部分
 // 约定：只在本文件实现；导出名追加进 exports_sys.txt。
 //

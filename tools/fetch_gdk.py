@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """从 NuGet 拉官方 GDK 包，抽出头文件与导入库。
 
 为什么走 NuGet：微软在 nuget.org 上公开发布 `Microsoft.GDK.Windows` / `Microsoft.GDK.Core`，

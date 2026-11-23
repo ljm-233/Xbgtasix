@@ -38,7 +38,7 @@
 - 链接：[MrMilenko/Theseus](https://github.com/MrMilenko/Theseus)、[UIX-History 的逆向说明](https://github.com/MrMilenko/UIX-History/blob/main/docs/reverse-engineering.md)
 - 许可：**GPL-3.0-or-later**（`theseus/toolbox/` 部分还继承 GPL-3.0）
 - 对我们的价值：**视觉与交互的参考标本**——面板层级、动画、Guide 键行为
-- 不能做的：把它的代码抄进我们 MIT 仓库（GPL 传染）
+- 此前：不能抄进我们（当时是 MIT）的仓库。**现在本项目也是 GPL-3.0，许可上已兼容**，但仍建议只借鉴结构、独立实现，避免把 GPL 代码与本项目自有实现搅在一起难以追溯
 
 ### 3. recomp-ui（静态重编译项目共用的启动器 UI）
 
@@ -46,7 +46,7 @@
 （feature 列表由宿主提供，UI 自己长出来）。
 
 - 链接：[TekRantGaming/recomp-ui](https://github.com/TekRantGaming/recomp-ui)、[RetroPortingToolKit/recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui)
-- 许可：**MIT**（Copyright 2026 Matthew Stanley）—— 与本项目兼容
+- 许可：MIT（Copyright 2026 Matthew Stanley）—— 与 GPL-3.0 单向兼容（可引入，需保留其署名）
 - 对我们的价值：**结构范本**。它的分层正是我们要的：
   启动器（选游戏/配置/存档/手柄映射）+ 游戏内覆盖层（设置面板）
 - 注意：它不含 Xbox 外观，视觉要自己做
@@ -147,4 +147,4 @@ D3D12：SV_VertexID 取 StructuredBuffer 顶点 -> 采样图集 * 顶点色
 
 **没有现成的"Xbox UI 中间件"可以直接拿**：官方的绑 UWP，最像的（Theseus）是 GPL，
 最实用的（recomp-ui）是启动器不是面板。所以合理做法是
-**用 MIT 的 ImGui 自己画 + 借鉴 MIT 项目的结构 + 参考 GPL 项目的视觉**。
+**用 MIT 的 ImGui 自己画 + 借鉴 MIT 项目的结构 + 参考 GPL 项目的视觉**（本项目 2026-11 起改用 GPL-3.0，许可上与 GPL 参考项目已兼容）。

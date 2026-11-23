@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // d3d12_xs.dll shim — 主机 D3D12 变体的入口，转发到系统 d3d12.dll
 //
 // 关键：Windows 上系统 d3d12.dll 就是"真 D3D12 实现"，

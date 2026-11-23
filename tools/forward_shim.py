@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """生成"全量转发"的 .def：把目标 DLL 的每个导出原样转发过去。
 
 用途：d3d12_xs.dll 需要与 d3d12.dll 同名的全部导出，否则游戏一导入就解析失败。

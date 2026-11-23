@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // xgameruntime.dll shim — GDK 运行时入口
 //
 // 签名一律来自 GDK 真头文件（gdk/include_clean），ABI 由编译器保证。
