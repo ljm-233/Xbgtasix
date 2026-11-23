@@ -206,7 +206,10 @@ else
   echo "  警告：没有 objdump，跳过导出数对账（只保留 .def 下限断言）" >&2
 fi
 
-build_shim xmem
+echo "== xmem.dll（含 fstrace：静态导入的 DllMain 能最早接管文件 API）"
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
+    src/xmem/xmem.cpp src/fstrace/fstrace.cpp src/fstrace/drives.cpp src/trace.cpp \
+    -o "$OUT/xmem.dll" -Wl,--out-implib,"$OUT/libxmem.dll.a"
 
 # 五个主机硬件抽象层 DLL：每个模块一份源文件（各自只导出自己那组符号）。
 # 需求来源：目标 exe 的导入表 —— 这些 DLL 在真实主机上来自系统分区，游戏包里没有。

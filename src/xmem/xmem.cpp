@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
@@ -261,6 +262,7 @@ namespace {
 // 游戏只会把它原样传回来，不会解析。
 constexpr size_t kPhysPage = 0x10000;
 std::mutex g_phys_mu;
+std::vector<void*> g_phys_blocks;   // 已分配的物理页块（按块首地址记录）
 std::vector<void*> g_phys_pages;   // 每页一项（按分配顺序），便于 map 时找到源数据
 
 }  // namespace
@@ -487,27 +489,117 @@ __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* address, size_t size,
 // 工具内存是否可用：PC 上"工具内存"概念不存在
 __declspec(dllexport) bool __cdecl XMemIsToolsMemAvailable(void) { XB_XMEM_TRACE("XMemIsToolsMemAvailable", 0, 0); return false; }
 
-// 以下四个是主机 APU/GPU 的物理页映射，PC 上没有对应硬件。
-// 返回 null / 0 让游戏立刻知道"拿不到物理页"，而不是给它一个假地址。
-__declspec(dllexport) void* __cdecl XMemAllocatePhysicalPages(size_t pages, size_t align) { XB_XMEM_TRACE("XMemAllocatePhysicalPages", pages, align);
-    xbgtasix::logf("[xmem] XMemAllocatePhysicalPages(%zu, %zu)：主机物理页分配，PC 无对应能力",
-                   pages, align);
-    return nullptr;
+// ===========================================================================
+// 物理页：签名与语义移植自 omonkeyz/xbox-emulator（GPL-3.0，同许可）virt.rs。
+// 此前这五个函数是**猜的签名**（2 参数、返回 null），实测游戏会真的调用
+// XMemAllocatePhysicalPages(640 页)，拿到 null 就崩。
+// PC 上"物理页"就是普通内存；PFN 用其地址当不透明句柄（游戏只原样回传）。
+// ===========================================================================
+// 复用上方的 kPhysPage / g_phys_mu（kPhysPage 已在文件前部定义）
+
+__declspec(dllexport) int __cdecl XMemAllocatePhysicalPages(uint64_t flags, size_t* num_pages,
+                                                            uint64_t* page_array) {
+    XB_XMEM_TRACE("XMemAllocatePhysicalPages", flags, num_pages ? *num_pages : 0);
+    if (!num_pages) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const size_t n = *num_pages;
+    // 大页请求（0x20000000）要求 32 页 = 2 MB 对齐，与移植来源一致
+    if ((static_cast<uint32_t>(flags) & 0x20400000u) == 0x20000000u && (n & 0x1f) != 0) {
+        *num_pages = 0;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (n != 0 && !page_array) {
+        *num_pages = 0;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (n == 0) return 1;
+
+    void* block = VirtualAlloc(nullptr, n * kPhysPage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!block) {
+        xbgtasix::logf("[xmem] XMemAllocatePhysicalPages(%zu 页 = %.1f MB) 失败 err=%lu", n,
+                       n * kPhysPage / 1048576.0, GetLastError());
+        *num_pages = 0;
+        return 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_phys_mu);
+        g_phys_blocks.push_back(block);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        page_array[i] = reinterpret_cast<uint64_t>(static_cast<uint8_t*>(block) + i * kPhysPage);
+    }
+    static int logged = 0;
+    if (logged++ < 24) {
+        xbgtasix::logf("[xmem] 物理页 %zu 页（%.1f MB）-> %p", n, n * kPhysPage / 1048576.0, block);
+    }
+    return 1;
 }
-__declspec(dllexport) bool __cdecl XMemFreePhysicalPages(void* ptr, size_t pages) { XB_XMEM_TRACE("XMemFreePhysicalPages", pages, 0);
-    (void)ptr; (void)pages;
-    return false;
+
+__declspec(dllexport) int __cdecl XMemFreePhysicalPages(size_t num_pages, uint64_t* page_array) {
+    XB_XMEM_TRACE("XMemFreePhysicalPages", num_pages, page_array);
+    if (num_pages == 0) return 1;
+    if (!page_array) {
+        SetLastError(ERROR_NOACCESS);
+        return 0;
+    }
+    void* first = reinterpret_cast<void*>(static_cast<uintptr_t>(page_array[0]));
+    if (!first) return 1;
+    {
+        std::lock_guard<std::mutex> lock(g_phys_mu);
+        auto it = std::find(g_phys_blocks.begin(), g_phys_blocks.end(), first);
+        if (it == g_phys_blocks.end()) return 1;   // 不是整块首地址：不重复释放
+        g_phys_blocks.erase(it);
+    }
+    VirtualFree(first, 0, MEM_RELEASE);
+    return 1;
 }
-__declspec(dllexport) void* __cdecl XMemMapPhysicalPages(void* physical, size_t size) { XB_XMEM_TRACE("XMemMapPhysicalPages", size, 0);
-    (void)physical; (void)size;
-    xbgtasix::logf("[xmem] XMemMapPhysicalPages：主机物理页映射，PC 无对应能力");
-    return nullptr;
+
+__declspec(dllexport) void* __cdecl XMemMapPhysicalPages(void* va, size_t num_pages,
+                                                         uint64_t* page_array) {
+    XB_XMEM_TRACE("XMemMapPhysicalPages", va, num_pages);
+    if (!va) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    if (num_pages == 0) return va;
+    auto* dst = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(va) &
+                                           ~(static_cast<uintptr_t>(kPhysPage) - 1));
+    for (size_t i = 0; i < num_pages; ++i) {
+        if (!page_array) continue;
+        const uint64_t pfn = page_array[i];
+        if (!pfn) continue;
+        std::memcpy(dst + i * kPhysPage, reinterpret_cast<void*>(static_cast<uintptr_t>(pfn)),
+                    kPhysPage);
+    }
+    static int logged = 0;
+    if (logged++ < 16) {
+        xbgtasix::logf("[xmem] XMemMapPhysicalPages %zu 页 -> %p（拷贝语义：PC 无物理页别名）",
+                       num_pages, dst);
+    }
+    return va;
 }
-__declspec(dllexport) void* __cdecl XMemMapPhysicalPagesScatter(void* physical, size_t count) { XB_XMEM_TRACE("XMemMapPhysicalPagesScatter", count, 0);
-    (void)physical; (void)count;
-    xbgtasix::logf("[xmem] XMemMapPhysicalPagesScatter：主机物理页映射，PC 无对应能力");
-    return nullptr;
+
+__declspec(dllexport) int __cdecl XMemMapPhysicalPagesScatter(void** addresses, size_t num_pages,
+                                                              uint64_t* page_array) {
+    XB_XMEM_TRACE("XMemMapPhysicalPagesScatter", addresses, num_pages);
+    if (!addresses) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    for (size_t i = 0; i < num_pages; ++i) {
+        void* va = addresses[i];
+        if (!va || !page_array) continue;
+        const uint64_t pfn = page_array[i];
+        if (!pfn) continue;
+        std::memcpy(va, reinterpret_cast<void*>(static_cast<uintptr_t>(pfn)), kPhysPage);
+    }
+    return 1;
 }
+
 __declspec(dllexport) bool __cdecl XMemTransferMemory(void* dst, const void* src, size_t size) { XB_XMEM_TRACE("XMemTransferMemory", size, 0);
     if (!dst || !src || !size) return false;
     std::memcpy(dst, src, size);   // 主机上是 DMA，PC 上用内存拷贝等效
