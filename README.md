@@ -129,6 +129,7 @@ python tools/analyze_exe.py <exe>          # 静态核对导入面（10 秒，�
 | [graphics-pitfalls](docs/graphics-pitfalls.md) | **9 个"不报错只黑屏"的坑** |
 | [env-gotchas](docs/env-gotchas.md) | 7 个环境/工具链的坑（沙箱按进程放行、git TLS、mingw 头文件不一致…） |
 | [arch-linux](docs/arch-linux.md) | **Arch Linux**：交叉编译已通，运行时靠 Wine/Proton；mesh 与光追是未知数 |
+| [ui-references](docs/ui-references.md) | **现成方案调研**：Game Bar SDK / Theseus / recomp-ui / DirectComposition 覆盖窗，含许可对比 |
 | [ui-host](docs/ui-host.md) | **UI 两种模式**：立即完成 vs 交给宿主（挂起/回填链路） |
 | [input](docs/input.md) | **手柄**：XInput / GameInput 都是原生，只有"设备↔用户关联"需要兼容层 |
 | [audit-2026-11](docs/audit-2026-11.md) | 五路子代理的全项目审查记录（含未修项与优先级） |
