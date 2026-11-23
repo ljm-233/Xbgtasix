@@ -156,6 +156,17 @@ struct VerifyResult {
     std::string layout_file;
 };
 
+// 从一段 XML 文本里取某个属性值
+std::string attr_of(const std::string& tag, const char* name) {
+    const std::string key = std::string(name) + "=\"";
+    const size_t p = tag.find(key);
+    if (p == std::string::npos) return {};
+    const size_t b = p + key.size();
+    const size_t e = tag.find('"', b);
+    if (e == std::string::npos) return {};
+    return tag.substr(b, e - b);
+}
+
 VerifyResult do_verify(const std::wstring& dir) {
     VerifyResult r;
     WIN32_FIND_DATAW fd{};
@@ -166,7 +177,6 @@ VerifyResult do_verify(const std::wstring& dir) {
         FindClose(h);
     }
     if (layout.empty()) {
-        // 退一步：任意 xml 里含 <FileGroup 的
         HANDLE h2 = FindFirstFileW(join(dir, L"*.xml").c_str(), &fd);
         if (h2 != INVALID_HANDLE_VALUE) {
             do {
@@ -185,18 +195,34 @@ VerifyResult do_verify(const std::wstring& dir) {
 
     const std::string text = read_text(layout);
     size_t pos = 0;
-    while ((pos = text.find("Include=\"", pos)) != std::string::npos) {
-        pos += 9;
-        const size_t end = text.find('"', pos);
-        if (end == std::string::npos) break;
-        const std::string name = text.substr(pos, end - pos);
-        pos = end;
-        if (name.empty() || name.find('*') != std::string::npos) continue;
+    while ((pos = text.find("<FileGroup", pos)) != std::string::npos) {
+        const size_t close = text.find("/>", pos);
+        if (close == std::string::npos) break;
+        const std::string tag = text.substr(pos, close - pos + 2);
+        pos = close + 2;
+
+        const std::string include = attr_of(tag, "Include");
+        if (include.empty() || include.find('*') != std::string::npos) continue;
+
+        // 关键：文件落在 DestinationPath 指定的子目录里（如 \data\ttdb\graphics\），
+        // 不是包根目录。之前忽略这一项，把 68 个本来存在的文件误报成缺失。
+        std::string dest = attr_of(tag, "DestinationPath");
+        for (auto& c : dest) {
+            if (c == '/') c = '\\';
+        }
+        while (!dest.empty() && (dest.front() == '\\' || dest.front() == '.')) {
+            if (dest.front() == '.') break;
+            dest.erase(dest.begin());
+        }
+        if (dest == ".") dest.clear();
+        if (!dest.empty() && dest.back() != '\\') dest += '\\';
+
+        const std::string rel = dest + include;
         ++r.listed;
-        if (file_exists(join(dir, to_wide(name)))) {
+        if (file_exists(join(dir, to_wide(rel)))) {
             ++r.present;
         } else {
-            r.missing.push_back(name);
+            r.missing.push_back(rel);
         }
     }
     return r;
@@ -495,7 +521,12 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
         game_dir = abs_path(target);
         target = find_exe_in_dir(game_dir);
         if (target.empty()) {
-            say("错误：目录里没有 layout 声明 .exe，也没找到可执行文件");
+            say("错误：目录里没有 layout 声明的 .exe");
+            return 2;
+        }
+        if (!file_exists(target)) {
+            say("错误：layout 声明了 %s，但文件不存在", to_utf8(base_of(target)).c_str());
+            say("      用 `xbgtasix verify <目录>` 看完整缺失清单");
             return 2;
         }
         say("目标目录      %s", to_utf8(game_dir).c_str());
@@ -726,6 +757,58 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     return (kind == "PASS") ? 0 : 1;
 }
 
+// ---------------------------------------------------------------- 交互
+// 双击启动时，控制台只有我们自己（就绪即退出会"一闪而过"）。
+// 这个判断决定要不要在结束前等一次回车。
+bool own_console() {
+    DWORD pids[4] = {0};
+    const DWORD n = GetConsoleProcessList(pids, 4);
+    return n <= 1;
+}
+
+void pause_if_interactive() {
+    if (!own_console()) return;
+    printf("\n按回车退出...");
+    fflush(stdout);
+    int c;
+    while ((c = getchar()) != EOF && c != '\n') {
+    }
+}
+
+// 在 dir 及其上 3 层父目录里找含 layout_*.xml 的包目录
+std::wstring find_package_near(const std::wstring& start) {
+    std::wstring dir = abs_path(start);
+    for (int depth = 0; depth < 4 && !dir.empty(); ++depth) {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(join(dir, L"layout_*.xml").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            FindClose(h);
+            return dir;
+        }
+        const std::wstring up = dir_of(dir);
+        if (up == dir) break;
+        dir = up;
+    }
+    return {};
+}
+
+int interactive_menu() {
+    printf("\n");
+    printf("  1) 运行游戏        2) 检查导入面\n");
+    printf("  3) 核对包完整性    4) 环境自检    0) 退出\n");
+    printf("选择: ");
+    fflush(stdout);
+    char line[256] = {0};
+    if (!fgets(line, sizeof(line), stdin)) return 0;
+    switch (line[0]) {
+        case '1': return 1;
+        case '2': return 2;
+        case '3': return 3;
+        case '4': return 4;
+        default: return 0;
+    }
+}
+
 // ---------------------------------------------------------------- CLI
 void usage() {
     printf("xbgtasix %s —— Xbox GDK 兼容层的启动器/诊断工具\n\n", kVersion);
@@ -748,7 +831,71 @@ void usage() {
 int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     if (argc < 2) {
+        // 双击进来（或直接运行）：自动找包，给菜单，别一闪而过
+        const std::wstring pkg = find_package_near(self_dir());
+        printf("xbgtasix %s —— Xbox GDK 兼容层启动器\n", kVersion);
+        if (!pkg.empty()) {
+            const std::wstring exe = find_exe_in_dir(pkg);
+            printf("\n找到游戏包: %s\n", to_utf8(pkg).c_str());
+            if (exe.empty()) {
+                printf("  !! 包内没有 layout 声明的 .exe —— 启动不了（先用 3 核对完整性）\n");
+            } else if (!file_exists(exe)) {
+                // 关键：layout 里写着名字，不代表文件真的在。之前这里直接报"可执行文件: xxx"，
+                // 会让人以为能启动，实际一跑就失败。
+                printf("  !! layout 声明了 %s，但文件**不存在** —— 这就是启动不了的原因\n",
+                       to_utf8(base_of(exe)).c_str());
+                printf("     用 3) 核对包完整性 可以看到完整缺失清单\n");
+            } else {
+                printf("  可执行文件: %s\n", to_utf8(base_of(exe)).c_str());
+            }
+        } else {
+            printf("\n附近没找到游戏包（需要含 layout_*.xml 的目录）\n");
+            printf("可以把这个程序和三个 DLL 放进游戏目录后再双击\n");
+        }
         usage();
+        const int pick = interactive_menu();
+        if (pick == 0) {
+            pause_if_interactive();
+            return 0;
+        }
+        if (pick == 1) {
+            if (pkg.empty()) {
+                printf("没有可运行的包\n");
+                pause_if_interactive();
+                return 2;
+            }
+            RunOptions ro;
+            const int rc = cmd_run(pkg, ro);
+            pause_if_interactive();
+            return rc;
+        }
+        if (pick == 2) {
+            if (pkg.empty()) {
+                printf("没有可检查的包\n");
+                pause_if_interactive();
+                return 2;
+            }
+            const std::wstring exe = find_exe_in_dir(pkg);
+            if (exe.empty()) {
+                printf("包里没有 layout 声明的 .exe\n");
+                pause_if_interactive();
+                return 2;
+            }
+            const int rc = cmd_check(exe, L"");
+            pause_if_interactive();
+            return rc;
+        }
+        if (pick == 3) {
+            const int rc = pkg.empty() ? 2 : cmd_verify(pkg);
+            pause_if_interactive();
+            return rc;
+        }
+        if (pick == 4) {
+            const int rc = cmd_doctor();
+            pause_if_interactive();
+            return rc;
+        }
+        pause_if_interactive();
         return 2;
     }
     const std::string cmd = argv[1];
@@ -783,18 +930,28 @@ int main(int argc, char** argv) {
     }
     ro.dll_dir = dll_dir;
 
-    if (cmd == "doctor") return cmd_doctor();
+    if (cmd == "doctor") {
+        const int rc = cmd_doctor();
+        pause_if_interactive();
+        return rc;
+    }
     if (cmd == "verify") {
-        if (pos.empty()) { printf("verify 需要一个包目录\n"); return 2; }
-        return cmd_verify(to_wide(pos[0]));
+        if (pos.empty()) { printf("verify 需要一个包目录\n"); pause_if_interactive(); return 2; }
+        const int rc = cmd_verify(to_wide(pos[0]));
+        pause_if_interactive();
+        return rc;
     }
     if (cmd == "check") {
-        if (pos.empty()) { printf("check 需要一个 exe 路径\n"); return 2; }
-        return cmd_check(to_wide(pos[0]), dll_dir);
+        if (pos.empty()) { printf("check 需要一个 exe 路径\n"); pause_if_interactive(); return 2; }
+        const int rc = cmd_check(to_wide(pos[0]), dll_dir);
+        pause_if_interactive();
+        return rc;
     }
     if (cmd == "run") {
-        if (pos.empty()) { printf("run 需要一个 exe 或包目录\n"); return 2; }
-        return cmd_run(to_wide(pos[0]), ro);
+        if (pos.empty()) { printf("run 需要一个 exe 或包目录\n"); pause_if_interactive(); return 2; }
+        const int rc = cmd_run(to_wide(pos[0]), ro);
+        pause_if_interactive();
+        return rc;
     }
 
     printf("未知命令：%s\n\n", cmd.c_str());

@@ -154,20 +154,45 @@ int main() {
                     "    <FileGroup SourcePath=\".\\\" DestinationPath=\"\\\" Include=\"present.dll\" />\n"
                     "    <FileGroup SourcePath=\".\\\" DestinationPath=\"\\\" "
                     "Include=\"missing_file.exe\" />\n"
+                    // 带 DestinationPath 的条目：文件在子目录里（真实包就是这样，
+                    // 忽略它会把大量存在的文件误报成缺失）
+                    "    <FileGroup SourcePath=\". \" DestinationPath=\"\\sub\\dir\\\" "
+                    "Include=\"nested.dat\" />\n"
                     "  </Chunk>\n</Package>\n");
             fclose(f);
         }
         const std::string present = join(pkg, "present.dll");
         FILE* g = fopen(present.c_str(), "wb");
         if (g) { fputc('x', g); fclose(g); }
+        // 子目录里的那个文件要真实存在
+        CreateDirectoryA(join(pkg, "sub").c_str(), nullptr);
+        CreateDirectoryA(join(pkg, "sub\\dir").c_str(), nullptr);
+        const std::string nested = join(pkg, "sub\\dir\\nested.dat");
+        FILE* nf = fopen(nested.c_str(), "wb");
+        if (nf) { fputc('y', nf); fclose(nf); }
 
         RunResult r = run_capture(host, {"verify", pkg}, dir);
         ok(r.code == 1, "verify 发现缺失时退出码为 1", "rc=" + std::to_string(r.code));
         ok(contains(r.output, "missing_file.exe"), "verify 列出了缺失文件名");
-        ok(contains(r.output, "清单 2 项") && contains(r.output, "缺失 1"),
-           "verify 统计正确（2 项 / 缺 1）");
+        if (!contains(r.output, "清单 3 项")) {
+            // 失败时把工具输出打出来，便于定位（也便于以后回归时一眼看懂）
+            xbgtasix::logf("[t39] verify 实际输出：%s", r.output.c_str());
+            FILE* dbg = fopen(layout.c_str(), "rb");
+            if (dbg) {
+                char buf[1024] = {0};
+                const size_t n = fread(buf, 1, sizeof(buf) - 1, dbg);
+                fclose(dbg);
+                xbgtasix::logf("[t39] layout XML 内容（前 %zu 字节）：%s", n, buf);
+            }
+        }
+        ok(contains(r.output, "清单 3 项") && contains(r.output, "缺失 1"),
+           "verify 统计正确（3 项 / 缺 1，其中 1 项在子目录里）");
+        ok(!contains(r.output, "nested.dat"), "子目录里的文件不被误报为缺失");
         DeleteFileA(layout.c_str());
         DeleteFileA(present.c_str());
+        DeleteFileA(nested.c_str());
+        RemoveDirectoryA(join(pkg, "sub\\dir").c_str());
+        RemoveDirectoryA(join(pkg, "sub").c_str());
         RemoveDirectoryA(pkg.c_str());
     }
 
