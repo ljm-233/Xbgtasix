@@ -176,4 +176,30 @@ __declspec(dllexport) HRESULT WINAPI D3D12GetDebugInterface(REFIID riid, void** 
     return pfn(riid, out);
 }
 
+// ===========================================================================
+// 给真实 exe 补的两个导出（名字来自 game_scarlett_master.exe 的导入表）
+//
+// D3D12XboxCreateDevice：主机上创建 D3D12 设备用的入口。PC 上没有这个函数，
+//   但设备创建我们已经有自己的选卡逻辑（D3D12CreateDevice），所以直接转过去。
+//   签名按 GDK 的惯例推定为 (adapter, params, riid, ppDevice)——params 我们不解读，
+//   因为 PC 的 D3D12CreateDevice 不需要它。若实际参数顺序不同，最坏情况是
+//   adapter 传错；日志会记录，便于发现。
+//
+// D3D12ConfigureVirtualMemoryX：主机上给设备配置虚拟内存（显存保留）。PC 上由驱动
+//   自己管理，这里返回 S_OK 表示"配置成功"，让游戏继续（而不是卡在内存配置阶段）。
+// ===========================================================================
+__declspec(dllexport) HRESULT WINAPI D3D12XboxCreateDevice(IUnknown* adapter, void* params,
+                                                           REFIID riid, void** device) {
+    (void)params;
+    xbgtasix::logf("[d3d12_xs] D3D12XboxCreateDevice -> 转 PC 的 D3D12CreateDevice");
+    return D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, riid, device);
+}
+
+__declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, void* config) {
+    (void)device;
+    (void)config;
+    xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX：PC 由驱动管理显存，返回 S_OK");
+    return S_OK;
+}
+
 }  // extern "C"

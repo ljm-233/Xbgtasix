@@ -182,7 +182,11 @@ std::vector<std::string> split_lines(const std::string& text) {
 std::string exe_name_of_dir(const std::wstring& dir);   // 前向声明
 
 // 三个 shim 的名字
-const wchar_t* kShims[] = {L"xgameruntime.dll", L"xmem.dll", L"d3d12_xs.dll"};
+// 我们要放进游戏目录的全部模块：3 个自己实现的 + 5 个补齐主机硬件抽象层的
+// （后者游戏会导入，但游戏包里没有——真实主机上它们来自系统分区）
+const wchar_t* kShims[] = {L"xgameruntime.dll",  L"xmem.dll",   L"d3d12_xs.dll",
+                           L"AcpHal.dll",        L"xapu.dll",   L"chad.dll",
+                           L"xg_xs.dll",         L"XCRDAPI.dll"};
 
 // 找 shim 所在目录：优先 --dll-dir，其次自身目录
 std::wstring resolve_dll_dir(const std::wstring& explicit_dir) {
@@ -507,7 +511,12 @@ int cmd_check(const std::wstring& exe, const std::wstring& dll_dir_in) {
             ++broken_shims;
             continue;
         }
-        our_exports[to_utf8(s)] = info.exports;
+        // key 必须小写：PE 导入表里的模块名被统一转成小写（pe.cpp），
+        // 用原始大小写做 key 会让 AcpHal.dll / XCRDAPI.dll 这类混合大小写的模块
+        // 根本没被核对（表现为"check 里看不到它"，不是"覆盖完整"）。
+        std::string key = to_utf8(s);
+        for (auto& c : key) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+        our_exports[key] = info.exports;
     }
     if (broken_shims > 0) {
         say("");

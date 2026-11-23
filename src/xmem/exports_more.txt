@@ -1,0 +1,9 @@
+XMemAllocDefault
+XMemFreeDefault
+XMemVirtualAlloc
+XMemIsToolsMemAvailable
+XMemAllocatePhysicalPages
+XMemFreePhysicalPages
+XMemMapPhysicalPages
+XMemMapPhysicalPagesScatter
+XMemTransferMemory

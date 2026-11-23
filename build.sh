@@ -208,6 +208,23 @@ fi
 
 build_shim xmem
 
+# 五个主机硬件抽象层 DLL：游戏 exe 导入它们，但包里没有（真实主机上来自系统分区）。
+# 同一个源文件编五次、各自用一份 .def 只导出该模块需要的符号。
+for m in AcpHal xapu chad xg_xs XCRDAPI; do
+  case "$m" in
+    AcpHal)   syms="AcpHalCreate AcpHalAllocateShapeContexts AcpHalReleaseShapeContexts ApuAlloc ApuCreateHeap ApuFree ApuIsVirtualAddressValid ApuMapApuAddress ApuMapVirtualAddress" ;;
+    xapu)     syms="XApuConnect XApuDisconnect XApuEnqueueCommand XApuDequeueResult XApuGetResultCount" ;;
+    chad)     syms="XDspActivate XDspDeactivate XDspConnectWithMaximumStreamLimit XDspDisconnect XDspSubmitCommand" ;;
+    xg_xs)    syms="XGSuggestSwizzleMode XGCreateTextureComputer" ;;
+    XCRDAPI)  syms="DStorageGetFactory" ;;
+  esac
+  echo "== $m.dll (主机硬件抽象层)"
+  { echo "LIBRARY $m"; echo "EXPORTS"; for x in $syms; do echo "  $x"; done; } > "$OUT/$m.def"
+  "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
+      src/console_hw/console_hw.cpp src/trace.cpp "$OUT/$m.def" \
+      -o "$OUT/$m.dll" -Wl,--out-implib,"$OUT/lib$m.dll.a" || exit 1
+done
+
 # d3d12_xs = 4 个手写（带日志）+ 其余全部转发到系统 d3d12.dll
 echo "== d3d12_xs.dll (手写 4 + 转发)"
 {
