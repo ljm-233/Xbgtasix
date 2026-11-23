@@ -35,6 +35,18 @@ command -v "$CXX" >/dev/null || {
   exit 1
 }
 
+# Linux 文件系统区分大小写，而 GDK 头里有大小写不一致的 include
+# （实测：文件叫 grdk.h，XGameRuntime.h 里写 "GRDK.h"）。补别名，否则只有 Linux 编不过。
+PYTHONIOENCODING=utf-8 python - "$GDK_INC" <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("fg", "tools/fetch_gdk.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+n = m.case_alias_fix(sys.argv[1])
+if n:
+    print("大小写别名: 补了 %d 个" % n)
+PYEOF
+
 mkdir -p "$OUT"
 FLAGS=(-std=c++20 -O2 -D_WIN32_WINNT=0x0A00 -DNOMINMAX -DWIN32_LEAN_AND_MEAN
        -Iinclude -I"$GDK_INC" -static)
