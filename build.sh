@@ -6,6 +6,8 @@ cd "$(dirname "$0")"
 export PATH="/d/mingw64/bin:$PATH"
 # 生成脚本会打中文；CI 的 Windows 控制台是 CP1252，不设这个会 UnicodeEncodeError
 export PYTHONIOENCODING=utf-8
+# 优先 python3：有些 Windows 机器只有 python3，而 "python" 可能命中应用商店占位符
+PY=$(command -v python3 || command -v python || echo python)
 CXX=${CXX:-g++}
 OUT=build
 # 注意：MinGW 的 g++ 不认 MSYS 风格 /d/... 路径，必须用 D:/... 或相对路径
@@ -87,7 +89,7 @@ if [ ! -f "$GEN" ] && [ -f "$GDK_LIB_DIR/xgameruntime.lib" ]; then
   echo "== 生成导出桩（src/generated 不存在）"
   EXCL=$(cat src/xgameruntime/exports.txt src/xgameruntime/exports_*.txt 2>/dev/null \
          | grep -v '^;' | grep . | paste -sd, -)
-  python tools/gen_stubs.py "$(cygpath -m "$GDK_LIB_DIR/xgameruntime.lib")" \
+  "$PY" tools/gen_stubs.py "$(cygpath -m "$GDK_LIB_DIR/xgameruntime.lib")" \
       --dll xgameruntime --out src/generated --exclude "$EXCL"
 fi
 
@@ -102,7 +104,7 @@ build_shim() {
 echo "== xgameruntime.dll (手写 + 生成桩)"
 # _GUID_xxx 是数据导出，必须生成真 GUID 而不是函数桩
 if [ -f "$GDK_LIB_DIR/xgameruntime.lib" ]; then
-  python tools/gen_guids.py "$(cygpath -m "$GDK_LIB_DIR/xgameruntime.lib")" \
+  "$PY" tools/gen_guids.py "$(cygpath -m "$GDK_LIB_DIR/xgameruntime.lib")" \
       src/generated/xgameruntime_guids.cpp src/generated/xgameruntime_guids.inc
 fi
 

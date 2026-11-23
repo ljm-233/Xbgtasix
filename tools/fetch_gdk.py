@@ -63,11 +63,18 @@ def extract(nupkg, out):
     os.makedirs(inc_out, exist_ok=True)
     os.makedirs(lib_out, exist_ok=True)
     n_h = n_l = 0
+    # 平铺解包会丢掉子目录：不同子目录下的同名文件会静默互相覆盖。
+    # 记下"这个 basename 是哪个源路径来的"，冲突时明确报错而不是悄悄覆盖。
+    seen = {}
     with zipfile.ZipFile(nupkg) as z:
         for name in z.namelist():
             low = name.lower()
             if low.endswith(".h") and "/include/" in low:
-                with z.open(name) as src, open(os.path.join(inc_out, os.path.basename(name)), "wb") as dst:
+                base = os.path.basename(name)
+                if base in seen and seen[base] != name:
+                    raise SystemExit("头文件同名冲突：%s 与 %s 都会解成 %s" % (seen[base], name, base))
+                seen[base] = name
+                with z.open(name) as src, open(os.path.join(inc_out, base), "wb") as dst:
                     shutil.copyfileobj(src, dst)
                 n_h += 1
             elif low.endswith(".lib") and "/lib/x64/" in low:
