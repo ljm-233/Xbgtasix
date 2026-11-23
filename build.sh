@@ -539,7 +539,7 @@ echo "== t39_host_tool.exe（启动器的测试）"
 
 echo "== xbgtasix.exe（启动器/诊断工具）"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" src/host/main.cpp src/host/pe.cpp \
-    -Id3d12 -ld3d12 -ldxgi -ldxguid \
+    -Id3d12 -ld3d12 -ldxgi -ldxguid -lwinmm \
     -o "$OUT/xbgtasix.exe"
 
 # 重新构建会覆盖 exe，之前的签名随之失效。默认**不**签名：签名要证书/签名机，

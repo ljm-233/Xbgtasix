@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <mmsystem.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -769,6 +770,33 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
         if (!w_exe && !w_local && !w_tmp) {
             say("  [!]          三级都不可写 —— 日志无处落盘，排障会很困难");
             ++critical;
+        }
+    }
+
+    // 6b) 音频：包内的 Bink2Scarlett.dll 只从 XAudio2_9.dll 导入一个函数
+    //     （序号 1 = XAudio2Create），所以只要这个 DLL 在、且有音频端点，音频路径就成立。
+    //     缺 XAudio2_9 时游戏会在加载 Bink 那一步直接 0xC0000135。
+    {
+        HMODULE xa = LoadLibraryW(L"XAudio2_9.dll");
+        const bool have_xa = xa != nullptr;
+        const bool have_create =
+            have_xa && GetProcAddress(xa, reinterpret_cast<LPCSTR>(1)) != nullptr;  // XAudio2Create
+        if (xa) FreeLibrary(xa);
+        const UINT out_devs = waveOutGetNumDevs();
+        say("  音频          XAudio2_9 %s，波形输出端点 %u 个%s", have_xa ? "有" : "没有", out_devs,
+            have_create ? "（XAudio2Create 可解析）" : "");
+        if (!have_xa) {
+            say("  [!]           缺少 XAudio2_9.dll —— 包内 Bink2Scarlett.dll 导入它，"
+                "游戏会在加载视频/音频模块时 0xC0000135");
+            say("                解决：装 DirectX/XAudio2 可再分发组件（Win10 1809+ 一般自带）");
+            ++critical;
+        } else if (!have_create) {
+            say("  [!]           XAudio2_9 存在但取不到 XAudio2Create（序号 1）—— 版本不对？");
+            ++critical;
+        }
+        if (out_devs == 0) {
+            say("  [!]           没有波形输出端点：游戏可能卡在初始化音频（或静音）");
+            // 不算 critical：没声卡也能跑，只是没声音
         }
     }
 
