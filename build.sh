@@ -548,6 +548,10 @@ echo "== t40_taskqueue3.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t40_taskqueue3.exe"
 
+echo "== t41_d3d12_device_abi.exe"
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t41_d3d12_device_abi/main.cpp \
+    -L"$OUT" -ld3d12_xs -ldxgi -ldxguid -o "$OUT/t41_d3d12_device_abi.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \

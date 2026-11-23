@@ -9,6 +9,7 @@
 //
 // 之后要接 vkd3d-proton 时，只需把 resolve() 的搜索路径换成随包分发的 d3d12core.dll。
 #include "xbgtasix/trace.h"
+#include "device_abi.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -179,11 +180,8 @@ __declspec(dllexport) HRESULT WINAPI D3D12GetDebugInterface(REFIID riid, void** 
 // ===========================================================================
 // 给真实 exe 补的两个导出（名字来自 game_scarlett_master.exe 的导入表）
 //
-// D3D12XboxCreateDevice：主机上创建 D3D12 设备用的入口。PC 上没有这个函数，
-//   但设备创建我们已经有自己的选卡逻辑（D3D12CreateDevice），所以直接转过去。
-//   签名按 GDK 的惯例推定为 (adapter, params, riid, ppDevice)——params 我们不解读，
-//   因为 PC 的 D3D12CreateDevice 不需要它。若实际参数顺序不同，最坏情况是
-//   adapter 传错；日志会记录，便于发现。
+// D3D12XboxCreateDevice：复用桌面设备创建，但用 Xbox ABI 返回该设备的代理。
+// 主机特有的创建设定尚未转换；保留当前的 feature level 和选卡逻辑。
 //
 // D3D12ConfigureVirtualMemoryX：主机上给设备配置虚拟内存（显存保留）。PC 上由驱动
 //   自己管理，这里返回 S_OK 表示"配置成功"，让游戏继续（而不是卡在内存配置阶段）。
@@ -191,8 +189,21 @@ __declspec(dllexport) HRESULT WINAPI D3D12GetDebugInterface(REFIID riid, void** 
 __declspec(dllexport) HRESULT WINAPI D3D12XboxCreateDevice(IUnknown* adapter, void* params,
                                                            REFIID riid, void** device) {
     (void)params;
-    xbgtasix::logf("[d3d12_xs] D3D12XboxCreateDevice -> 转 PC 的 D3D12CreateDevice");
-    return D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, riid, device);
+    xbgtasix::logf("[d3d12_xs] D3D12XboxCreateDevice -> desktop device + Xbox ABI");
+    if (device) *device = nullptr;
+    const int version = xbgtasix::d3d12::device_version(riid);
+    if (version < 0) return E_NOINTERFACE;
+    if (!device) return D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, riid, nullptr);
+
+    void* pc = nullptr;
+    const HRESULT hr = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, riid, &pc);
+    if (FAILED(hr)) return hr;
+    if (!pc) return E_FAIL;
+
+    // The proxy takes over this reference. A plain D3D12CreateDevice still returns
+    // the original desktop object, with its desktop ABI and vtable untouched.
+    *device = xbgtasix::d3d12::wrap_device(static_cast<IUnknown*>(pc), version);
+    return *device ? hr : E_OUTOFMEMORY;
 }
 
 __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, void* config) {
