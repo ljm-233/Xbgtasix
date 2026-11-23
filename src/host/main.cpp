@@ -621,20 +621,64 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
         if (pfn_factory &&
             SUCCEEDED(pfn_factory(IID_IDXGIFactory1, reinterpret_cast<void**>(&f))) && f) {
             int idx = 0;
+            int hardware = 0;
+            int software = 0;
+            // 同一颗芯片会被枚举多次（不同 LUID），用 厂商:设备:子系统 去重才等于"物理显卡数"
+            std::vector<unsigned long long> hw_keys;
             IDXGIAdapter1* a = nullptr;
             while (f->EnumAdapters1(static_cast<UINT>(idx), &a) != DXGI_ERROR_NOT_FOUND && a) {
                 DXGI_ADAPTER_DESC1 d{};
                 a->GetDesc1(&d);
-                say("  GPU[%d]        %s（专用显存 %.1f GB）", idx, to_utf8(d.Description).c_str(),
-                    d.DedicatedVideoMemory / 1024.0 / 1024 / 1024);
+                // 输出（显示器）数量：0 说明是"只渲染不出图"的适配器。
+                // 混合显卡笔记本上独显通常 0 输出，画面经核显输出 —— 这不是错配。
+                UINT outs = 0;
+                for (UINT o = 0;; ++o) {
+                    IDXGIOutput* out = nullptr;
+                    if (a->EnumOutputs(o, &out) == DXGI_ERROR_NOT_FOUND) break;
+                    out->Release();
+                    ++outs;
+                }
+                const bool is_sw = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+                if (is_sw) {
+                    ++software;
+                } else {
+                    ++hardware;
+                    const unsigned long long key =
+                        (static_cast<unsigned long long>(d.VendorId) << 48) |
+                        (static_cast<unsigned long long>(d.DeviceId) << 32) |
+                        d.SubSysId;
+                    if (std::find(hw_keys.begin(), hw_keys.end(), key) == hw_keys.end()) {
+                        hw_keys.push_back(key);
+                    }
+                }
+                say("  GPU[%d]        %s%s（%s %04X:%04X，显存 %.1f GB，%u 个输出）", idx,
+                    to_utf8(d.Description).c_str(), is_sw ? " [软件]" : "",
+                    d.VendorId == 0x10DE ? "NVIDIA" : d.VendorId == 0x8086 ? "Intel"
+                    : d.VendorId == 0x1002 ? "AMD"   : d.VendorId == 0x1414 ? "Microsoft" : "其它",
+                    d.VendorId, d.DeviceId, d.DedicatedVideoMemory / 1024.0 / 1024 / 1024, outs);
                 a->Release();
                 a = nullptr;
                 ++idx;
             }
-            if (idx == 0) say("  GPU           没枚举到适配器");
+            if (idx == 0) {
+                say("  GPU           没枚举到适配器");
+                ++critical;
+            } else {
+                // 同一颗芯片可能被枚举多次（不同 LUID），所以"适配器数"不等于"物理显卡数"
+                say("  适配器        %d 个：物理显卡 %d 张（对应 %d 个硬件适配器）+ 软件 %d 个",
+                    idx, static_cast<int>(hw_keys.size()), hardware, software);
+                if (hardware > static_cast<int>(hw_keys.size())) {
+                    say("                （有的卡被枚举了多次，属正常现象，不是多插了显卡）");
+                }
+                if (hardware == 0) {
+                    say("  [!]           没有任何硬件适配器，只有软件渲染 —— 游戏基本跑不动");
+                    ++critical;
+                }
+            }
             f->Release();
         } else {
             say("  GPU           创建 DXGI 工厂失败");
+            ++critical;
         }
     }
 
