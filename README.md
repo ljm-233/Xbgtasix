@@ -182,7 +182,7 @@ Xbgtasix/
   src/d3d12_xs/                Xbox D3D12 入口、桌面转发与适配器选择
   src/console_hw/              主机音频、存储、GPU 纹理等兼容模块
   src/generated/               143 个桩（按返回类型给默认值）+ 50 个 GUID 数据
-  tests/t0…t40/                39 个测试目录（无 t7、t16），全部离屏可跑
+  tests/t0…t42/                41 个测试目录（无 t7、t16），全部离屏可跑
   tools/fetch_gdk.py           从 nuget.org 拉官方 GDK 包并解出头文件/导入库
   tools/gen_stubs.py           .lib → 全量导出桩（返回类型从 GDK 头推断）
   tools/gen_guids.py           _GUID_xxx → 真 GUID 数据符号
