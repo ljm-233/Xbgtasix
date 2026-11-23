@@ -218,7 +218,15 @@ uintptr_t __stdcall wrap_thunk(Wrap* w, uintptr_t a1 = 0, uintptr_t a2 = 0, uint
         char b[8] = {0};
         fail_mode = (GetEnvironmentVariableA("XBGTASIX_FACTORY_FAIL", b, sizeof(b)) > 0 && b[0] == '1') ? 1 : 0;
     }
-    return fail_mode ? 0x80004001u : 0;
+    if (fail_mode) return 0x80004001u;
+    // 对照：若游戏把这个返回值当"句柄"存进结构体（实测断言检查的是 obj+0xC 非 0），
+    // 返回 0 会被当成失败。0x1000 在 HRESULT 语义下仍是成功码（>= 0）。
+    static int handle_mode = -1;
+    if (handle_mode < 0) {
+        char b[8] = {0};
+        handle_mode = (GetEnvironmentVariableA("XBGTASIX_FACTORY_HANDLE", b, sizeof(b)) > 0 && b[0] == '1') ? 1 : 0;
+    }
+    return handle_mode ? 0x1000u : 0;
 }
 
 // QueryInterface 特化：不管要什么 IID 都把自己交出去，让游戏继续走
