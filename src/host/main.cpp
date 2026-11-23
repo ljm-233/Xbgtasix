@@ -1035,6 +1035,12 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
             if (file_exists(bak)) {
                 // 备份已存在：原文件在备份里，dst 是上次我们放的，删掉 dst 就好，
                 // 绝不能拿 dst 覆盖备份，否则第一次的原文件就永久没了。
+                // 但"备份里到底是什么"值得看一眼：如果连备份都带我们的构建标记，
+                // 说明原件早就没了（历史事故），这件事不能只让 restore 说。
+                if (contains_our_marker(bak)) {
+                    say("  ? %s 的备份其实是我们自己的旧产物 —— 原件已丢失，"
+                        "需要从原始包取回这个 DLL", to_utf8(s).c_str());
+                }
                 ok = DeleteFileW(dst.c_str()) != 0;
                 if (ok) say("  备份已在，原文件保留在 %s", to_utf8(bak).c_str());
             } else if (contains_our_marker(dst)) {
