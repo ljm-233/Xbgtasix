@@ -208,20 +208,26 @@ fi
 
 build_shim xmem
 
-# 五个主机硬件抽象层 DLL：游戏 exe 导入它们，但包里没有（真实主机上来自系统分区）。
-# 同一个源文件编五次、各自用一份 .def 只导出该模块需要的符号。
-for m in AcpHal xapu chad xg_xs XCRDAPI; do
-  case "$m" in
-    AcpHal)   syms="AcpHalCreate AcpHalAllocateShapeContexts AcpHalReleaseShapeContexts ApuAlloc ApuCreateHeap ApuFree ApuIsVirtualAddressValid ApuMapApuAddress ApuMapVirtualAddress" ;;
-    xapu)     syms="XApuConnect XApuDisconnect XApuEnqueueCommand XApuDequeueResult XApuGetResultCount" ;;
-    chad)     syms="XDspActivate XDspDeactivate XDspConnectWithMaximumStreamLimit XDspDisconnect XDspSubmitCommand" ;;
-    xg_xs)    syms="XGSuggestSwizzleMode XGCreateTextureComputer" ;;
-    XCRDAPI)  syms="DStorageGetFactory" ;;
+# 五个主机硬件抽象层 DLL：每个模块一份源文件（各自只导出自己那组符号）。
+# 需求来源：目标 exe 的导入表 —— 这些 DLL 在真实主机上来自系统分区，游戏包里没有。
+shim_source() {
+  case "$1" in
+    AcpHal)   echo src/console_hw/acphal.cpp ;;
+    xapu)     echo src/console_hw/xapu.cpp ;;
+    chad)     echo src/console_hw/chad.cpp ;;
+    xg_xs)    echo src/console_hw/xg_xs.cpp ;;
+    XCRDAPI)  echo src/console_hw/xcrdapi.cpp ;;
   esac
-  echo "== $m.dll (主机硬件抽象层)"
-  { echo "LIBRARY $m"; echo "EXPORTS"; for x in $syms; do echo "  $x"; done; } > "$OUT/$m.def"
+}
+for m in AcpHal xapu chad xg_xs XCRDAPI; do
+  SRC=$(shim_source "$m")
+  if [ ! -f "$SRC" ]; then
+    echo "错误：缺少 $SRC（$m.dll 的源文件）" >&2
+    exit 1
+  fi
+  echo "== $m.dll ($SRC)"
   "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
-      src/console_hw/console_hw.cpp src/trace.cpp "$OUT/$m.def" \
+      "$SRC" src/trace.cpp \
       -o "$OUT/$m.dll" -Wl,--out-implib,"$OUT/lib$m.dll.a" || exit 1
 done
 
