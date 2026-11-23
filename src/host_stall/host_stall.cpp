@@ -21,6 +21,7 @@
 #include <cstring>
 
 #include "xbgtasix/host_stall.h"
+#include "xbgtasix/trace.h"
 
 namespace {
 
@@ -69,7 +70,18 @@ void stall_end() {
     if (g_stall_depth.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         const std::uint64_t start = g_stall_start_ns.load(std::memory_order_acquire);
         const std::uint64_t now = now_ns();
-        if (now > start) g_stall_total_ns.fetch_add(now - start, std::memory_order_acq_rel);
+        if (now <= start) return;
+        const std::uint64_t delta = now - start;
+        const std::uint64_t total = g_stall_total_ns.fetch_add(delta, std::memory_order_acq_rel) + delta;
+
+        // 让机制在真机日志里可见：否则"游戏多活了 30 秒"和"机制根本没生效"在日志上
+        // 长得一模一样。只在**主线程**（end 的调用方）记，且限额，不刷屏。
+        // 阈值 200 ms：比它短的多半是普通驱动调用，不需要进日志。
+        static std::atomic<int> budget{20};
+        if (delta >= 200ull * 1000000ull && budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            xbgtasix::logf("[host_stall] 主机侧停顿 %.2f s（累计 %.2f s）—— 已从 guest 的 Sleep 预算里扣除",
+                           static_cast<double>(delta) / 1e9, static_cast<double>(total) / 1e9);
+        }
     }
 }
 
@@ -188,6 +200,11 @@ bool install() {
     g_real_sleep = &::Sleep;
     const bool ok = patch_main_module_sleep();
     g_installed.store(ok ? 1 : 0);
+    if (ok) {
+        xbgtasix::logf("[host_stall] Sleep 钩子已装：主机侧停顿不计入 guest 的睡眠预算");
+    } else {
+        xbgtasix::logf("[host_stall] 警告：主模块没导入 Sleep，停顿记账无处生效");
+    }
     return ok;
 }
 
