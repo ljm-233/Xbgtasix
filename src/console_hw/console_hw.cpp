@@ -20,11 +20,22 @@
 // 而 uintptr_t 既能装指针也能装 int/HRESULT。取值原则：
 //   创建/连接类 -> 返回 0（null）或 E_NOTIMPL，让调用方立刻知道不可用
 //   释放/断开类 -> 返回 S_OK（幂等，避免清理路径报错）
+// WIN32_LEAN_AND_MEAN 下 windows.h 不一定带进 IUnknown 的声明，显式包含
+#include <unknwn.h>
+
 #include <windows.h>
 
+#include <array>
+#include <atomic>
 #include <cstdint>
+#include <utility>
 
 #include "xbgtasix/trace.h"
+
+// 注意：这里**不用** __declspec(dllexport)。本文件会被编进 5 个不同的 DLL，
+// 每个 DLL 只应导出自己的那一组符号（由 build.sh 生成的 <模块>.def 决定）。
+// 用 dllexport 会让每个 DLL 都导出全部 22 个符号（实测如此），
+// 既不符合"一个模块一份接口"的设计，也让导出数对账失去意义。
 
 namespace {
 
@@ -58,65 +69,65 @@ extern "C" {
 
 // ============================ AcpHal.dll ============================
 // APU = 主机的音频/计算加速单元。PC 上不存在，分配一律失败。
-__declspec(dllexport) uintptr_t AcpHalCreate(void*, void*, void*) {
+uintptr_t AcpHalCreate(void*, void*, void*) {
     first_time("AcpHalCreate");
     return 0;   // 创建失败
 }
-__declspec(dllexport) uintptr_t AcpHalAllocateShapeContexts(void*, void*) {
+uintptr_t AcpHalAllocateShapeContexts(void*, void*) {
     first_time("AcpHalAllocateShapeContexts");
     return 0;
 }
-__declspec(dllexport) uintptr_t AcpHalReleaseShapeContexts(void*, void*) {
+uintptr_t AcpHalReleaseShapeContexts(void*, void*) {
     return 0;   // S_OK：释放路径保持幂等
 }
-__declspec(dllexport) uintptr_t ApuAlloc(void*, void*, void*, void*) {
+uintptr_t ApuAlloc(void*, void*, void*, void*) {
     first_time("ApuAlloc");
     return 0;   // 分配不到 APU 内存
 }
-__declspec(dllexport) uintptr_t ApuCreateHeap(void*, void*, void*) {
+uintptr_t ApuCreateHeap(void*, void*, void*) {
     first_time("ApuCreateHeap");
     return 0;
 }
-__declspec(dllexport) uintptr_t ApuFree(void*, void*) { return 0; }
-__declspec(dllexport) uintptr_t ApuIsVirtualAddressValid(void*, void*) {
+uintptr_t ApuFree(void*, void*) { return 0; }
+uintptr_t ApuIsVirtualAddressValid(void*, void*) {
     return 0;   // false：没有任何 APU 虚拟地址是有效的
 }
-__declspec(dllexport) uintptr_t ApuMapApuAddress(void*, void*, void*) {
+uintptr_t ApuMapApuAddress(void*, void*, void*) {
     first_time("ApuMapApuAddress");
     return 0;
 }
-__declspec(dllexport) uintptr_t ApuMapVirtualAddress(void*, void*, void*) {
+uintptr_t ApuMapVirtualAddress(void*, void*, void*) {
     first_time("ApuMapVirtualAddress");
     return 0;
 }
 
 // ============================ xapu.dll ============================
-__declspec(dllexport) uintptr_t XApuConnect(void*, void*, void*) {
+uintptr_t XApuConnect(void*, void*, void*) {
     first_time("XApuConnect");
     return 0x80004001u;   // E_NOTIMPL：连不上 APU
 }
-__declspec(dllexport) uintptr_t XApuDisconnect(void*, void*) { return 0; }
-__declspec(dllexport) uintptr_t XApuEnqueueCommand(void*, void*, void*) {
+uintptr_t XApuDisconnect(void*, void*) { return 0; }
+uintptr_t XApuEnqueueCommand(void*, void*, void*) {
     first_time("XApuEnqueueCommand");
     return 0x80004001u;
 }
-__declspec(dllexport) uintptr_t XApuDequeueResult(void*, void*, void*) {
+uintptr_t XApuDequeueResult(void*, void*, void*) {
     return 0x80004001u;
 }
-__declspec(dllexport) uintptr_t XApuGetResultCount(void*, void*) { return 0; }
+uintptr_t XApuGetResultCount(void*, void*) { return 0; }
 
 // ============================ chad.dll ============================
-__declspec(dllexport) uintptr_t XDspActivate(void*, void*, void*) {
+uintptr_t XDspActivate(void*, void*, void*) {
     first_time("XDspActivate");
     return 0x80004001u;
 }
-__declspec(dllexport) uintptr_t XDspDeactivate(void*, void*) { return 0; }
-__declspec(dllexport) uintptr_t XDspConnectWithMaximumStreamLimit(void*, void*, void*, void*) {
+uintptr_t XDspDeactivate(void*, void*) { return 0; }
+uintptr_t XDspConnectWithMaximumStreamLimit(void*, void*, void*, void*) {
     first_time("XDspConnectWithMaximumStreamLimit");
     return 0x80004001u;
 }
-__declspec(dllexport) uintptr_t XDspDisconnect(void*, void*) { return 0; }
-__declspec(dllexport) uintptr_t XDspSubmitCommand(void*, void*, void*) {
+uintptr_t XDspDisconnect(void*, void*) { return 0; }
+uintptr_t XDspSubmitCommand(void*, void*, void*) {
     first_time("XDspSubmitCommand");
     return 0x80004001u;
 }
@@ -124,44 +135,116 @@ __declspec(dllexport) uintptr_t XDspSubmitCommand(void*, void*, void*) {
 // ============================ xg_xs.dll ============================
 // 纹理 swizzle：主机 GPU 用固定 swizzle 模式；PC 的 D3D12 自己决定平铺方式。
 // 建议返回 0（线性/无 swizzle），让游戏按"未指定"处理。
-__declspec(dllexport) uintptr_t XGSuggestSwizzleMode(void*, void*, void*, void*) {
+uintptr_t XGSuggestSwizzleMode(void*, void*, void*, void*) {
     first_time("XGSuggestSwizzleMode");
     return 0;
 }
-__declspec(dllexport) uintptr_t XGCreateTextureComputer(void*, void*, void*) {
+uintptr_t XGCreateTextureComputer(void*, void*, void*) {
     first_time("XGCreateTextureComputer");
     return 0x80004001u;   // 没有主机纹理计算机
 }
 
+}  // extern "C"
+
 // ============================ XCRDAPI.dll ============================
-// 只有一个 DStorageGetFactory：DirectStorage 的门面。
-// PC 上真实现是 dstorage.dll（Win10 21H1+ 自带 DirectStorage 1.x），能转发就转发。
-// 注意：这个函数的真实签名是 HRESULT DStorageGetFactory(REFIID riid, void** ppv)，
-// 与 GDK 命名一致，所以这里是**真实现**而不是桩。
-__declspec(dllexport) HRESULT WINAPI DStorageGetFactory(REFIID riid, void** ppv) {
+// 游戏要的是 GDK 的 IDStorageFactory（IID 62959D11-…），
+// 而 PC 上所有 DirectStorage 版本（1.0.0/1.0.2/1.3.0，实测）用的都是
+// IID 6924ea0c-…，直接转发必然 E_NOINTERFACE（实测 hr=0x80004002）。
+// GDK 的 NuGet 包里也没有 dstorage 头文件，接口布局不公开。
+//
+// 因此这里返回一个**包装对象**：vtable 逐个槽位转发给 PC 的工厂，
+// 同时把每个槽位的调用（序号 + 参数）记进日志。这样即使两版布局有偏移，
+// 也能从日志反推游戏实际用的是哪几个槽位、传什么参数，再据此对齐。
+namespace {
+
+const GUID kGdkFactoryIid = {0x62959D11, 0xD45F, 0x4884,
+                             {0xA0, 0xA3, 0xF7, 0x86, 0x2E, 0xA2, 0x43, 0xAE}};
+const GUID kPcFactoryIid = {0x6924EA0C, 0xC3CD, 0x4826,
+                            {0xB1, 0x0A, 0xF6, 0x4F, 0x4E, 0xD9, 0x27, 0xC1}};
+
+struct Wrap {
+    void** vt;        // 必须是第一个成员：对象指针即 IUnknown*
+    IUnknown* pc;     // PC 的真实工厂；系统没有 dstorage.dll 时为空
+};
+
+bool slot_seen(size_t slot) {
+    static std::atomic<unsigned> mask{0};
+    if (slot >= 32) return false;
+    const unsigned bit = 1u << slot;
+    const unsigned old = mask.fetch_or(bit);
+    return (old & bit) == 0;
+}
+
+template <size_t N>
+uintptr_t __stdcall wrap_thunk(Wrap* w, uintptr_t a1 = 0, uintptr_t a2 = 0, uintptr_t a3 = 0,
+                               uintptr_t a4 = 0) {
+    if (slot_seen(N)) {
+        xbgtasix::logf("[xcrdapi] factory vtable[%zu] a1=%p a2=%p a3=%p a4=%p%s", N,
+                       reinterpret_cast<void*>(a1), reinterpret_cast<void*>(a2),
+                       reinterpret_cast<void*>(a3), reinterpret_cast<void*>(a4),
+                       w->pc ? "" : "（无 PC 实现，只记账）");
+    }
+    // **不盲目转发**：实测把 GDK 的 slot 8 转发给 PC 的实现会直接崩在
+    // DStorageCore.dll（两版槽位顺序不同）。在弄清每个槽位的真实含义之前，
+    // 先只记账并返回"成功"，看游戏是否把它当可选操作。
+    (void)w; (void)a1; (void)a2; (void)a3; (void)a4;
+    return 0;   // S_OK
+}
+
+// QueryInterface 特化：不管要什么 IID 都把自己交出去，让游戏继续走
+uintptr_t __stdcall wrap_qi(Wrap* w, const GUID*, void** out) {
+    if (out) *out = w;
+    xbgtasix::logf("[xcrdapi] factory->QueryInterface 已放行（返回包装对象）");
+    return 0;   // S_OK
+}
+uintptr_t __stdcall wrap_addref(Wrap*) { return 1; }
+uintptr_t __stdcall wrap_release(Wrap*) { return 1; }
+
+template <size_t... I>
+constexpr std::array<void*, 32> make_vtable(std::index_sequence<I...>) {
+    return {reinterpret_cast<void*>(&wrap_thunk<I>)...};
+}
+
+void** factory_vtable() {
+    static void** vt = []() -> void** {
+        auto arr = make_vtable(std::make_index_sequence<32>{});
+        arr[0] = reinterpret_cast<void*>(&wrap_qi);
+        arr[1] = reinterpret_cast<void*>(&wrap_addref);
+        arr[2] = reinterpret_cast<void*>(&wrap_release);
+        auto* heap = new std::array<void*, 32>(arr);
+        return heap->data();
+    }();
+    return vt;
+}
+
+}  // namespace
+
+extern "C" HRESULT WINAPI DStorageGetFactory(REFIID riid, void** ppv) {
     using PFN = HRESULT(WINAPI*)(REFIID, void**);
     static PFN pfn = []() -> PFN {
         HMODULE h = LoadLibraryW(L"dstorage.dll");
         if (!h) h = LoadLibraryW(L"DStorageCore.dll");
         return h ? reinterpret_cast<PFN>(GetProcAddress(h, "DStorageGetFactory")) : nullptr;
     }();
-    if (!pfn) {
-        first_time("DStorageGetFactory（系统无 dstorage.dll）");
-        if (ppv) *ppv = nullptr;
-        return E_NOTIMPL;
-    }
-    const HRESULT hr = pfn(riid, ppv);
-    // 打印 IID 与结果：GDK 的 dstorage 接口版本与 PC 的 DirectStorage 1.x 不一定同 IID，
-    // 拿到的如果是 E_NOINTERFACE，游戏就会断言"factory 为空"。
-    const auto* g = reinterpret_cast<const unsigned char*>(&riid);
-    xbgtasix::logf("[console-hw] DStorageGetFactory iid={%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X} "
-                   "-> hr=0x%08lX out=%p",
-                   *reinterpret_cast<const uint32_t*>(g),
-                   *reinterpret_cast<const uint16_t*>(g + 4),
-                   *reinterpret_cast<const uint16_t*>(g + 6), g[8], g[9], g[10], g[11], g[12],
-                   g[13], g[14], g[15], static_cast<unsigned long>(hr),
-                   ppv ? *ppv : nullptr);
-    return hr;
-}
+    if (!ppv) return E_POINTER;
 
-}  // extern "C"
+    // PC 的真实工厂（只建一次）
+    static IUnknown* pc = nullptr;
+    if (!pc && pfn) {
+        IUnknown* got = nullptr;
+        if (SUCCEEDED(pfn(kPcFactoryIid, reinterpret_cast<void**>(&got)))) pc = got;
+    }
+
+    const auto* g = reinterpret_cast<const unsigned char*>(&riid);
+    const bool wants_gdk = memcmp(&riid, &kGdkFactoryIid, sizeof(GUID)) == 0;
+    xbgtasix::logf("[xcrdapi] DStorageGetFactory iid={%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}"
+                   " %s，PC 实现=%s",
+                   *reinterpret_cast<const uint32_t*>(g), *reinterpret_cast<const uint16_t*>(g + 4),
+                   *reinterpret_cast<const uint16_t*>(g + 6), g[8], g[9], g[10], g[11], g[12], g[13],
+                   g[14], g[15], wants_gdk ? "（GDK 版）" : "", pc ? "有" : "无");
+
+    static Wrap wrapper{factory_vtable(), nullptr};
+    wrapper.pc = pc;
+    *ppv = &wrapper;
+    return S_OK;
+}
