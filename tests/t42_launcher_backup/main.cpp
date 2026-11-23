@@ -148,6 +148,15 @@ int main(int argc, char** argv) {
     ok(read_all(work + "\\xmem.dll") == "xbgtasix older shim",
        "被污染的 xmem 位置搬回的是那份非原件（事实如此，报告已说明）");
 
+    printf("== D: run 遇到\"备份其实是我们自己的\"也要说\n");
+    // 历史事故留下的状态：dst 与 bak 都带构建标记（原件早没了）。
+    ok(write_all(work + "\\xgameruntime.dll", "xbgtasix new shim"), "写入一个带标记的 dst");
+    ok(write_all(work + "\\xgameruntime.dll.xbgtasix-backup", "xbgtasix old shim"),
+       "再放一个带标记的 bak");
+    const std::string out_run2 =
+        run_capture(launcher + " run \"" + work + "\\fake_game.exe\"", work + "\\run2.out");
+    ok(has(out_run2, "原件已丢失"), "run 会指出'备份其实是我们自己的旧产物'");
+
     printf("== 结论 ==\n");
     printf("%d checks, %d failures\n", g_checks, g_fail);
     if (g_fail == 0) {
