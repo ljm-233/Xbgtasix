@@ -216,14 +216,27 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
             if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0) return;
             if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return;
             const auto* b = reinterpret_cast<const unsigned char*>(addr);
-            char hex[3 * 32 + 1] = {0};
-            char asc[33] = {0};
-            for (int i = 0; i < 32 && i < 32; ++i) {
+            char hex[3 * 96 + 1] = {0};
+            char asc[97] = {0};
+            for (int i = 0; i < 96; ++i) {
                 snprintf(hex + i * 3, 4, "%02X ", b[i]);
                 asc[i] = (b[i] >= 32 && b[i] < 127) ? static_cast<char>(b[i]) : '.';
             }
             logf("[xbgtasix]   %s @%p: %s |%s|", tag, reinterpret_cast<void*>(addr), hex, asc);
         };
+        // 断言对象所在区域：基址/偏移/状态能区分"新分配的块"与"静态结构"
+        if (c->Rsi) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(c->Rsi), &mbi, sizeof(mbi)) != 0) {
+                logf("[xbgtasix] 断言对象所在区域 allocBase=%p base=%p size=0x%llX state=0x%lX "
+                     "protect=0x%lX | 对象偏移=0x%llX",
+                     mbi.AllocationBase, mbi.BaseAddress,
+                     static_cast<unsigned long long>(mbi.RegionSize),
+                     static_cast<unsigned long>(mbi.State), static_cast<unsigned long>(mbi.Protect),
+                     static_cast<unsigned long long>(c->Rsi -
+                                                     reinterpret_cast<unsigned long long>(mbi.AllocationBase)));
+            }
+        }
         dump("rsi", c->Rsi);
         dump("rdi", c->Rdi);
     }
