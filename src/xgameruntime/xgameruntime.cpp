@@ -1201,14 +1201,44 @@ struct UiPending {
 
 std::mutex g_ui_mu;
 std::unordered_map<XAsyncBlock*, UiPending> g_ui_pending;
+
+// ---- UI 的两种模式 ----
+//   immediate（默认）：立刻完成，用默认值。保证"没人接管也不会卡死"。
+//   callback        ：把面板交给注册过 XGameUiSetUiCallbacks 的宿主，
+//                     async 保持挂起，等宿主调 Set*UiResponse 再完成。
+// 用环境变量 XBGTASIX_UI=callback 打开，便于同一份二进制在两种宿主下运行。
+XGameUiUiCallbacks g_ui_cbs{};          // 深拷贝（9 个指针）
+bool g_ui_have_cbs = false;
+std::unordered_map<void*, XAsyncBlock*> g_ui_handle_to_async;   // 回调句柄 -> 挂起的异步
+std::unordered_map<XAsyncBlock*, void*> g_ui_async_to_handle;
+
+bool ui_callback_mode() {
+    char buf[16] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_UI", buf, sizeof(buf)) == 0) return false;
+    return _stricmp(buf, "callback") == 0 && g_ui_have_cbs;
+}
 XGameUiNotificationPositionHint g_ui_notif_pos = XGameUiNotificationPositionHint::TopRight;
 
 STDAPI XGameUiSetUiCallbacks(const XGameUiUiCallbacks* callbacks,
                             bool useSystemUiIfAvailable) noexcept {
-    (void)callbacks;
-    (void)useSystemUiIfAvailable;
-    // 不接管 UI：保持"立即完成"策略，避免注册回调后等一个永不到来的响应
-    xbgtasix::logf("[xgamert] SetUiCallbacks：忽略（本实现不走系统 UI）");
+    std::lock_guard<std::mutex> lock(g_ui_mu);
+    if (!callbacks) {
+        // 传 nullptr = 恢复"不接管"
+        g_ui_cbs = XGameUiUiCallbacks{};
+        g_ui_have_cbs = false;
+        xbgtasix::logf("[xgamert] SetUiCallbacks(nullptr)：恢复立即完成模式");
+        return S_OK;
+    }
+    g_ui_cbs = *callbacks;       // 9 个指针，直接拷贝
+    g_ui_have_cbs = true;
+    int n = 0;
+    if (g_ui_cbs.showMessageDialogCallback) ++n;
+    if (g_ui_cbs.showErrorDialogCallback) ++n;
+    if (g_ui_cbs.showTextEntryCallback) ++n;
+    if (g_ui_cbs.showAchievementsCallback) ++n;
+    if (g_ui_cbs.showPlayerPickerCallback) ++n;
+    xbgtasix::logf("[xgamert] SetUiCallbacks：已保存（%d 个回调；systemUi=%d）", n,
+                   useSystemUiIfAvailable ? 1 : 0);
     return S_OK;
 }
 
@@ -1222,6 +1252,24 @@ STDAPI XGameUiShowErrorDialogAsync(XAsyncBlock* async, HRESULT errorCode,
     if (!async) return E_INVALIDARG;
     xbgtasix::logf("[xgamert] UI 错误框: hr=0x%08lx %s", static_cast<unsigned long>(errorCode),
                    context ? context : "");
+    XGameUiShowErrorDialogUiCallback* cb = nullptr;
+    void* cb_ctx = nullptr;
+    void* handle = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ui_mu);
+        if (ui_callback_mode() && g_ui_cbs.showErrorDialogCallback) {
+            cb = g_ui_cbs.showErrorDialogCallback;
+            cb_ctx = g_ui_cbs.context;
+            handle = async;
+            g_ui_handle_to_async[handle] = async;
+            g_ui_async_to_handle[async] = handle;
+        }
+    }
+    if (cb) {
+        cb(reinterpret_cast<XGameUiCallbackHandle>(handle), async->queue, errorCode, context, cb_ctx);
+        xbgtasix::logf("[xgamert] 错误框交给宿主，异步挂起");
+        return S_OK;
+    }
     complete_async(async, S_OK);
     return S_OK;
 }
@@ -1236,16 +1284,40 @@ STDAPI XGameUiShowMessageDialogAsync(XAsyncBlock* async, const char* titleText,
                                      const char* secondButtonText, const char* thirdButtonText,
                                      XGameUiMessageDialogButton defaultButton,
                                      XGameUiMessageDialogButton cancelButton) noexcept {
-    (void)thirdButtonText;
-    (void)cancelButton;
     if (!async) return E_INVALIDARG;
     xbgtasix::logf("[xgamert] UI 消息框: %s / %s [%s][%s] -> 默认按钮 %u",
                    titleText ? titleText : "", contentText ? contentText : "",
                    firstButtonText ? firstButtonText : "", secondButtonText ? secondButtonText : "",
                    static_cast<unsigned>(defaultButton));
+
+    // 决定走"交给宿主"还是"立即完成"。参数复制到局部再出锁调回调——
+    // 回调里可能再调我们的 API，持锁会自死锁。
+    XGameUiShowMessageDialogUiCallback* cb = nullptr;
+    void* cb_ctx = nullptr;
+    void* handle = nullptr;
+    std::string t, c, b1, b2, b3;
     {
         std::lock_guard<std::mutex> lock(g_ui_mu);
         g_ui_pending[async].button = defaultButton;
+        if (ui_callback_mode() && g_ui_cbs.showMessageDialogCallback) {
+            cb = g_ui_cbs.showMessageDialogCallback;
+            cb_ctx = g_ui_cbs.context;
+            handle = async;                   // 用 async 指针当回调句柄
+            g_ui_handle_to_async[handle] = async;
+            g_ui_async_to_handle[async] = handle;
+            t = titleText ? titleText : "";
+            c = contentText ? contentText : "";
+            b1 = firstButtonText ? firstButtonText : "";
+            b2 = secondButtonText ? secondButtonText : "";
+            b3 = thirdButtonText ? thirdButtonText : "";
+        }
+    }
+    if (cb) {
+        cb(reinterpret_cast<XGameUiCallbackHandle>(handle), async->queue, t.c_str(), c.c_str(),
+           b1.empty() ? nullptr : b1.c_str(), b2.empty() ? nullptr : b2.c_str(),
+           b3.empty() ? nullptr : b3.c_str(), defaultButton, cancelButton, cb_ctx);
+        xbgtasix::logf("[xgamert] 消息框交给宿主，异步挂起等 SetMessageDialogUiResponse");
+        return S_OK;   // 不完成：等宿主回填
     }
     complete_async(async, S_OK);
     return S_OK;
@@ -1270,11 +1342,31 @@ STDAPI XGameUiShowTextEntryAsync(XAsyncBlock* async, const char* titleText,
     (void)titleText;
     (void)descriptionText;
     (void)inputScope;
-    (void)maxTextLength;
     if (!async) return E_INVALIDARG;
+    XGameUiShowTextEntryUiCallback* cb = nullptr;
+    void* cb_ctx = nullptr;
+    void* handle = nullptr;
+    std::string t, d, def;
     {
         std::lock_guard<std::mutex> lock(g_ui_mu);
         g_ui_pending[async].text = defaultText ? defaultText : "";
+        if (ui_callback_mode() && g_ui_cbs.showTextEntryCallback) {
+            cb = g_ui_cbs.showTextEntryCallback;
+            cb_ctx = g_ui_cbs.context;
+            handle = async;
+            g_ui_handle_to_async[handle] = async;
+            g_ui_async_to_handle[async] = handle;
+            t = titleText ? titleText : "";
+            d = descriptionText ? descriptionText : "";
+            def = defaultText ? defaultText : "";
+        }
+    }
+    if (cb) {
+        cb(reinterpret_cast<XGameUiCallbackHandle>(handle), async->queue,
+           t.empty() ? nullptr : t.c_str(), d.empty() ? nullptr : d.c_str(),
+           def.c_str(), inputScope, maxTextLength, cb_ctx);
+        xbgtasix::logf("[xgamert] 输入框交给宿主，异步挂起等 SetTextEntryUiResponse");
+        return S_OK;
     }
     complete_async(async, S_OK);
     return S_OK;
@@ -1383,8 +1475,25 @@ static HRESULT ui_response_ack(const char* name, XGameUiCallbackHandle handle) {
 
 STDAPI XGameUiSetMessageDialogUiResponse(XGameUiCallbackHandle callbackHandle,
                                          XGameUiMessageDialogButton response) noexcept {
-    (void)response;
-    return ui_response_ack("SetMessageDialogUiResponse", callbackHandle);
+    XAsyncBlock* pending = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ui_mu);
+        auto it = g_ui_handle_to_async.find(reinterpret_cast<void*>(callbackHandle));
+        if (it != g_ui_handle_to_async.end()) {
+            pending = it->second;
+            g_ui_pending[pending].button = response;   // 用户选的按钮
+            g_ui_handle_to_async.erase(it);
+            g_ui_async_to_handle.erase(pending);
+        }
+    }
+    if (pending) {
+        // 这里才真正完成异步：调用方的 XAsyncGetStatus 立刻能看到 S_OK
+        complete_async(pending, S_OK);
+        xbgtasix::logf("[xgamert] 宿主回了消息框按钮 %u，异步已完成",
+                       static_cast<unsigned>(response));
+        return S_OK;
+    }
+    return ui_response_ack("SetMessageDialogUiResponse(无挂起请求)", callbackHandle);
 }
 
 STDAPI XGameUiSetPlayerPickerUiResponse(XGameUiCallbackHandle callbackHandle, uint32_t playerCount,
@@ -1396,8 +1505,23 @@ STDAPI XGameUiSetPlayerPickerUiResponse(XGameUiCallbackHandle callbackHandle, ui
 
 STDAPI XGameUiSetTextEntryUiResponse(XGameUiCallbackHandle callbackHandle,
                                      const char* response) noexcept {
-    (void)response;
-    return ui_response_ack("SetTextEntryUiResponse", callbackHandle);
+    XAsyncBlock* pending = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ui_mu);
+        auto it = g_ui_handle_to_async.find(reinterpret_cast<void*>(callbackHandle));
+        if (it != g_ui_handle_to_async.end()) {
+            pending = it->second;
+            g_ui_pending[pending].text = response ? response : "";
+            g_ui_handle_to_async.erase(it);
+            g_ui_async_to_handle.erase(pending);
+        }
+    }
+    if (pending) {
+        complete_async(pending, S_OK);
+        xbgtasix::logf("[xgamert] 宿主回了文本 '%s'，异步已完成", response ? response : "");
+        return S_OK;
+    }
+    return ui_response_ack("SetTextEntryUiResponse(无挂起请求)", callbackHandle);
 }
 
 STDAPI XGameUiSetPlayerProfileCardUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
@@ -1418,7 +1542,22 @@ STDAPI XGameUiSetMultiplayerActivityGameInviteUiResponse(
 }
 
 STDAPI XGameUiSetErrorDialogUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
-    return ui_response_ack("SetErrorDialogUiResponse", callbackHandle);
+    XAsyncBlock* pending = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ui_mu);
+        auto it = g_ui_handle_to_async.find(reinterpret_cast<void*>(callbackHandle));
+        if (it != g_ui_handle_to_async.end()) {
+            pending = it->second;
+            g_ui_handle_to_async.erase(it);
+            g_ui_async_to_handle.erase(pending);
+        }
+    }
+    if (pending) {
+        complete_async(pending, S_OK);
+        xbgtasix::logf("[xgamert] 宿主关掉了错误框，异步已完成");
+        return S_OK;
+    }
+    return ui_response_ack("SetErrorDialogUiResponse(无挂起请求)", callbackHandle);
 }
 
 // ---- 按值返回结构体的 API ----
