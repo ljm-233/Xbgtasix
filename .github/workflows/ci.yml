@@ -73,7 +73,7 @@ jobs:
 
       - name: 构建 + 测试（tools/ci_build.sh）
         shell: bash
-        run: ./tools/ci_build.sh
+        run: bash ./tools/ci_build.sh
 
       - name: 覆盖率说明
         shell: bash
@@ -124,7 +124,7 @@ jobs:
       - name: 交叉编译三个 shim
         run: |
           CXX=x86_64-w64-mingw32-g++ GDK_INC=../gdk/include_clean \
-            ./tools/build_linux_cross.sh
+            bash ./tools/build_linux_cross.sh
 
       - name: 校验产物（导出数必须与 Windows 构建一致）
         run: |
