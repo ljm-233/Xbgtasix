@@ -754,6 +754,89 @@ inline HRESULT WINAPI create_uav_x(DeviceProxy* self, ID3D12Resource* resource,
     return S_OK;
 }
 
+// 主机槽位 133：**用已有虚拟地址创建 D3D12 资源**。
+//
+// 调用点证据（GPT 给的 game+0x1E8684C，vtable+0x428 = 槽 133）：
+//   RCX = 设备 this
+//   RDX = 已映射区间的起始地址
+//   R8  = 栈上构造的资源描述
+//   R9D = 0xFFFFFFFF
+//   [rsp+0x20] = 0
+//   [rsp+0x28] = IID_ID3D12Resource
+//   [rsp+0x30] = 输出指针（成功后游戏存到 game+0x75DF108）
+//
+// 注意：0xFFFFFFFF **不是**资源状态，绝不能直接当 D3D12_RESOURCE_STATES 传给桌面。
+// 这里统一用 COMMON。
+//
+// 实现策略（由保真到降级）：
+//   1) `OpenExistingHeapFromAddress(基址)` → 在它上面 CreatePlacedResource(offset=0)：
+//      资源与游戏那片内存**真正共享**，语义最接近主机
+//   2) 退化为 committed buffer（只验证对象 ABI，数据不共享，会记一条警告）
+inline HRESULT WINAPI create_resource_from_address_x(DeviceProxy* self, void* base_addr,
+                                                     const D3D12_RESOURCE_DESC* desc, UINT a4,
+                                                     UINT a5, REFIID riid, void** out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    xbgtasix::logf("[d3d12_xs] 槽133 用地址建资源 base=%p desc=%p a4=0x%x a5=0x%x riid=%p",
+                   base_addr, static_cast<const void*>(desc), a4, a5,
+                   static_cast<const void*>(&riid));
+    if (!desc) return E_INVALIDARG;
+    auto* pc = static_cast<ID3D12Device*>(self->pc);
+    xbgtasix::logf("[d3d12_xs] 槽133 desc: dim=%d align=0x%llx w=%llu h=%u fmt=%d flags=0x%x",
+                   static_cast<int>(desc->Dimension),
+                   static_cast<unsigned long long>(desc->Alignment),
+                   static_cast<unsigned long long>(desc->Width), desc->Height,
+                   static_cast<int>(desc->Format), static_cast<unsigned>(desc->Flags));
+
+    // 主机资源标志里含 PC 不认的位（实测 flags=0x20004，其中 0x20000 就是主机专属，
+    // 桌面 D3D12 直接 E_INVALIDARG）。只保留标准位（低 6 位）再往下走。
+    constexpr D3D12_RESOURCE_FLAGS kPcResourceFlagMask =
+        static_cast<D3D12_RESOURCE_FLAGS>(0x3F);
+    D3D12_RESOURCE_DESC pc_desc = *desc;
+    const auto original_flags = pc_desc.Flags;
+    pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(pc_desc.Flags & kPcResourceFlagMask);
+    if (original_flags != pc_desc.Flags) {
+        xbgtasix::logf("[d3d12_xs] 槽133 剥离主机资源标志 0x%x -> 0x%x",
+                       static_cast<unsigned>(original_flags), static_cast<unsigned>(pc_desc.Flags));
+    }
+
+    // 1) 首选：把这片内存当成"已存在的堆"，在上面放资源（真正共享数据）
+    ID3D12Device3* dev3 = nullptr;
+    if (SUCCEEDED(pc->QueryInterface(IID_PPV_ARGS(&dev3))) && dev3) {
+        ID3D12Heap* heap = nullptr;
+        const HRESULT hr_heap = dev3->OpenExistingHeapFromAddress(base_addr, IID_PPV_ARGS(&heap));
+        if (SUCCEEDED(hr_heap) && heap) {
+            const HRESULT hr = pc->CreatePlacedResource(
+                heap, 0, &pc_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, riid, out);
+            heap->Release();
+            xbgtasix::logf("[d3d12_xs] 槽133 -> placed resource hr=0x%08lx out=%p（与标题内存共享）",
+                           static_cast<unsigned long>(hr), out ? *out : nullptr);
+            dev3->Release();
+            if (SUCCEEDED(hr)) return hr;
+        } else {
+            xbgtasix::logf("[d3d12_xs] 槽133 OpenExistingHeapFromAddress 失败 hr=0x%08lx"
+                           "（该地址不是已提交的私有分配？）",
+                           static_cast<unsigned long>(hr_heap));
+        }
+        dev3->Release();
+    }
+
+    // 2) 降级：committed buffer —— 只能验证对象 ABI，数据不共享
+    D3D12_RESOURCE_DESC buffer_desc = pc_desc;
+    if (buffer_desc.Dimension == D3D12_RESOURCE_DIMENSION_UNKNOWN)
+        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    D3D12_HEAP_PROPERTIES props{};
+    props.Type = D3D12_HEAP_TYPE_DEFAULT;
+    props.CreationNodeMask = 1;
+    props.VisibleNodeMask = 1;
+    const HRESULT hr = pc->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                   D3D12_RESOURCE_STATE_COMMON, nullptr, riid, out);
+    xbgtasix::logf("[d3d12_xs] 槽133 -> committed 降级 hr=0x%08lx out=%p"
+                   "（**数据不与标题内存共享**，仅验证对象 ABI）",
+                   static_cast<unsigned long>(hr), out ? *out : nullptr);
+    return hr;
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
@@ -763,6 +846,7 @@ Slot device_slot() {
         return reinterpret_cast<Slot>(&create_command_queue_x);
     if constexpr (N == 14) return reinterpret_cast<Slot>(&create_descriptor_heap_x);
     if constexpr (N == 19) return reinterpret_cast<Slot>(&create_uav_x);
+    if constexpr (N == 133) return reinterpret_cast<Slot>(&create_resource_from_address_x);
     if constexpr (N == kCustomHeapPropertiesSlot)
         return reinterpret_cast<Slot>(&custom_heap_properties);
     if constexpr (N == kQueueOrOpenHeapSlot)

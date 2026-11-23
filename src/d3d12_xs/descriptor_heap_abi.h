@@ -152,17 +152,9 @@ inline std::vector<DescriptorHandleMap>& handle_maps() {
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE translate_cpu(D3D12_CPU_DESCRIPTOR_HANDLE h) {
     if (!h.ptr) return h;
-    // **Xbox 的句柄 ABI 允许直接传描述符序号**（实测游戏传 0、1），
-    // PC 却要求真实地址 —— 直接透传会让 D3D12 往地址 0 写描述符（崩在 0x4）。
-    // 序号判定：小于 16 MB 的值不可能是任何堆的真实地址，按"序号 x 步长"换算。
-    if (h.ptr < 0x1000000) {
-        for (const auto& m : handle_maps()) {
-            if (!m.real_base || !m.increment) continue;
-            D3D12_CPU_DESCRIPTOR_HANDLE out{};
-            out.ptr = m.real_base + h.ptr * m.increment;
-            return out;
-        }
-    }
+    // 曾经这里有一条"< 16 MB 就按描述符序号换算"的启发式。**已移除**：
+    // 实测那批 0、1 是从错误的参数位置读出来的（槽 15 被当成 UAV，真实 UAV 在槽 19），
+    // 并不是索引 ABI。句柄换算只应基于**确认过的 arena 地址范围**做偏移转换。
     for (const auto& m : handle_maps()) {
         if (h.ptr >= m.virtual_base && h.ptr < m.virtual_base + m.virtual_size) {
             D3D12_CPU_DESCRIPTOR_HANDLE out{};
