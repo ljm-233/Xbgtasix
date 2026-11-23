@@ -299,11 +299,47 @@ inline void WINAPI list_slot_131(CommandListProxy* self, UINT reg, UINT value, U
 inline void WINAPI list_slot_132(CommandListProxy* self, UINT value, UINT flags, UINT unused,
                                  UINT64 address);
 
+// 命令列表的槽位转发：**不用裸汇编**。
+// 设备侧同样的写法被证明在 MinGW 下不可靠（t41 崩在 D3D12Core），
+// 这里也换成 C 透传。实测崩溃点 d3d12_xs+0x23EB4 就落在这类跳板里
+// （forward_list_this<189>）。
+// 边界：浮点参数会丢（命令列表方法没有）；超过 9 个参数丢尾部（D3D12 命令列表最多 8 个）。
+// PC 的 ID3D12GraphicsCommandList7 只有约 70 个方法；主机的命令列表 vtable 到 600+。
+// 把主机高位槽（>= 80）按同号转发 = 读越界后跳到垃圾地址（实测崩在 forward_list_slot<189>）。
+// 未建模的高位槽一律记一次并返回 S_OK（命令列表扩展方法多为 void 语义，返回 S_OK 最安全）。
 template <std::size_t N>
-__attribute__((naked)) void WINAPI forward_list_this() {
-    __asm__ volatile("movq 8(%%rcx), %%rcx\n\t"
-                     "movq (%%rcx), %%r11\n\t"
-                     "jmp *%c0(%%r11)" :: "i"(N * 8));
+HRESULT WINAPI list_extension_stub(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                   uintptr_t a3 = 0) {
+    static std::atomic<int> budget{40};
+    if (budget.fetch_sub(1) > 0) {
+        const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+        HMODULE mod = nullptr;
+        unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
+            rva = reinterpret_cast<unsigned long long>(caller) -
+                  reinterpret_cast<unsigned long long>(mod);
+        }
+        xbgtasix::logf("[d3d12_xs] 未建模的命令列表扩展 slot=%zu 调用方=+0x%llX "
+                       "a=0x%llx b=0x%llx c=0x%llx -> S_OK", N, rva,
+                       static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
+                       static_cast<unsigned long long>(a3));
+    }
+    (void)self;
+    return S_OK;
+}
+
+template <std::size_t N>
+uintptr_t WINAPI forward_list_slot(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                   uintptr_t a3 = 0, uintptr_t a4 = 0, uintptr_t a5 = 0,
+                                   uintptr_t a6 = 0, uintptr_t a7 = 0, uintptr_t a8 = 0,
+                                   uintptr_t a9 = 0) {
+    auto* proxy = static_cast<CommandListProxy*>(self);
+    using Fn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                             uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+    const auto vt = *reinterpret_cast<void***>(static_cast<ID3D12CommandList*>(proxy->pc));
+    return reinterpret_cast<Fn>(vt[N])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
 }
 
 struct CommandListProxy {
@@ -397,7 +433,10 @@ inline Slot command_list_slot(std::size_t n) {
 
 template <std::size_t... N>
 std::array<Slot, sizeof...(N)> make_command_list_vtable(std::index_sequence<N...>) {
-    std::array<Slot, sizeof...(N)> v{forward_list_this<N>...};
+    // 高位槽不转发（PC vtable 没有），低位按 C 透传
+    std::array<Slot, sizeof...(N)> v{
+        ((N < 80) ? reinterpret_cast<Slot>(&forward_list_slot<N>)
+                  : reinterpret_cast<Slot>(&list_extension_stub<N>))...};
     ((v[N] = command_list_slot(N) ? command_list_slot(N) : v[N]), ...);
     return v;
 }
@@ -851,6 +890,83 @@ inline HRESULT WINAPI create_resource_from_address_x(DeviceProxy* self, void* ba
     return hr;
 }
 
+// 主机槽位 127 = 用**已观测参数**对照出来的 CreateCommittedResource3
+// （ID3D12Device10，10 个参数）。证据来自调用点 game+0x193E1B4：
+//     RDX = {1,0,0,1,1}      -> D3D12_HEAP_PROPERTIES(DEFAULT)
+//     R8D = 8                -> D3D12_HEAP_FLAG_ALLOW_DISPLAY
+//     R9  = 资源描述指针      -> 按 D3D12_RESOURCE_DESC1 解读
+//     [rsp+0x20] = 3         -> D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+//     [rsp+0x28..0x40]       -> clear value / 空 protected session / 0 个 castable 格式
+//     [rsp+0x48]/[0x50]      -> IID_ID3D12Resource / 输出指针
+//
+// MinGW 头文件没有 ID3D12Device10，但有 ID3D12Device8::CreateCommittedResource2
+// （签名少 NumCastableFormats/pCastableFormats 两项，而我们观测到的正是 0 和空指针），
+// 所以降级用它，语义等价。
+inline HRESULT WINAPI create_committed_resource3_x(
+    DeviceProxy* self, const D3D12_HEAP_PROPERTIES* heap_props, UINT heap_flags,
+    const D3D12_RESOURCE_DESC1* desc1, UINT layout, const D3D12_CLEAR_VALUE* clear,
+    void* protected_session, UINT num_castable, const void* castable, REFIID riid, void** out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (!desc1) return E_INVALIDARG;
+
+    xbgtasix::logf("[d3d12_xs] 槽127 CreateCommittedResource3: heapProps=%p flags=0x%x "
+                   "desc1=%p layout=%u clear=%p session=%p castable=%u/%p",
+                   static_cast<const void*>(heap_props), heap_flags,
+                   static_cast<const void*>(desc1), layout,
+                   static_cast<const void*>(clear), protected_session, num_castable, castable);
+    xbgtasix::logf("[d3d12_xs] 槽127 desc1: dim=%d align=0x%llx w=%llu h=%u arr=%u mip=%u fmt=%d "
+                   "samples=%u/0x%x flags=0x%x",
+                   static_cast<int>(desc1->Dimension),
+                   static_cast<unsigned long long>(desc1->Alignment),
+                   static_cast<unsigned long long>(desc1->Width), desc1->Height,
+                   desc1->DepthOrArraySize, desc1->MipLevels, static_cast<int>(desc1->Format),
+                   desc1->SampleDesc.Count, desc1->SampleDesc.Quality,
+                   static_cast<unsigned>(desc1->Flags));
+
+    // 主机资源标志含 PC 不认的位（实测 0x20000），先剥到标准位
+    D3D12_RESOURCE_DESC1 pc_desc = *desc1;
+    const auto original_flags = pc_desc.Flags;
+    pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(pc_desc.Flags & 0x3F);
+    if (original_flags != pc_desc.Flags) {
+        xbgtasix::logf("[d3d12_xs] 槽127 剥离主机资源标志 0x%x -> 0x%x",
+                       static_cast<unsigned>(original_flags), static_cast<unsigned>(pc_desc.Flags));
+    }
+
+    ID3D12Device8* dev8 = nullptr;
+    const HRESULT hr_qi = static_cast<ID3D12Device*>(self->pc)->QueryInterface(IID_PPV_ARGS(&dev8));
+    if (FAILED(hr_qi) || !dev8) {
+        xbgtasix::logf("[d3d12_xs] 槽127 取 ID3D12Device8 失败 hr=0x%08lx",
+                       static_cast<unsigned long>(hr_qi));
+        return FAILED(hr_qi) ? hr_qi : E_NOINTERFACE;
+    }
+
+    // 初始布局：3 = UNORDERED_ACCESS。PC 上对应资源状态；失败再退 COMMON。
+    auto try_create = [&](D3D12_RESOURCE_STATES state, UINT flags) {
+        D3D12_HEAP_PROPERTIES props{};
+        if (heap_props) props = *heap_props;
+        else { props.Type = D3D12_HEAP_TYPE_DEFAULT; props.CreationNodeMask = 1; props.VisibleNodeMask = 1; }
+        return dev8->CreateCommittedResource2(&props, static_cast<D3D12_HEAP_FLAGS>(flags),
+                                              &pc_desc, state, clear, nullptr, riid, out);
+    };
+    HRESULT hr = try_create(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, heap_flags);
+    if (FAILED(hr)) {
+        xbgtasix::logf("[d3d12_xs] 槽127 首次失败 hr=0x%08lx（state=UNORDERED_ACCESS flags=0x%x）",
+                       static_cast<unsigned long>(hr), heap_flags);
+        hr = try_create(D3D12_RESOURCE_STATE_COMMON, heap_flags);
+    }
+    if (FAILED(hr) && (heap_flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY)) {
+        hr = try_create(D3D12_RESOURCE_STATE_COMMON,
+                        heap_flags & ~static_cast<UINT>(D3D12_HEAP_FLAG_ALLOW_DISPLAY));
+        xbgtasix::logf("[d3d12_xs] 槽127 去掉 ALLOW_DISPLAY 重试 hr=0x%08lx",
+                       static_cast<unsigned long>(hr));
+    }
+    dev8->Release();
+    xbgtasix::logf("[d3d12_xs] 槽127 -> hr=0x%08lx out=%p",
+                   static_cast<unsigned long>(hr), out ? *out : nullptr);
+    return hr;
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
@@ -861,6 +977,7 @@ Slot device_slot() {
     if constexpr (N == 14) return reinterpret_cast<Slot>(&create_descriptor_heap_x);
     if constexpr (N == 19) return reinterpret_cast<Slot>(&create_uav_x);
     if constexpr (N == 133) return reinterpret_cast<Slot>(&create_resource_from_address_x);
+    if constexpr (N == 127) return reinterpret_cast<Slot>(&create_committed_resource3_x);
     if constexpr (N == kCustomHeapPropertiesSlot)
         return reinterpret_cast<Slot>(&custom_heap_properties);
     if constexpr (N == kQueueOrOpenHeapSlot)
