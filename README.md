@@ -159,6 +159,7 @@ build/xbgtasix.exe firstrun "<包目录>"  # verify → doctor → check → run
 | [exe-day-checklist](docs/exe-day-checklist.md) | EXE 的静态检查与启动诊断流程 |
 | [publish](docs/publish.md) | 发布与认证方式 |
 | [anyps5-notes](docs/anyps5-notes.md) | 同类项目 AnyPS5 的分层与教训 |
+| [leonida-crossref](docs/leonida-crossref.md) | **与 Leonida 的互补映射**：容器里只有 FSSM（无 DXIL）、可借的 ABI 事实、唯一的对接面 |
 | [gdk_api_surface](docs/gdk_api_surface.md) | 包内 16 个 DLL 的导入/导出面 |
 | [HANDOFF](docs/HANDOFF.md) | 交接摘要 |
 
