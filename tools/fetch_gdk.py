@@ -92,7 +92,9 @@ def case_alias_fix(inc_dir):
     # 结果在 Windows 上测不出问题、到了 Linux 才炸
     present = set(os.listdir(inc_dir))
     files = {f.lower(): f for f in present if f.lower().endswith(".h")}
-    pat = re.compile(r'#\s*include\s+"([^"]+\.h)"')
+    # 注意：GDK 头用的是 <GRDK.h>（尖括号），不是引号形式。两种都要覆盖，
+    # 之前只匹配引号，所以在 Linux 上补了个寂寞。
+    pat = re.compile(r'#\s*include\s*[<"]([^>"]+\.h)[>"]')
     fixed = 0
     for f in list(files.values()):
         try:

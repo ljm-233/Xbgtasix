@@ -151,6 +151,32 @@ def main():
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 
+    print("\n== 大小写别名（Linux 必需；本机 NTFS 看不到真行为，用注入验证逻辑）")
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "fg", os.path.join(ROOT, "tools", "fetch_gdk.py"))
+        fg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fg)
+
+        d2 = os.path.join(base, "casemock")
+        os.makedirs(d2, exist_ok=True)
+        open(os.path.join(d2, "grdk.h"), "w").write("// lower\n")
+        # 真实的 GDK 头用的是尖括号形式
+        open(os.path.join(d2, "XGameRuntime.h"), "w").write('#include <GRDK.h>\n')
+
+        created = []
+        real_symlink = os.symlink
+        os.symlink = lambda src, dst, **k: created.append((src, os.path.basename(dst)))
+        try:
+            n = fg.case_alias_fix(d2)
+        finally:
+            os.symlink = real_symlink
+        ok(n == 1 and created and created[0][1] == "GRDK.h",
+           "识别 <GRDK.h> 并想创建 GRDK.h 别名", "created=%s" % created)
+    except Exception as e:
+        ok(False, "别名逻辑验证", str(e)[:60])
+
     print("\n== 结果: %s" % ("PASS" if fail == 0 else "FAIL（%d 项）" % fail))
     return 0 if fail == 0 else 1
 
