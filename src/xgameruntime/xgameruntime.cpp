@@ -43,6 +43,7 @@
 #include "XUser.h"
 
 #include "xbgtasix/trace.h"
+#include "system_ui.h"
 
 namespace {
 
@@ -1217,6 +1218,17 @@ bool ui_callback_mode() {
     if (GetEnvironmentVariableA("XBGTASIX_UI", buf, sizeof(buf)) == 0) return false;
     return _stricmp(buf, "callback") == 0 && g_ui_have_cbs;
 }
+
+// 系统侧 UI 模式：游戏没注册回调时，由我们画（docs/ui-references.md 的"第二个角色"）。
+//   XBGTASIX_UI=system  -> 强制走我们（即使游戏注册了回调）
+//   XBGTASIX_UI=auto    -> 有回调交给游戏，没有就我们画
+bool ui_system_mode() {
+    char buf[16] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_UI", buf, sizeof(buf)) == 0) return false;
+    if (_stricmp(buf, "system") == 0) return true;
+    if (_stricmp(buf, "auto") == 0) return !g_ui_have_cbs;
+    return false;
+}
 XGameUiNotificationPositionHint g_ui_notif_pos = XGameUiNotificationPositionHint::TopRight;
 
 STDAPI XGameUiSetUiCallbacks(const XGameUiUiCallbacks* callbacks,
@@ -1299,17 +1311,19 @@ STDAPI XGameUiShowMessageDialogAsync(XAsyncBlock* async, const char* titleText,
     {
         std::lock_guard<std::mutex> lock(g_ui_mu);
         g_ui_pending[async].button = defaultButton;
+        // 参数先无条件拷出来：callback 与 system 两种模式都要用，
+        // 之前只在 callback 分支里拷，导致 system 模式拿到的全是空串
+        t = titleText ? titleText : "";
+        c = contentText ? contentText : "";
+        b1 = firstButtonText ? firstButtonText : "";
+        b2 = secondButtonText ? secondButtonText : "";
+        b3 = thirdButtonText ? thirdButtonText : "";
         if (ui_callback_mode() && g_ui_cbs.showMessageDialogCallback) {
             cb = g_ui_cbs.showMessageDialogCallback;
             cb_ctx = g_ui_cbs.context;
             handle = async;                   // 用 async 指针当回调句柄
             g_ui_handle_to_async[handle] = async;
             g_ui_async_to_handle[async] = handle;
-            t = titleText ? titleText : "";
-            c = contentText ? contentText : "";
-            b1 = firstButtonText ? firstButtonText : "";
-            b2 = secondButtonText ? secondButtonText : "";
-            b3 = thirdButtonText ? thirdButtonText : "";
         }
     }
     if (cb) {
@@ -1318,6 +1332,26 @@ STDAPI XGameUiShowMessageDialogAsync(XAsyncBlock* async, const char* titleText,
            b3.empty() ? nullptr : b3.c_str(), defaultButton, cancelButton, cb_ctx);
         xbgtasix::logf("[xgamert] 消息框交给宿主，异步挂起等 SetMessageDialogUiResponse");
         return S_OK;   // 不完成：等宿主回填
+    }
+    if (ui_system_mode() && xbgtasix::system_ui_available()) {
+        // 系统侧 UI：开窗要跑消息循环，不能在调用线程里阻塞，放到后台线程
+        auto* arg = new std::string[5]{t, c, b1, b2, b3};
+        int def = static_cast<int>(defaultButton), canc = static_cast<int>(cancelButton);
+        std::thread([async, arg, def, canc] {
+            const auto r = xbgtasix::system_ui_show_message(
+                arg[0].c_str(), arg[1].c_str(), arg[2].empty() ? nullptr : arg[2].c_str(),
+                arg[3].empty() ? nullptr : arg[3].c_str(),
+                arg[4].empty() ? nullptr : arg[4].c_str(), def, canc, 60000);
+            delete[] arg;
+            long btn = static_cast<long>(def);
+            if (r != xbgtasix::SysUiMessageButton::None) btn = static_cast<long>(r);
+            {
+                std::lock_guard<std::mutex> lock(g_ui_mu);
+                g_ui_pending[async].button = static_cast<XGameUiMessageDialogButton>(btn);
+            }
+            complete_async(async, S_OK);
+        }).detach();
+        return S_OK;
     }
     complete_async(async, S_OK);
     return S_OK;
@@ -1350,15 +1384,16 @@ STDAPI XGameUiShowTextEntryAsync(XAsyncBlock* async, const char* titleText,
     {
         std::lock_guard<std::mutex> lock(g_ui_mu);
         g_ui_pending[async].text = defaultText ? defaultText : "";
+        // 同上：两种模式都要用，先无条件拷
+        t = titleText ? titleText : "";
+        d = descriptionText ? descriptionText : "";
+        def = defaultText ? defaultText : "";
         if (ui_callback_mode() && g_ui_cbs.showTextEntryCallback) {
             cb = g_ui_cbs.showTextEntryCallback;
             cb_ctx = g_ui_cbs.context;
             handle = async;
             g_ui_handle_to_async[handle] = async;
             g_ui_async_to_handle[async] = handle;
-            t = titleText ? titleText : "";
-            d = descriptionText ? descriptionText : "";
-            def = defaultText ? defaultText : "";
         }
     }
     if (cb) {
@@ -1366,6 +1401,22 @@ STDAPI XGameUiShowTextEntryAsync(XAsyncBlock* async, const char* titleText,
            t.empty() ? nullptr : t.c_str(), d.empty() ? nullptr : d.c_str(),
            def.c_str(), inputScope, maxTextLength, cb_ctx);
         xbgtasix::logf("[xgamert] 输入框交给宿主，异步挂起等 SetTextEntryUiResponse");
+        return S_OK;
+    }
+    if (ui_system_mode() && xbgtasix::system_ui_available()) {
+        auto* arg = new std::string[3]{t, d, def};
+        unsigned maxlen = maxTextLength;
+        std::thread([async, arg, maxlen] {
+            std::string answer;
+            const bool ok_text = xbgtasix::system_ui_show_text_entry(
+                arg[0].c_str(), arg[1].c_str(), arg[2].c_str(), maxlen, &answer, 60000);
+            if (ok_text && !answer.empty()) {
+                std::lock_guard<std::mutex> lock(g_ui_mu);
+                g_ui_pending[async].text = answer;
+            }
+            delete[] arg;
+            complete_async(async, S_OK);
+        }).detach();
         return S_OK;
     }
     complete_async(async, S_OK);
