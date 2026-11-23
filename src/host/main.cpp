@@ -45,16 +45,20 @@ void section(const char* title) {
 std::string to_utf8(const std::wstring& w) {
     if (w.empty()) return {};
     const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string out(n > 0 ? n - 1 : 0, 0);
+    // 容量与长度分开：WideCharToMultiByte 会写 n 字节（含结尾 0），
+    // 原来 resized 成 n-1 却让它写 n，等于写到 data()[size()] 上（标准上是越界）
+    std::string out(static_cast<size_t>(n > 0 ? n : 1), 0);
     if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out.data(), n, nullptr, nullptr);
+    out.resize(n > 0 ? static_cast<size_t>(n - 1) : 0);
     return out;
 }
 
 std::wstring to_wide(const std::string& s) {
     if (s.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring out(n > 0 ? n - 1 : 0, 0);
+    std::wstring out(static_cast<size_t>(n > 0 ? n : 1), 0);
     if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, out.data(), n);
+    out.resize(n > 0 ? static_cast<size_t>(n - 1) : 0);
     return out;
 }
 
@@ -412,6 +416,7 @@ int cmd_check(const std::wstring& exe, const std::wstring& dll_dir_in) {
         target.is_64 ? "PE32+" : "PE32", target.subsystem, target.imports.size());
 
     // 我们三个 shim 的导出集合
+    int broken_shims = 0;
     std::map<std::string, std::vector<std::string>> our_exports;
     for (const wchar_t* s : kShims) {
         const std::wstring p = join(dll_dir, s);
@@ -419,7 +424,26 @@ int cmd_check(const std::wstring& exe, const std::wstring& dll_dir_in) {
             say("  ! 缺少 shim：%s（在 %s 里找）", to_utf8(s).c_str(), to_utf8(dll_dir).c_str());
             continue;
         }
-        our_exports[to_utf8(s)] = pe::read_exports(p);
+        // 先判 shim 自身是否可解析：文件被截断/拷坏时 read_exports 会返回空，
+        // 那样后面会把它报成"缺符号"，让人去实现一个其实已经存在的符号。
+        const pe::Info info = pe::parse_file(p);
+        if (!info.ok) {
+            say("  ! shim 无法解析：%s（%s）—— 先重新构建或重新拷贝", to_utf8(s).c_str(),
+                info.error.c_str());
+            ++broken_shims;
+            continue;
+        }
+        if (info.exports.empty()) {
+            say("  ! shim 没有任何导出：%s —— 文件可能被截断", to_utf8(s).c_str());
+            ++broken_shims;
+            continue;
+        }
+        our_exports[to_utf8(s)] = info.exports;
+    }
+    if (broken_shims > 0) {
+        say("");
+        say("错误：%d 个 shim 损坏（见上面 ! 行），对表结果不可信 —— 先修好它们", broken_shims);
+        return 2;
     }
     if (our_exports.empty()) {
         say("错误：一个 shim 都没找到，先用 build.sh 构建，或用 --dll-dir 指定目录");
@@ -427,6 +451,7 @@ int cmd_check(const std::wstring& exe, const std::wstring& dll_dir_in) {
     }
 
     int total_missing = 0;
+    int by_ordinal = 0;      // 按序号导入的符号总数（不按名字核对）
     section("按模块对表");
     for (const auto& imp : target.imports) {
         auto it = our_exports.find(imp.module);
@@ -434,10 +459,13 @@ int cmd_check(const std::wstring& exe, const std::wstring& dll_dir_in) {
         if (!ours) continue;   // 系统 DLL 不归我们管
         std::vector<std::string> missing;
         for (const auto& n : imp.names) {
-            if (n.empty() || n[0] == '#') {   // 按序号导入：先记为缺失，人工看
-                missing.push_back(n);
+            // 按序号导入（#N）不能按名字核对，也**不该算缺失**：
+            // 算成缺失会让人去 shim 里补一个根本不该按名字补的符号（还可能改乱 .def 序号）
+            if (!n.empty() && n[0] == '#') {
+                ++by_ordinal;
                 continue;
             }
+            if (n.empty()) continue;
             if (std::find(it->second.begin(), it->second.end(), n) == it->second.end()) {
                 missing.push_back(n);
             }

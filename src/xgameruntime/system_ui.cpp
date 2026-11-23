@@ -97,8 +97,10 @@ std::string env_utf8(const wchar_t* name) {
     if (n == 0) return std::string();
     const int bytes = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, nullptr, 0, nullptr, nullptr);
     if (bytes <= 1) return std::string();
-    std::string out(bytes - 1, 0);
+    // 同上：先按容量（含结尾 0）分配，写完再把长度收回来
+    std::string out(static_cast<size_t>(bytes), 0);
     WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, out.data(), bytes, nullptr, nullptr);
+    out.resize(static_cast<size_t>(bytes - 1));
     return out;
 }
 
@@ -325,8 +327,9 @@ void make_button(HWND parent, UiState& st, int i, const wchar_t* label, int x) {
 std::wstring widen(const char* s) {
     if (!s) return L"";
     const int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
-    std::wstring out(n > 0 ? n - 1 : 0, L'\0');
+    std::wstring out(static_cast<size_t>(n > 0 ? n : 1), L'\0');
     if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s, -1, out.data(), n);
+    out.resize(n > 0 ? static_cast<size_t>(n - 1) : 0);
     return out;
 }
 
