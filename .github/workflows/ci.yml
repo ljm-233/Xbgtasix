@@ -186,7 +186,7 @@ jobs:
               return struct.unpack_from("<I", d, eo + 24)[0]
 
           # 期望值 = 各 shim 的导出数（改了导出清单就要同步这里）
-          want = {"xgameruntime.dll": 461, "xmem.dll": 15, "d3d12_xs.dll": 20,
+          want = {"xgameruntime.dll": 461, "xmem.dll": 16, "d3d12_xs.dll": 20,
                   "AcpHal.dll": 9, "xapu.dll": 5, "chad.dll": 5,
                   "xg_xs.dll": 2, "XCRDAPI.dll": 1}
           bad = 0

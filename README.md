@@ -160,6 +160,7 @@ build/xbgtasix.exe firstrun "<包目录>"  # verify → doctor → check → run
 | [publish](docs/publish.md) | 发布与认证方式 |
 | [anyps5-notes](docs/anyps5-notes.md) | 同类项目 AnyPS5 的分层与教训 |
 | [leonida-crossref](docs/leonida-crossref.md) | **与 Leonida 的互补映射**：容器里只有 FSSM（无 DXIL）、可借的 ABI 事实、唯一的对接面 |
+| [host-stall](docs/host-stall.md) | **标题 30 秒自杀**：它的 hang check 把我们的驱动编译当成主线程卡死；记账 + Sleep thunk 让它的"> 2 s 就重数"规则生效 |
 | [gdk_api_surface](docs/gdk_api_surface.md) | 包内 16 个 DLL 的导入/导出面 |
 | [HANDOFF](docs/HANDOFF.md) | 交接摘要 |
 
