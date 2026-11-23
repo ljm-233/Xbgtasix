@@ -86,7 +86,7 @@ else
   "$CXX" "${FLAGS[@]}" -shared \
       src/xgameruntime/*.cpp src/generated/xgameruntime_stubs.cpp \
       src/generated/xgameruntime_guids.cpp src/trace.cpp "$OUT/xgameruntime.def" \
-      -lole32 -loleaut32 -loleacc -lsapi \
+      -ld3d12 -ldxgi -ldxguid -lole32 -loleaut32 -loleacc -lsapi \
       -o "$OUT/xgameruntime.dll" -Wl,--out-implib,"$OUT/libxgameruntime.dll.a" || fail=1
 fi
 
