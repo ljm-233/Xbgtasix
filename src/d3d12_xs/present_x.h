@@ -47,6 +47,7 @@ public:
     }
 
     HRESULT open(UINT width, UINT height) {
+        xbgtasix::logf("[d3d12_xs] present 诊断：PresentWindow::open(%u, %u) 开始", width, height);
         width_ = static_cast<int>(width);
         height_ = static_cast<int>(height);
         if (width_ > 1280) {
@@ -65,6 +66,8 @@ public:
         if (!thread_) return HRESULT_FROM_WIN32(GetLastError());
         if (WaitForSingleObject(ready_, INFINITE) != WAIT_OBJECT_0)
             return HRESULT_FROM_WIN32(GetLastError());
+        xbgtasix::logf("[d3d12_xs] present 诊断：窗口线程就绪 hwnd=%p err=0x%08lx",
+                       static_cast<void*>(window_), static_cast<unsigned long>(window_error_));
         return window_error_;
     }
 
@@ -109,6 +112,9 @@ class PresentState {
 public:
     HRESULT initialize(ID3D12CommandQueue* queue, ID3D12Device* device,
                        const D3D12_RESOURCE_DESC& source) {
+        xbgtasix::logf("[d3d12_xs] present 诊断：PresentState::initialize 开始 %ux%u fmt=%d",
+                       static_cast<unsigned>(source.Width), source.Height,
+                       static_cast<int>(source.Format));
         HRESULT hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
             IID_PPV_ARGS(allocator_.out()));
         if (FAILED(hr)) return hr;
@@ -134,6 +140,9 @@ public:
         desc.BufferCount = 2;
         desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         PresentCom<IDXGISwapChain1> swap;
+        xbgtasix::logf("[d3d12_xs] present 诊断：建交换链 queue=%p hwnd=%p %ux%u fmt=%d", queue,
+                       static_cast<void*>(window_.get()), desc.Width, desc.Height,
+                       static_cast<int>(desc.Format));
         hr = factory->CreateSwapChainForHwnd(queue, window_.get(), &desc, nullptr, nullptr, swap.out());
         if (FAILED(hr)) return hr;
         hr = factory->MakeWindowAssociation(window_.get(), DXGI_MWA_NO_ALT_ENTER);
