@@ -1,5 +1,47 @@
 # SmartScreen 提示"已保护你的电脑"怎么办
 
+## 结论先说（实测更正）
+
+**自签名对 SmartScreen 无效。** SmartScreen 查的是微软云端信誉，不是本机信任库：
+所以"签名状态 Valid"和"被 SmartScreen 拦下"可以同时成立。
+
+本机实测（Windows 11 build 26300）：
+
+| 检查 | 结果 | 含义 |
+|---|---|---|
+| 智能应用控制 SAC | `VerifiedAndReputablePolicyState = 0` | 关闭，不是它在拦 |
+| 网络标记 MOTW | 无（只有 `:$DATA`） | 不是"下载来的文件" |
+| ShellSmartScreenLevel 策略 | 未设置（默认 Warn） | 所以有「仍要运行」按钮 |
+| **从终端启动** | **不弹窗** | **这才是免费有效的办法** |
+
+### 免费的两种办法
+
+**1. 从终端启动**（推荐）
+
+```powershell
+cd D:\GTA6\Xbgtasix\build
+.\xbgtasix.exe
+```
+
+SmartScreen 拦的是 **ShellExecute** 这条路径（资源管理器双击走它）；
+从终端启动走 `CreateProcess`，不经过拦截。
+
+**2. 双击后点「仍要运行」** —— 一次放行。
+
+> 附带一个有用的推论：本项目的 `run` 命令用 `CreateProcess` 拉起游戏，
+> 所以**游戏进程不会被 SmartScreen 拦**，只有你双击启动器这一步会遇到。
+
+### 想彻底不弹，只有买证书
+
+| 方案 | 代价 | 效果 |
+|---|---|---|
+| 自签名 | 0 | ❌ 对 SmartScreen 无效（只是让 Authenticode 变 Valid） |
+| OV 证书 | 约千元/年 | 需信誉积累期，可能仍提示 |
+| EV 证书 | 约两千元/年 | 通常立即通过 |
+
+---
+
+
 ## 先判断是哪一种
 
 | 现象 | 原因 | 对应处理 |
@@ -20,7 +62,7 @@ Unblock-File .\build\xbgtasix.exe
 
 只对带网络标记的文件有意义；对本地编译的文件不解决问题。
 
-## 方案 B：本机自签名（消除"发布者未知"）
+## 方案 B：本机自签名（**不能让 SmartScreen 放行**）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\sign_local.ps1
@@ -50,8 +92,9 @@ powershell -ExecutionPolicy Bypass -File tools\sign_local.ps1
 powershell -ExecutionPolicy Bypass -File tools\sign_local.ps1 -Remove
 ```
 
-**局限（别误解）**：自签名只在这台机器上有效，因为它靠"本机信任该证书"。
-给别人用仍会提示——那需要真正的代码签名证书（EV 证书）+ 信誉积累，属于花钱的事。
+**局限（重要）**：自签名只让 `Get-AuthenticodeSignature` 返回 `Valid`，
+**不能让 SmartScreen 放行**——SmartScreen 用的是云端信誉，与本机信任库无关。
+它的实际价值是：给文件留下可追溯的签署者信息、便于校验文件未被人篡改。
 
 ## 关键：重新构建会覆盖 exe，签名随之失效
 
