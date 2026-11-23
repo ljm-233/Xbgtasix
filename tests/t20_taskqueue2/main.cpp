@@ -148,6 +148,9 @@ int main() {
     // ---- 终止：残留任务不能把进程挂住 ----
     ok(SUCCEEDED(XTaskQueueSubmitCallback(q, 0, nullptr, reinterpret_cast<void*>(&on_work))), "残留任务");
     ok(SUCCEEDED(XTaskQueueTerminate(q, true, nullptr, nullptr)), "Terminate(wait)");
+    // 终止之后残留任务不许再被派发（GDK 语义：终止即丢弃待办）。
+    // 这条以前完全没有，于是"Terminate 只把 stopped 置位、待办仍留在队列里"能蒙过去。
+    ok(!XTaskQueueDispatch(q, 0, 0), "Terminate 后不再派发（残留任务被丢弃）");
 
     XTaskQueueCloseHandle(q);
     CloseHandle(evA);

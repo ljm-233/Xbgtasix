@@ -374,15 +374,22 @@ STDAPI XGameUiTextEntryGetState(XGameUiTextEntryHandle handle,
                                char* buffer) noexcept {
     if (!handle || !changeType) return E_INVALIDARG;
 
-    *changeType = XGameUiTextEntryChangeTypeFlags::None; // = 0x0（XGameUI.h:378）
-    if (cursorIndex) *cursorIndex = 0;
-    if (imeClauseStartIndex) *imeClauseStartIndex = 0;
-    if (imeClauseEndIndex) *imeClauseEndIndex = 0;
-    // size-then-fill 的另一半：把调用方缓冲写成空串（bufferSize 是字节数，含结尾 0）
-    if (buffer && bufferSize) buffer[0] = '\0';
-
     std::lock_guard<std::mutex> lock(g_te_mu);
     if (g_te_live.find(handle) == g_te_live.end()) return E_INVALIDARG;
+
+    // 句柄里存着当前文本与光标（Open 时按 initialText/cursorIndex 初始化）。
+    // 以前这里只写空串，测试 t22 因此抓到：GetState 永远看不到初值。
+    *changeType = XGameUiTextEntryChangeTypeFlags::None; // = 0x0（XGameUI.h:378）
+    if (cursorIndex) *cursorIndex = handle->cursor_index;
+    if (imeClauseStartIndex) *imeClauseStartIndex = 0;
+    if (imeClauseEndIndex) *imeClauseEndIndex = 0;
+    if (buffer && bufferSize) {
+        // bufferSize 是字节数（含结尾 0）：最多拷 bufferSize-1 个字符
+        size_t n = handle->text.size();
+        if (n > bufferSize - 1) n = bufferSize - 1;
+        std::memcpy(buffer, handle->text.data(), n);
+        buffer[n] = '\0';
+    }
     return S_OK;
 }
 

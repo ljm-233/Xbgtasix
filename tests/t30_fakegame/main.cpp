@@ -74,9 +74,14 @@ int main(int argc, char** argv) {
     // 4) 内存
     void* mem = XMemAlloc(0, 65536);
     step("XMemAlloc(64KB)", mem != nullptr);
-    if (mem) std::memset(mem, 0x5A, 65536);
-    if (mem) XMemFree(mem);
-    step("XMemFree", true);
+    // 以前是 step("XMemFree", true)：恒真，等于没测。改成"确实拿到非空块并释放了"
+    bool freed_non_null = false;
+    if (mem) {
+        std::memset(mem, 0x5A, 65536);
+        XMemFree(mem);
+        freed_non_null = true;
+    }
+    step("XMemFree", freed_non_null);
 
     // 5) 任务队列
     void* queue = nullptr;

@@ -6,7 +6,7 @@
 面向 Xbox GDK 程序的 **Windows 兼容层**，加上配套的**资产格式研究**工具。
 自写代码、可断言的测试、带证据标注的结论文档。
 
-> 仓库内不含游戏文件、exe、解密密钥、微软 GDK 头文件或任何绕过手段。
+> 仓库内不含游戏文件、exe、解密密钥、微软 GDK 头文件，也不含破解或 DRM 绕过。
 
 ---
 
@@ -21,7 +21,7 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 
 ```
 目标游戏 exe
-   ├── xgameruntime.dll   461 个导出（265 手写 + 146 生成桩 + 50 个 GUID 数据）
+   ├── xgameruntime.dll   461 个导出（268 手写 + 143 生成桩 + 50 个 GUID 数据）
    ├── xmem.dll             4 个导出（64 KB 页语义的内存分配）
    └── d3d12_xs.dll        18 个导出（4 个手写 + 14 个转发到系统 d3d12.dll）
 ```
@@ -44,9 +44,9 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 | L10 | 端到端：真配置读 `TitleId=0x7952987A` | `t10_integration` |
 | L11 | 持久化本地存储（容量 2048 MB 来自配置） | `t11_storage` |
 | L12 | 拼图工具 | `t12_sheet` |
-| L13 | 显卡适配 / 能力断言（双 GPU 交叉验证） | `t13_caps` |
+| L13 | 显卡适配 / 能力断言（部分图形测试在核显下复测过：t1/t5/t6，其余未交叉验证） | `t13_caps` |
 | L14 | 显存预算（7.0 GB 账面 / 6.0 GB 实测） | `t14_vram` |
-| L15 | 预算变化通知 + 降级（21 次通知） | `t15_budget` |
+| L15 | 预算变化通知 + 降级（实测每次 8~40 次通知，测试只断言 >0） | `t15_budget` |
 | L16 | **16/16 真实游戏侧 DLL 加载成功** | `t16` |
 | L17 | 通用异步（`XAsyncRun` / `GetResultSize` / `Cancel`） | `t17_async2` |
 | L18 | 包身份 + 挂载（坏包返回 `ERROR_NOT_FOUND`） | `t18_package` |
@@ -75,7 +75,7 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 
 ```bash
 ./build.sh                 # MinGW64 + g++ + dxc，产出 3 个 shim（约 90 秒）
-./tools/run_suite.sh       # 38 项测试一条命令，约 12 秒
+./tools/run_suite.sh       # 39 步测试一条命令，约 20 秒
 ./tools/ci_build.sh        # CI 同款：无 GDK 也能验 xmem 子集
 ```
 
@@ -102,17 +102,19 @@ build/xbgtasix.exe doctor           # 环境自检
 
 | 项目 | 实测 |
 |---|---|
-| 启动（含读配置） | 0.52 ms |
-| 解析全部 461 导出 | 0.058 ms |
+| 启动（含读配置） | 0.3 ms |
+| 解析全部 461 导出 | 0.06 ms |
 | 转发一次调用（额外开销） | ≈ 0（相对系统直调） |
-| `XMemAlloc`+`Free` 往返 | 1.15 µs（`VirtualAlloc` 的 1.13 倍） |
-| 队列提交 / 派发 | 0.036 µs / 0.024 µs |
-| 异步往返 | 54 µs |
-| ThreadPool 吞吐 | 2000 回调 / 16 ms |
+| `XMemAlloc`+`Free` 往返 | 1.62–1.72 µs（`VirtualAlloc` 的 1.54–1.76 倍） |
+| 队列提交 / 派发 | 0.028 µs / 0.019 µs |
+| 异步往返 | 51–83 µs |
+| ThreadPool | 2000 个回调全部执行（t32 断言），耗时见 t32 日志 |
+
+以上是 6 次运行的区间（隔离区引入后重测，见 t29）。
 
 修掉过一个真问题：异步往返原本 **15.6 ms**，因为 `XAsyncGetStatus(wait)` 用
-`Sleep(1)` 轮询，而 Windows 默认计时器精度就是 15.6 ms。改成条件变量后 54 µs，
-**快 287 倍**。
+`Sleep(1)` 轮询，而 Windows 默认计时器精度就是 15.6 ms。改成条件变量后约 53 µs，
+**快约 290 倍**。
 
 ---
 
@@ -125,7 +127,7 @@ build/xbgtasix.exe doctor           # 环境自检
 | [rpf9-findings](docs/rpf9-findings.md) | 目录表加密；载荷可雕刻，路径来自载荷内部 |
 | [shader-corpus](docs/shader-corpus.md) | 21,522 条 RDNA2 着色器：mesh 34.8%、光追 64 个、绑定槽 p99=98 |
 | [assets-inventory](docs/assets-inventory.md) | 333 载具 / 160 服装 / 57 GB TTPF 贴图 |
-| [gpu-adaptation](docs/gpu-adaptation.md) | 默认会选中核显的坑；两块 GPU 交叉验证 |
+| [gpu-adaptation](docs/gpu-adaptation.md) | 默认会选中核显的坑；t1/t5/t6 在核显下复测过 |
 | [gpu-memory](docs/gpu-memory.md) | 账面 7.0 GB / 实测 6.0 GB；224 GB 资产 → 必须流式加载 |
 | [smartscreen](docs/smartscreen.md) | 被 Defender 拦下时怎么办（解除锁定 / 本机自签名 / 从源码构建） |
 | [launcher](docs/launcher.md) | **xbgtasix.exe**：run / check / verify / doctor 四条命令与失败分类 |
@@ -162,11 +164,11 @@ build/xbgtasix.exe doctor           # 环境自检
 Xbgtasix/
   build.sh                     MinGW 构建（手写 + 生成桩 + GUID 数据 + dxc 编 shader）
   include/xbgtasix/trace.h     日志 / 未实现策略（stop | log）
-  src/xgameruntime/            265 个手写实现（8 个 .cpp，按模块拆分）
+  src/xgameruntime/            268 个手写实现（10 个 .cpp，按模块拆分）
   src/xmem/                    XMem* → VirtualAlloc（64 KB 页语义）
   src/d3d12_xs/                手写 4 个 + forward.def 14 个转发 + 选卡缓存
-  src/generated/               146 个桩（按返回类型给默认值）+ 50 个 GUID 数据
-  tests/t0…t32/                31 个测试目录，全部离屏可跑
+  src/generated/               143 个桩（按返回类型给默认值）+ 50 个 GUID 数据
+  tests/t0…t39/                38 个测试目录（无 t7、t16），全部离屏可跑
   tools/fetch_gdk.py           从 nuget.org 拉官方 GDK 包并解出头文件/导入库
   tools/gen_stubs.py           .lib → 全量导出桩（返回类型从 GDK 头推断）
   tools/gen_guids.py           _GUID_xxx → 真 GUID 数据符号
@@ -184,11 +186,11 @@ Xbgtasix/
   tools/match_texture.py       模型名 ↔ 贴图名 匹配
   tools/packaging/             rpf9_probe / rpf_carve / encryption_survey / shader_stats
                                / find_pe / pe_surface / verify_package
-  docs/                        20 份结论文档
-  .github/workflows/ci.yml     3 个 job
+  docs/                        27 份结论文档
+  .github/workflows/ci.yml     4 个 job
 ```
 
-规模：**14,520 行**（C++ / HLSL），63 个提交，`.git` 3.9 MB。
+规模：**18,360 行**（C++ / HLSL，按 `HEAD` 已提交内容统计），94 个提交，`.git` 5.1 MB。
 
 ---
 
@@ -212,7 +214,7 @@ Xbgtasix/
 | `python-tools` | 合成样本自检 5 个 Python 工具 | 无依赖 |
 | `docs-links` | 检查 md 相对链接 | 无依赖 |
 | `linux-cross` | `ubuntu-latest` 上交叉编译三个 shim，校验导出数 461/4/18 |
-| `windows-build` | **从 NuGet 拉官方 GDK**（`tools/fetch_gdk.py`）→ `tools/ci_build.sh` 跑**完整构建 + 全套 38 项**；拉不到时退化成"无 GDK 子集"，并在 summary 写明未覆盖部分 | GDK 走微软自己的 nuget.org 源，仓库不转发微软二进制 |
+| `windows-build` | **从 NuGet 拉官方 GDK**（`tools/fetch_gdk.py`）→ `tools/ci_build.sh` 跑**完整构建 + 全套 39 步**；拉不到时 **job 直接失败**（`STRICT=1`），不再悄悄退化成"无 GDK 子集" | GDK 走微软自己的 nuget.org 源，仓库不转发微软二进制 |
 
 ---
 
@@ -240,6 +242,6 @@ Xbgtasix/
 
 ## 法律
 
-本仓库只含自写代码、自写测试与观察结论。不含游戏文件、exe、密钥、微软头文件。
-数据面工具只读取使用者本地已有的文件，用于格式研究与互操作。
+本仓库只含自写代码、自写测试与观察结论。不含游戏文件、exe、密钥、微软头文件，
+也不含破解或 DRM 绕过。数据面工具只读取使用者本地已有的文件，用于格式研究与互操作。
 复现任何数据面结论都需要使用者自己的游戏副本。

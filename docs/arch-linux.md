@@ -38,7 +38,7 @@ python tools/fetch_gdk.py --out ../gdk          # 从 nuget.org 取官方 GDK �
 ```
 0.60 MB  xmem.dll
 0.76 MB  d3d12_xs.dll
-3.11 MB  xgameruntime.dll        ← 导出数 461，与本机 Windows 构建一致
+3.11 MB  xgameruntime.dll        ← 导出数 461，与本机 Windows 构建一致（构建时快照，随代码变化；当前 Windows 构建为 3.32 MB）
 ```
 
 ### 依赖极窄，这是关键

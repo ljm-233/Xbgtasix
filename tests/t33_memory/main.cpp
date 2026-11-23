@@ -81,15 +81,33 @@ int main() {
                 break;
             }
         }
-        ok(intact, "延迟 double free 之后，B 的内容没被动过",
-           same_addr ? "（同址，真正的 ABA 场景）" : "（不同址）");
+        // 以前这条把"同址"和"不同址"两种情况都当通过（detail 里补一句解释就完了），
+        // 而不同址时内容检查恒真 —— 等于没验。现在拆成两条各自可证伪的断言。
+        // (1) 无论实现是否复用地址，重复 free 都不许改写 B 的已有内容
+        ok(intact, "重复 free 之后 B 的前 64 字节仍然是 0xBB",
+           same_addr ? "（同址：真正的 ABA 场景）" : "（不同址：隔离区生效）");
 
-        // 统计上 B 仍然活着
+        // (2) 统计口径也必须证明 B 还活着：存活计数 = 起始 + 1（只有 B），
+        //     存活字节至少多出一次请求的 4096 字节。以前只写 >= base+1，
+        //     同址时"double free 把 B 一起释放"也能过。
         const Stats mid = stats();
-        ok(mid.AllocationCount >= base.AllocationCount + 1, "统计显示 B 仍然存活");
+        ok(mid.AllocationCount == base.AllocationCount + 1 &&
+               mid.TotalBytes >= base.TotalBytes + size,
+           "重复 free 之后统计仍把 B 算作存活（count=base+1、字节不回落）",
+           same_addr ? "同址" : "不同址");
 
         std::memset(b, 0xCC, size);   // 还能写
-        ok(true, "B 仍然可写");
+        // 以前是 ok(true)：写下去不代表真写进去了。读回来比对
+        unsigned char back[64];
+        std::memcpy(back, b, sizeof(back));
+        bool wrote = true;
+        for (unsigned char c : back) {
+            if (c != 0xCC) {
+                wrote = false;
+                break;
+            }
+        }
+        ok(wrote, "B 仍然可写（写入 0xCC 后读回一致）");
         XMemFree(b);
     }
 

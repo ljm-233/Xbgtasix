@@ -29,6 +29,17 @@ void ok(bool cond, const char* what, const char* detail = "") {
     }
 }
 
+// 当前会话有没有"可见桌面"（服务会话/无交互桌面时为 false）。
+// 用来区分：建窗口/建交换链失败是"环境不支持"，还是"我们的逻辑坏了"。
+bool has_interactive_desktop() {
+    const HWINSTA ws = GetProcessWindowStation();
+    if (!ws) return false;
+    USEROBJECTFLAGS uof{};
+    DWORD need = 0;
+    if (!GetUserObjectInformationA(ws, UOI_FLAGS, &uof, sizeof(uof), &need)) return false;
+    return (uof.dwFlags & WSF_VISIBLE) != 0;
+}
+
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
@@ -47,18 +58,31 @@ int main() {
 
     HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "xbgtasix", WS_OVERLAPPEDWINDOW,
                                 0, 0, 320, 240, nullptr, nullptr, wc.hInstance, nullptr);
-    ok(hwnd != nullptr, "CreateWindowEx（隐藏窗口，不 ShowWindow）");
-    if (!hwnd) {
-        xbgtasix::logf("[t31] 无法建窗口 -> SKIP（无交互桌面时正常）");
+    // 有交互桌面却建不出窗口 = 逻辑失败(1)；只有无交互桌面才允许 SKIP(2)
+    const bool desktop = has_interactive_desktop();
+    if (!hwnd && !desktop) {
+        xbgtasix::logf("[t31]   SKIP  CreateWindowEx（当前会话没有可见桌面）");
         return 2;
     }
+    ok(hwnd != nullptr, "CreateWindowEx（隐藏窗口，不 ShowWindow）");
+    if (!hwnd) return 1;
 
     // ---- 2) D3D12 设备 + 队列 ----
     ID3D12Device* dev = nullptr;
     HRESULT hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device,
                                    reinterpret_cast<void**>(&dev));
-    ok(SUCCEEDED(hr) && dev, "D3D12CreateDevice");
-    if (!dev) return 2;
+    // 以前是 `ok(...); if (!dev) return 2;` —— 自相矛盾：断言已经记了 FAIL，
+    // 退出码却是 SKIP。现在只有驱动明确回 DXGI_ERROR_UNSUPPORTED 才算环境问题。
+    if (hr == DXGI_ERROR_UNSUPPORTED) {
+        xbgtasix::logf("[t31]   SKIP  D3D12CreateDevice（驱动明确不支持 D3D12）");
+        return 2;
+    }
+    ok(dev != nullptr, "D3D12CreateDevice");
+    if (!dev) {
+        xbgtasix::logf("[t31] 本机有可用 GPU 却建不出设备 -> FAIL（不是环境问题）");
+        DestroyWindow(hwnd);
+        return 1;
+    }
 
     ID3D12CommandQueue* queue = nullptr;
     D3D12_COMMAND_QUEUE_DESC qd{};
@@ -90,6 +114,14 @@ int main() {
             xbgtasix::logf("[t31] CreateSwapChainForHwnd hr=0x%08lx", static_cast<unsigned long>(hr));
         }
     }
+    if (!swap) {
+        // 窗口和设备都建出来了，交换链却建不出来 = 逻辑/运行时失败（不是环境问题）
+        if (factory) factory->Release();
+        queue->Release();
+        dev->Release();
+        DestroyWindow(hwnd);
+        return 1;
+    }
 
     // ---- 4) back buffer 拿 RTV + Present ----
     if (swap) {
@@ -120,6 +152,10 @@ int main() {
         ok(alloc && list, "CommandAllocator + CommandList");
 
         int presented = 0;
+        // Present 前后的 back buffer 索引：以前只断言 idx < 2（常量检查，恒真）。
+        // 记录第一帧 Present 前后的索引，用它证明"帧真的推进了"。
+        UINT idx_before_present = 0;
+        UINT idx_after_present = 0;
         if (backbuffer && rtv_heap && alloc && list) {
             const UINT rtv_inc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
             D3D12_CPU_DESCRIPTOR_HANDLE rtv0 = rtv_heap->GetCPUDescriptorHandleForHeapStart();
@@ -175,11 +211,17 @@ int main() {
                 ID3D12CommandList* cl[] = {list};
                 queue->ExecuteCommandLists(1, cl);
 
+                if (frame == 0) idx_before_present = bi;
                 hr = swap->Present(1, 0);   // vsync
                 xbgtasix::logf("[t31] frame %d Present hr=0x%08lx", frame,
                                static_cast<unsigned long>(hr));
-                if (SUCCEEDED(hr)) ++presented;
-                else break;
+                if (SUCCEEDED(hr)) {
+                    ++presented;
+                    // Present 之后索引必须已经换到另一个 back buffer
+                    if (frame == 0 && swap3) idx_after_present = swap3->GetCurrentBackBufferIndex();
+                } else {
+                    break;
+                }
 
                 if (fence) {   // 这一帧做完再进下一帧
                     ++fv;
@@ -192,16 +234,19 @@ int main() {
             }
             if (fence) fence->Release();
             if (fev) CloseHandle(fev);
-            if (swap3) swap3->Release();
+            const bool have_swap3 = swap3 != nullptr;
+            if (swap3) swap3->Release();   // 先记下"有没有 swap3"，下面不许再用已释放的指针
 
             ok(presented >= 1, "Present 至少成功一次",
                presented >= 1 ? "" : "（无显示会话时会失败）");
 
-            // 帧序号应当推进（swap3 已在上面取过）
-            if (swap3) {
-                const UINT idx = swap3->GetCurrentBackBufferIndex();
-                ok(idx < 2, "GetCurrentBackBufferIndex 在范围内");
-                xbgtasix::logf("[t31] 当前 back buffer 索引 = %u", idx);
+            // 帧序号必须真的推进：比较 Present 前后（以前只查 idx < 2，那是常量检查）
+            if (have_swap3) {
+                ok(idx_after_present != idx_before_present,
+                   "Present 前后 back buffer 索引发生变化（帧真的推进了）",
+                   "");
+                xbgtasix::logf("[t31] back buffer 索引：Present 前 = %u，Present 后 = %u",
+                               idx_before_present, idx_after_present);
             }
         }
 

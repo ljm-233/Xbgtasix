@@ -152,13 +152,19 @@ int main() {
     DXGI_QUERY_VIDEO_MEMORY_INFO after_resident{};
     adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &after_resident);
     xbgtasix::logf("[t34] MakeResident 后 usage=%s", gb(after_resident.CurrentUsage).c_str());
-    ok(after_resident.CurrentUsage >= after_evict.CurrentUsage,
-       "MakeResident 之后 usage 回升或持平");
+    // 以前是 >=：MakeResident 什么都不做也能过（usage 持平就当成功）
+    ok(after_resident.CurrentUsage > after_evict.CurrentUsage,
+       "MakeResident 之后 usage 严格回升（不是只返回 S_OK）");
 
-    // ---- 4) Evict 不影响资源对象本身（CPU 侧仍可查询） ----
+    // ---- 4) Evict 不影响资源对象本身：单块进出显存的往返必须成功 ----
+    // 以前这里查 GetDesc().Width > 0 —— 那个字段恒大于 0，和 residency 毫无关系。
+    // 真正有意义的检查：单独 Evict 一块，再单独 MakeResident 回去。
     if (!evict.empty()) {
-        D3D12_RESOURCE_DESC desc = held[0]->GetDesc();
-        ok(desc.Width > 0, "被 Evict 的资源对象仍然可查询（没有被销毁）");
+        ID3D12Pageable* one = held[0];
+        const HRESULT e1 = dev->Evict(1, &one);
+        const HRESULT r1 = dev->MakeResident(1, &one);
+        ok(SUCCEEDED(e1) && SUCCEEDED(r1),
+           "单块 Evict -> MakeResident 往返成功（资源还能进出显存）");
     }
 
     // ---- 5) 释放后 usage 归位 ----

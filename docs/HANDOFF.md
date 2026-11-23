@@ -9,12 +9,12 @@
 
 | 项 | 值 |
 |---|---|
-| 提交 | 71 |
-| 测试 | **33 PASS / 1 SKIP / 0 FAIL**（34 项，约 12 秒） |
-| 导出面 | 461 = 265 手写 + 146 生成桩 + 50 个 GUID 数据 |
-| 文档 | 20 份 |
-| 代码 | 14,882 行 |
-| CI | 三个 job 全绿；`windows-build` 从 NuGet 拉官方 GDK，完整构建 + 全套测试（约 4 分钟） |
+| 提交 | 94 |
+| 测试 | **38 PASS / 1 SKIP / 0 FAIL**（39 步，约 20 秒） |
+| 导出面 | 461 = 268 手写 + 143 生成桩 + 50 个 GUID 数据 |
+| 文档 | 27 份 |
+| 代码 | 18,360 行（C++ / HLSL，按 `HEAD` 已提交内容统计） |
+| CI | 四个 job 全绿；`windows-build` 从 NuGet 拉官方 GDK，完整构建 + 全套 39 步测试（约 4 分钟） |
 | 干净克隆 | `git clone` → `./build.sh` → `./tools/run_suite.sh` 全部通过（已验证） |
 
 那个 SKIP 是 `t28_speech`：语音合成器创建/枚举正常，但本机会话没有音频输出，`Speak` 失败。
@@ -27,7 +27,7 @@
 - **图形**：D3D12 管线、mesh shader、DXR 1.1、bindless 98 槽、窗口交换链、`ResizeBuffers`
 - **内存**：XMem 64 KB 页语义、ABA 防护（隔离区）、泄漏可见
 - **显存**：预算查询、变化通知 + 降级、`Evict`/`MakeResident` 实测闭环
-- **异步/队列**：`XAsyncRun`、条件变量等待（54 µs）、waiter/monitor、复合队列 —— 家族桩清零
+- **异步/队列**：`XAsyncRun`、条件变量等待（约 53 µs）、waiter/monitor、复合队列 —— 家族桩清零
 - **平台**：包挂载、存档（目录式 + 容器式）、用户、UI 面板、串流/捕获/网络、语音、
   `XLaunchUri`（真 `ShellExecute`）、无障碍字幕
 - **启动链路**：`tools/launch.sh` 分类失败原因；`t30_fakegame` 排练整条启动序列
@@ -108,7 +108,7 @@ python tools/analyze_exe.py <exe>            # 10 秒：导入面 vs 我们的�
 
 ```bash
 ./build.sh                    # 90 秒
-./tools/run_suite.sh          # 34 项，12 秒
+./tools/run_suite.sh          # 39 步，约 20 秒
 ./tools/ci_build.sh           # CI 同款（无 GDK 也能验 xmem 子集）
 python tools/selftest_tools.py  # Python 工具自检
 python tools/check_docs.py      # 文档相对链接

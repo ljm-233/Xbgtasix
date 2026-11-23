@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -595,6 +596,47 @@ struct Gfx {
     }
 };
 
+// ---------------------------------------------------------------- 截图校验
+// 读回 --shot 写出的 BMP 做**像素级**断言。这个测试以前对画面零验证
+// （三条 ok(true)），只要没崩就是 PASS。所有期望颜色都写成字面量：
+// 它们是本文件上面布局里那些浮点色值按 UNORM 四舍五入的结果
+// （0.043*255≈11、0.09*255≈23、0.44*255≈112 ...），不从被测代码反算。
+struct Shot {
+    int w = 0, h = 0, off = 0;
+    std::vector<unsigned char> px;   // 文件里的行序（BMP 自下而上），每像素 BGRX
+
+    bool load(const char* path) {
+        FILE* f = fopen(path, "rb");
+        if (!f) return false;
+        fseek(f, 0, SEEK_END);
+        const long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        std::vector<unsigned char> all(n > 0 ? static_cast<size_t>(n) : 0);
+        const size_t got = all.empty() ? 0 : fread(all.data(), 1, all.size(), f);
+        fclose(f);
+        if (got < 54 || all[0] != 'B' || all[1] != 'M') return false;
+        memcpy(&off, &all[10], 4);
+        memcpy(&w, &all[18], 4);
+        memcpy(&h, &all[22], 4);
+        unsigned short bpp = 0;
+        memcpy(&bpp, &all[28], 2);
+        if (w <= 0 || h <= 0 || bpp != 32) return false;
+        const size_t need = static_cast<size_t>(off) + static_cast<size_t>(w) * h * 4;
+        if (got < need) return false;
+        px.assign(all.begin() + off, all.begin() + static_cast<long>(need));
+        return true;
+    }
+
+    // 屏幕坐标（左上原点）取样；BMP 是自下而上存的
+    void at(int x, int y, int& r, int& g, int& b) const {
+        const size_t i = (static_cast<size_t>(h - 1 - y) * static_cast<size_t>(w) +
+                          static_cast<size_t>(x)) * 4;
+        b = px[i + 0];
+        g = px[i + 1];
+        r = px[i + 2];
+    }
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -610,7 +652,10 @@ int main(int argc, char** argv) {
         xbgtasix::logf("[t38] D3D12 初始化失败 -> SKIP（无 GPU/无桌面）");
         return 2;
     }
-    ok(true, "D3D12 设备 + PSO + 根签名");
+    // 以前是 ok(true, ...)：只要没走上面的 return 就无条件 PASS。
+    // 现在检查 init() 真的把三件关键对象建出来了。
+    ok(gfx.dev != nullptr && gfx.root != nullptr && gfx.pso != nullptr,
+       "D3D12 设备 + PSO + 根签名（对象非空）");
 
     // ---- 布局：Xbox 风格 ----
     Batch batch;
@@ -664,18 +709,105 @@ int main(int argc, char** argv) {
                0.45f, 0.50f, 0.58f, 1);
 
     gfx.upload_atlas(atlas.bits);
-    ok(true, "文本图集已上传 GPU");
+    // upload_atlas() 是 void，以前直接 ok(true, "文本图集已上传 GPU")。
+    // 现在检查两件可观测的事：GPU 纹理被建出来；CPU 图集里确实有字形像素
+    // （GDI 画字失败时整张图集是全黑，除 (0,0) 那个保留的白色像素）。
+    {
+        size_t nonzero = 0;
+        if (atlas.bits) {
+            const unsigned* apx = static_cast<const unsigned*>(atlas.bits);
+            for (UINT i = 0; i < kAtlas * kAtlas; ++i) {
+                if ((apx[i] >> 24) != 0) ++nonzero;   // alpha != 0
+            }
+        }
+        ok(gfx.atlas_tex != nullptr && gfx.atlas_srv_written,
+           "文本图集已上传 GPU（纹理资源 + SRV 就绪）");
+        ok(nonzero > 1000, "图集里确实画进了字形像素（alpha != 0 的像素 > 1000）", "");
+    }
     gfx.upload_batch(batch);
     ok(batch.verts.size() > 0, "UI 顶点批次已生成", "");
     xbgtasix::logf("[t38] 顶点 %zu 个，三角形 %zu 个", batch.verts.size(), batch.idx.size() / 3);
 
+    // render() 也是 void：以前无条件 ok(true)。现在看 fence 是否真的推进
+    // （推进 = 命令列表被提交并且 wait_gpu 等到了 GPU 完成）。
+    const UINT64 fence_before = gfx.fence_value;
     gfx.render(batch);
-    ok(true, "渲染完成（离屏 RT）");
+    ok(gfx.fence_value > fence_before && gfx.offscreen != nullptr,
+       "渲染完成（离屏 RT 就绪，命令已提交并等到 GPU fence）");
 
-    if (shot_path) {
-        const bool saved = gfx.save_bmp(shot_path);
-        ok(saved, "截图写出", shot_path);
+    // ---- 像素级校验 ----
+    // 没有 --shot 时也写一份临时文件来做同样的校验，否则手动跑就完全没有画面证据。
+    // （run_suite.sh 会传 --shot suite/xboxui.bmp）
+    char auto_shot[] = "xboxui_autocheck.bmp";
+    const bool auto_shot_used = (shot_path == nullptr);
+    if (auto_shot_used) shot_path = auto_shot;
+
+    const bool saved = gfx.save_bmp(shot_path);
+    ok(saved, "截图写出", shot_path);
+    if (saved) {
         xbgtasix::logf("[t38] 截图: %s", shot_path);
+        Shot shot;
+        const bool loaded = shot.load(shot_path);
+        ok(loaded, "截图能读回（BMP 32bpp）", shot_path);
+        if (loaded) {
+            ok(shot.w == 1280 && shot.h == 720, "截图尺寸 1280x720");
+
+            // 1) 顶部品牌条（0.043,0.09,0.054 -> 11,23,14）：G 必须高于 R 与 B
+            {
+                int r = 0, g = 0, b = 0;
+                shot.at(1000, 30, r, g, b);
+                char d[64];
+                _snprintf(d, sizeof(d), "(%d,%d,%d)", r, g, b);
+                ok(g > r + 8 && g > b + 8, "顶部品牌条偏绿（G > R 且 G > B）", d);
+            }
+            // 2) 品牌条下沿高亮线（0.41,0.80,0.13 -> 105,204,33）
+            {
+                int r = 0, g = 0, b = 0;
+                shot.at(1000, 71, r, g, b);
+                char d[64];
+                _snprintf(d, sizeof(d), "(%d,%d,%d)", r, g, b);
+                ok(g > 150 && g > r && g > b, "品牌条下沿是亮绿线（G>150 且最高）", d);
+            }
+            // 3) 左栏选中项（0.063,0.44,0.075 -> 16,112,19）：深绿，G 明显高于 R/B
+            {
+                int r = 0, g = 0, b = 0;
+                shot.at(40, 240, r, g, b);
+                char d[64];
+                _snprintf(d, sizeof(d), "(%d,%d,%d)", r, g, b);
+                ok(g > r + 60 && g > b + 60, "左栏选中项是深绿（G 比 R/B 高 60 以上）", d);
+            }
+            // 4) 卡片区（0.09,0.13,0.18 -> 23,33,46）必须明显不同于同高度的背景（11,14,20）
+            {
+                int br = 0, bg2 = 0, bb = 0, cr = 0, cg = 0, cb = 0;
+                shot.at(1250, 330, br, bg2, bb);   // 卡片右侧的纯背景
+                shot.at(600, 330, cr, cg, cb);     // 第一张卡片内部
+                const int diff = std::abs(cr - br) + std::abs(cg - bg2) + std::abs(cb - bb);
+                char d[96];
+                _snprintf(d, sizeof(d), "卡片(%d,%d,%d) 背景(%d,%d,%d) 差和=%d",
+                          cr, cg, cb, br, bg2, bb, diff);
+                ok(diff >= 20, "卡片区颜色明显不同于背景（逐通道差之和 >= 20）", d);
+            }
+            // 5) 画面不能只是"清屏色 + 几条线"：非背景像素必须超过 40%。
+            //    背景只有两种：整体 (11,14,20) 与顶部 240 行的 (15,23,33)。
+            {
+                size_t nonbg = 0;
+                for (int y = 0; y < shot.h; ++y) {
+                    for (int x = 0; x < shot.w; ++x) {
+                        int r = 0, g = 0, b = 0;
+                        shot.at(x, y, r, g, b);
+                        const int d0 = std::abs(r - 11) + std::abs(g - 14) + std::abs(b - 20);
+                        const int d1 = std::abs(r - 15) + std::abs(g - 23) + std::abs(b - 33);
+                        if (d0 > 6 && d1 > 6) ++nonbg;
+                    }
+                }
+                const double ratio = 100.0 * static_cast<double>(nonbg) /
+                                     (static_cast<double>(shot.w) * static_cast<double>(shot.h));
+                char d[64];
+                _snprintf(d, sizeof(d), "%.1f%%", ratio);
+                ok(ratio > 40.0, "非背景像素占比 > 40%（画面真的有内容）", d);
+            }
+        }
+        if (auto_shot_used) remove(auto_shot);
     }
 
     xbgtasix::logf("[t38] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");

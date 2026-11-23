@@ -61,33 +61,46 @@ jobs:
           python tools/fetch_gdk.py --out build/gdk
 
       - name: 检测 GDK 是否可用
-        id: gdk
         shell: bash
         run: |
+          # 只负责把 GDK_INC 传给后面的步骤，不做"降级"判断：
+          # 拿不到 GDK 时由 STRICT=1 的 ci_build.sh 判失败（以前这里算了 have 却没人消费，
+          # 于是缺 GDK 的构建照样绿）。
           if [ -f "build/gdk/include_clean/XTaskQueue.h" ] && [ -f "build/gdk/lib/xgameruntime.lib" ]; then
-            echo "have=1" >> "$GITHUB_OUTPUT"
             echo "GDK_INC=build/gdk/include_clean" >> "$GITHUB_ENV"
+            echo "HAVE_GDK=1" >> "$GITHUB_ENV"
+            echo "GDK 可用：build/gdk/include_clean"
           else
-            echo "have=0" >> "$GITHUB_OUTPUT"
+            echo "HAVE_GDK=0" >> "$GITHUB_ENV"
+            echo "::error::未找到 GDK（build/gdk/include_clean/XTaskQueue.h 或 build/gdk/lib/xgameruntime.lib 缺失）"
+            echo "windows-build 不再静默降级为「部分覆盖」：下一步 STRICT=1 会直接失败。"
+            echo "如何提供 GDK：① 让 '从 NuGet 拉官方 GDK' 步骤成功（tools/fetch_gdk.py）；"
+            echo "              ② 或把 GDK 解到仓库旁 ../gdk/include_clean；"
+            echo "              ③ 或设 GDK_INC 指向 include_clean 目录。"
           fi
 
-      - name: 构建 + 测试（tools/ci_build.sh）
+      - name: 构建 + 测试（tools/ci_build.sh，STRICT=1）
         shell: bash
-        run: bash ./tools/ci_build.sh
+        run: STRICT=1 bash ./tools/ci_build.sh
 
       - name: 覆盖率说明
+        if: always()
         shell: bash
         run: |
+          # 测试步数从 tools/run_suite.sh 现数（run_one + run_py 的调用行），别再写死"32 项"
+          SUITE_STEPS=$(grep -cE '^[[:space:]]*run_(one|py)[[:space:]]' tools/run_suite.sh 2>/dev/null || true)
+          SUITE_STEPS=${SUITE_STEPS:-0}
           {
             echo "### windows-build 覆盖范围"
             echo ""
             if [ -f "build/gdk/include_clean/XTaskQueue.h" ]; then   # 用文件判断，别用 step output
-              echo "- ✅ GDK 可用：三个 shim + 全套 32 项测试"
+              echo "- ✅ GDK 可用：三个 shim + 全套 ${SUITE_STEPS} 步测试（STRICT=1，缺 GDK 会让 job 失败）"
             else
-              echo "- ⚠️ 未找到 GDK：跑了 xmem.dll + t3_xmem（93 条断言）+ 工具自检 + 文档链接"
-              echo "- 微软 GDK 头/库不入库，所以公开 CI 上默认**没有**编译 xgameruntime/"
-              echo "  d3d12_xs，也**没有**跑渲染类测试。这不是完整通过。"
-              echo "- 要覆盖完整层：把 GDK 解到仓库旁 \`../gdk/\`，或设 \`GDK_INC\`"
+              echo "- ❌ 未找到 GDK：本 job **按失败处理**（STRICT=1），不再当作「部分覆盖通过」"
+              echo "- 微软 GDK 头/库不入库，所以本 job 里没有编译 xgameruntime/、d3d12_xs，也没跑渲染类测试。"
+              echo "- 要覆盖完整层：让 \`python tools/fetch_gdk.py --out build/gdk\` 成功，"
+              echo "  或把 GDK 解到仓库旁 \`../gdk/\`，或设 \`GDK_INC\` 指向 include_clean。"
+              echo "- 只想到此为止地跑第 1 层（xmem.dll + t3_xmem），本地用 \`bash ./tools/ci_build.sh\`（不带 STRICT）。"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

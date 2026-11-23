@@ -67,6 +67,16 @@ int pump_messages() {
 
 void CALLBACK on_task(void*, bool) { g_par_runs.fetch_add(1); }
 
+// 当前会话有没有"可见桌面"。用来区分环境不支持（服务会话）和逻辑失败。
+bool has_interactive_desktop() {
+    const HWINSTA ws = GetProcessWindowStation();
+    if (!ws) return false;
+    USEROBJECTFLAGS uof{};
+    DWORD need = 0;
+    if (!GetUserObjectInformationA(ws, UOI_FLAGS, &uof, sizeof(uof), &need)) return false;
+    return (uof.dwFlags & WSF_VISIBLE) != 0;
+}
+
 }  // namespace
 
 int main() {
@@ -82,8 +92,14 @@ int main() {
 
     g_hwnd = CreateWindowExA(0, wc.lpszClassName, "xbgtasix t32", WS_OVERLAPPEDWINDOW,
                              0, 0, 320, 240, nullptr, nullptr, wc.hInstance, nullptr);
+    // 有可见桌面却建不出窗口 = 逻辑失败(1)；只有无交互桌面才允许 SKIP(2)
+    const bool desktop = has_interactive_desktop();
+    if (!g_hwnd && !desktop) {
+        xbgtasix::logf("[t32]   SKIP  CreateWindowEx（当前会话没有可见桌面）");
+        return 2;
+    }
     ok(g_hwnd != nullptr, "CreateWindowEx");
-    if (!g_hwnd) return 2;
+    if (!g_hwnd) return 1;
 
     // 用 SetWindowPos 触发真实的 WM_SIZE（不依赖用户拖动）
     SetWindowPos(g_hwnd, nullptr, 0, 0, 480, 360, SWP_NOZORDER | SWP_NOMOVE);
@@ -94,10 +110,21 @@ int main() {
 
     // ---- 交换链 + ResizeBuffers ----
     ID3D12Device* dev = nullptr;
-    D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device,
-                      reinterpret_cast<void**>(&dev));
+    const HRESULT dev_hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device,
+                                             reinterpret_cast<void**>(&dev));
+    // 以前 `ok(dev != nullptr); if (!dev) return 2;` —— 断言记了 FAIL，退出码却是 SKIP。
+    // 只有驱动明确回 DXGI_ERROR_UNSUPPORTED 才是环境问题。
+    if (dev_hr == DXGI_ERROR_UNSUPPORTED) {
+        xbgtasix::logf("[t32]   SKIP  D3D12CreateDevice（驱动明确不支持 D3D12）");
+        DestroyWindow(g_hwnd);
+        return 2;
+    }
     ok(dev != nullptr, "D3D12CreateDevice");
-    if (!dev) return 2;
+    if (!dev) {
+        xbgtasix::logf("[t32] 窗口建出来了却建不出设备 -> FAIL（不是环境问题）");
+        DestroyWindow(g_hwnd);
+        return 1;
+    }
 
     ID3D12CommandQueue* queue = nullptr;
     D3D12_COMMAND_QUEUE_DESC qd{};
@@ -120,7 +147,14 @@ int main() {
         factory->CreateSwapChainForHwnd(queue, g_hwnd, &sd, nullptr, nullptr, &swap);
     }
     ok(swap != nullptr, "CreateSwapChainForHwnd");
-    if (!swap) return 2;
+    if (!swap) {
+        // 窗口 + 设备都在，交换链建不出来就是逻辑/运行时失败（不是环境问题）
+        if (factory) factory->Release();
+        if (queue) queue->Release();
+        dev->Release();
+        DestroyWindow(g_hwnd);
+        return 1;
+    }
 
     // 先把 back buffer 全放掉，否则 ResizeBuffers 会失败（BufferCount 不匹配）
     // 注意：这里同时把 heap 指针置空，避免调用方再释放一次（双重 Release 会崩）

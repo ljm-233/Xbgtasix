@@ -72,23 +72,22 @@ int main() {
     // =====================================================================
     HMODULE xi = LoadLibraryA("XInput1_4.dll");
     if (!xi) xi = LoadLibraryA("XInput9_1_0.dll");
-    if (!xi) {
-        // 无 XInput 的环境（精简 Windows Server/容器）不算我们的错
-        skip("系统没有 XInput1_4.dll / XInput9_1_0.dll");
-    } else {
-        ok(true, "系统存在 XInput DLL");
-    }
+    // 旧写法是先 skip() 再 ok(true)——DLL 存在与否根本没验。
+    // XInput 是 Windows 自带组件：缺了说明"手柄这条链"在这台机器上不存在，
+    // 这是玩家能感知的事实，必须记 FAIL（只把"没有手柄可插"当环境问题）。
+    ok(xi != nullptr, "系统存在 XInput DLL（XInput1_4 / XInput9_1_0）");
     if (xi) {
         auto get_state = reinterpret_cast<PFN_XInputGetState>(GetProcAddress(xi, "XInputGetState"));
-        if (!get_state) {
-            skip("XInput DLL 里没有 XInputGetState");
-        }
+        // 有 DLL 却没有导出 = 这条链断了（不是环境问题）
+        ok(get_state != nullptr, "XInput DLL 导出 XInputGetState");
         const int n = get_state ? xinput_probe(get_state) : 0;
         xbgtasix::logf("[t35] XInput 找到 %d 个手柄", n);
         if (n == 0) {
+            // 没插手柄是宿主环境，不是兼容层的错
             skip("XInput 没有检测到手柄（未连接或已被其他进程独占）");
         } else {
-            ok(true, "XInput 能读到手柄状态");
+            // 期望值是字面量：XInput 只有 4 个槽位（XUSER_MAX_COUNT），多于 4 说明计数错了
+            ok(n > 0 && n <= 4, "XInput 读到的槽位数在 1..4 之间", "");
         }
         FreeLibrary(xi);
     }
@@ -97,13 +96,9 @@ int main() {
     // 二、GameInput（GDK 现代标题用的）
     // =====================================================================
     HMODULE gi = LoadLibraryA("GameInput.dll");
-    if (!gi) {
-        // 注意：GitHub 的 Windows Server runner 默认**没有** GameInput.dll，
-        // 所以这里是 SKIP 而不是 FAIL——它反映的是宿主环境，不是兼容层
-        skip("系统没有 GameInput.dll（精简 Windows Server 常见）");
-    } else {
-        ok(true, "系统存在 GameInput.dll（GDK 标题依赖它）");
-    }
+    // 同 XInput：以前是 ok(true)，等于没验。GameInput.dll 是系统组件，
+    // 缺了就是"现代 GDK 标题拿不到手柄"，必须 FAIL（不是 skip）。
+    ok(gi != nullptr, "系统存在 GameInput.dll（GDK 标题依赖它）");
 
     IGameInput* gameInput = nullptr;
     // 关键：不能静态链接 GameInput.lib —— 没有这个 DLL 的机器上进程**根本起不来**
@@ -118,12 +113,11 @@ int main() {
     }
     if (create_fn) {
         const HRESULT hr = create_fn(&gameInput);
-        if (SUCCEEDED(hr) && gameInput) {
-            ok(true, "GameInputCreate 成功");
-        } else {
-            xbgtasix::logf("[t35] GameInputCreate hr=0x%08lx（版本差异）-> SKIP",
+        // 以前是 ok(true)；现在断言"返回 S_OK 且给出非空接口"，失败要记账
+        ok(SUCCEEDED(hr) && gameInput != nullptr, "GameInputCreate 成功并给出接口");
+        if (!SUCCEEDED(hr) || !gameInput) {
+            xbgtasix::logf("[t35] GameInputCreate hr=0x%08lx（版本差异）",
                            static_cast<unsigned long>(hr));
-            skip("GameInputCreate 失败（系统 GameInput.dll 与 GDK 头版本不一致时会发生）");
             gi = nullptr;
         }
     }
@@ -173,9 +167,12 @@ int main() {
         if (SUCCEEDED(cbr)) {
             xbgtasix::logf("[t35] 枚举到手柄设备 %d 个", ctx.count);
             if (ctx.count == 0) {
-                skip("GameInput 没枚举到手柄");
+                // 阻塞枚举一个都没回调：可能是没有设备（环境），也可能是回调没被调（逻辑）。
+                // 以前这里 ok(true) 直接记 PASS，等于把两种情况都放过了。
+                skip("GameInput 没枚举到手柄（无设备可验证）");
             } else {
-                ok(true, "GameInput 枚举到至少一个手柄");
+                // 期望值字面量：枚举到的设备数必须是正数，且回调真的被调用过
+                ok(ctx.count >= 1, "GameInput 枚举到至少一个手柄（回调真的被调用）", "");
             }
             gameInput->UnregisterCallback(token, 1000000);   // (token, 超时微秒)
         }
@@ -219,6 +216,10 @@ int main() {
     }
 
     xbgtasix::logf("[t35] done failures=%d skips=%d -> %s", g_fail, g_skips,
-                   g_fail ? "FAIL" : (g_skips ? "PASS（有 SKIP）" : "PASS"));
-    return g_fail ? 1 : 0;
+                   g_fail ? "FAIL" : (g_skips ? "SKIP（部分项未验证）" : "PASS"));
+    // skip() 只加计数不改退出码，以前"0 个手柄 / 无 GameInput.dll"也会以 0 退出，
+    // 在 run_suite 里显示成 PASS。现在把 SKIP 明确映射成 2，PASS 必须真的全验过。
+    if (g_fail) return 1;
+    if (g_skips) return 2;
+    return 0;
 }

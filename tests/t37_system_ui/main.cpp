@@ -36,6 +36,19 @@ struct Blk {
     void (*callback)(Blk*);
     unsigned internal[sizeof(void*) * 4 / sizeof(unsigned)];
 };
+
+// 当前会话有没有"可见桌面"。这是区分"逻辑坏了"和"环境不支持"的唯一依据：
+//   - 有桌面：系统侧 UI 必须真的开窗（异步必须挂起），不挂起就是 FAIL
+//   - 无桌面（服务会话）：允许降级成立即完成，那是环境属性 -> SKIP
+bool has_interactive_desktop() {
+    const HWINSTA ws = GetProcessWindowStation();
+    if (!ws) return false;
+    USEROBJECTFLAGS uof{};
+    DWORD need = 0;
+    if (!GetUserObjectInformationA(ws, UOI_FLAGS, &uof, sizeof(uof), &need)) return false;
+    return (uof.dwFlags & WSF_VISIBLE) != 0;
+}
+
 }  // namespace
 
 extern "C" {
@@ -67,14 +80,17 @@ int main() {
 
         // 关键：不能立刻完成，否则说明根本没开窗，还是"假装画了"
         const HRESULT st0 = XAsyncGetStatus(&b, false);
-        if (st0 != E_PENDING) {
-            // 无交互桌面（CI 的服务会话）时会降级成立即完成 —— 那是环境属性，
-            // 记为 SKIP 而不是 FAIL，否则日志会误导成"系统侧 UI 坏了"
-            xbgtasix::logf("[t37] 系统侧 UI 在当前会话不可用（降级成立即完成）-> SKIP");
-            xbgtasix::logf("[t37] 提示：需要交互桌面；CI 上这是预期结果");
+        const bool desktop = has_interactive_desktop();
+        if (st0 != E_PENDING && !desktop) {
+            // 无交互桌面（CI 的服务会话）时会降级成立即完成 —— 那是环境属性，记 SKIP
+            xbgtasix::logf("[t37] 系统侧 UI 在当前会话不可用（无可见桌面，降级成立即完成）-> SKIP");
             return 2;
         }
-        ok(true, "提交后异步挂起（证明真的交给窗口了）");
+        // 以前这里是 ok(true)：只要前面没 return，就无条件记 PASS，核心断言被吞掉了。
+        // 现在：有桌面却拿到非 E_PENDING，就是系统侧 UI 没接管 -> FAIL(1)
+        ok(st0 == E_PENDING, "提交后异步挂起（证明真的交给窗口了）",
+           st0 == E_PENDING ? "" : "有交互桌面却没有挂起 -> 系统侧 UI 没生效");
+        if (st0 != E_PENDING) return 1;
 
         // 窗口在后台线程跑，等它画完一帧并"被点击"
         bool done = false;

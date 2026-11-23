@@ -9,7 +9,7 @@
 ## 四条命令
 
 ```
-xbgtasix run    <exe|包目录> [--staging] [--stop] [--timeout 秒] [--dll-dir 目录] [--log 文件]
+xbgtasix run    <exe|包目录> [--dry-run] [--stop] [--timeout 秒] [--dll-dir 目录] [--log 文件]
 xbgtasix check  <exe> [--dll-dir 目录]
 xbgtasix verify <包目录>
 xbgtasix doctor
@@ -34,12 +34,18 @@ xbgtasix doctor
 | `0xC0000005` | `ACCESS_VIOLATION` | 看日志最后一行（常见是空指针解引用） |
 | `0xC000007B` | `BAD_IMAGE` | `check` 确认目标是不是合法 PE |
 
-## 两种放置方式
+## 放置方式：只有一种，但会先备份
 
-| 方式 | 命令 | 适用 |
+要跑起来，三个 DLL **必须**放在 exe 旁边——没有第二种办法（游戏按 exe 目录找依赖，
+用 junction 把包挂到别处，DLL 实际还是写进原包，这点已实测确认）。
+
+| 方式 | 命令 | 行为 |
 |---|---|---|
-| 直接放入（默认） | `run <包目录>` | 最可靠：DLL 和资源同目录，不会出现相对路径问题。会往原目录写 3 个 DLL |
-| staging | `run <包目录> --staging` | 用 junction 把整个游戏目录挂进临时目录再覆盖 DLL，原包不动。junction 不可用时自动回退 |
+| 直接放入（唯一方式） | `run <包目录>` | 往包目录写 3 个 DLL；**覆盖同名文件前先备份**为 `*.xbgtasix-backup` |
+| 只检查不写 | `run <包目录> --dry-run` | 预检 + 打印"将写入/备份/启动什么"，不写文件、不起进程 |
+
+> 曾经的 `--staging` 已删除：它用 junction 指向原包，所谓"临时目录"其实就是原包，
+> 备份与 DLL 都落在包里，"原包不动"的承诺不成立。现在传 `--staging` 会明确报错并指向 `--dry-run`。
 
 ## 实测输出（本机）
 

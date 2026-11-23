@@ -4,6 +4,11 @@
 # 返回码约定（和测试本身一致）：
 #   0 = PASS    2 = SKIP（本机不支持该能力，例如没有光追）    其它 = FAIL
 #
+# 判定门槛（2026-11 加严）：
+#   * 只有"退出码 0 且输出里有验证证据（见 has_evidence）"才记 PASS；
+#     退出码 0 但一条断言都没输出 -> 记 FAIL（防"跑过了 = 验过了"的假绿）。
+#   * SKIP 不是通过：汇总时会额外警告"有 N 项未验证"。
+#
 # 用法：
 #   ./tools/run_suite.sh                       # 全部
 #   XBGTASIX_ADAPTER=0 ./tools/run_suite.sh    # 强制核显跑
@@ -44,6 +49,17 @@ pass=0; skip=0; fail=0; total=0
 report="$BIN/suite/report.txt"
 : > "$report"
 
+# 判定门槛：退出码 0 **不再等于 PASS**。
+# 以前只看 exit code，于是"一条断言都没有"的测试（t29 就是长期这样绿的）
+# 打印"（无断言输出）"仍然记 PASS。现在要求输出里必须有"验证过的证据"：
+#   1) 测试自己 ok() 打的 PASS 字样
+#   2) t16（python 静态核对）的 "加载成功 N / 失败 0"
+#   3) t0 的 "smoke done with N failure(s)"（N 必须是 0）
+#   4) 老测试的 "N checks, 0 failures" / "failures=0"
+has_evidence() {
+  grep -qE 'PASS|加载成功 [0-9]+ / 失败 0|smoke done with 0 failure|checks, 0 failures|failures=0' <<< "$1"
+}
+
 run_one() {
   local id=$1; shift
   want "$id" || return 0
@@ -65,9 +81,15 @@ run_one() {
   out=$(cd "$BIN" && timeout 300 "./$@" 2>&1); rc=$?
   local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
   local key
-  key=$(echo "$out" | grep -oE 'PASS[^"]{0,40}|93 checks, 0 failures|failures=0 -> PASS|smoke done with 0 failure|非背景像素 [0-9.]+%|SKIP[^"]{0,30}' | tail -1)
+  key=$(echo "$out" | grep -oE 'PASS[^"]{0,40}|93 checks, 0 failures|failures=0 -> PASS|failures=0|smoke done with 0 failure[^"]{0,10}|非背景像素 [0-9.]+%|SKIP[^"]{0,30}' | tail -1)
   local verdict
-  if [ $rc -eq 0 ]; then verdict="PASS"; pass=$((pass + 1));
+  if [ $rc -eq 0 ]; then
+    if has_evidence "$out"; then
+      verdict="PASS"; pass=$((pass + 1));
+    else
+      # 退出码 0 但没有断言输出 = 假绿（"跑过"不等于"验过"）
+      verdict="FAIL"; fail=$((fail + 1)); key="无断言输出 -> 判 FAIL（假绿）"
+    fi
   elif [ $rc -eq 2 ]; then verdict="SKIP"; skip=$((skip + 1));
   else verdict="FAIL"; fail=$((fail + 1)); fi
   printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$1" "$verdict" "$ms" "${key:-（无断言输出）}"
@@ -84,7 +106,12 @@ run_py() {
   local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
   local key verdict
   key=$(echo "$out" | grep -oE 'PASS（无缺失）|加载成功 [0-9]+ / 失败 [0-9]+|FAIL[^"]{0,30}' | tail -1)
-  if [ $rc -eq 0 ]; then verdict="PASS"; pass=$((pass + 1));
+  if [ $rc -eq 0 ]; then
+    if has_evidence "$out"; then
+      verdict="PASS"; pass=$((pass + 1));
+    else
+      verdict="FAIL"; fail=$((fail + 1)); key="无断言输出 -> 判 FAIL（假绿）"
+    fi
   elif [ $rc -eq 2 ]; then verdict="SKIP"; skip=$((skip + 1));
   else verdict="FAIL"; fail=$((fail + 1)); fi
   printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$script" "$verdict" "$ms" "${key:-（无断言输出）}"
@@ -150,5 +177,10 @@ if [ $total -eq 0 ]; then
 fi
 echo "== 汇总: $pass PASS / $skip SKIP / $fail FAIL（共 $total）"
 echo "   报告: $report"
+if [ $skip -gt 0 ]; then
+  # SKIP 不是通过：它意味着这套测试里有 N 项"这次没有验证"。
+  # 以前没有这句警告，SKIP 混在绿油油的报表里没人注意。
+  echo "!! 警告: 有 $skip 项未验证（SKIP 只能说明本机不支持，不代表通过；见上面 SKIP 行）" >&2
+fi
 [ $fail -eq 0 ] || exit 1
 exit 0

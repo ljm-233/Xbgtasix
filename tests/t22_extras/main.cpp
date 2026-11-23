@@ -80,8 +80,21 @@ int main(int argc, char** argv) {
     ok(SUCCEEDED(XPackageGetUserLocale(sizeof(locale), locale)) && locale[0] != 0,
        "GetUserLocale 填了非空值", locale);
 
-    unsigned char stats[64] = {0xFF};
-    ok(SUCCEEDED(XPackageGetWriteStats(stats)), "GetWriteStats 返回 S_OK");
+    // XPackageWriteStats 的真实布局（XPackage.h:98-104）：4 个 uint64。
+    // 以前传 unsigned char[64] 灌 0xFF 之后**从不读**，等于没验"结构体真的被填"。
+    struct WriteStats {
+        unsigned long long interval;
+        unsigned long long budget;
+        unsigned long long elapsed;
+        unsigned long long bytesWritten;
+    };
+    WriteStats ws{};
+    std::memset(&ws, 0xFF, sizeof(ws));
+    ok(SUCCEEDED(XPackageGetWriteStats(&ws)), "GetWriteStats 返回 S_OK");
+    // 期望值都是字面量（约定见实现：限速窗口 1000ms、不设上限 0、不做限速所以计数为 0）
+    ok(ws.interval == 1000, "结构体被真正填写：interval == 1000ms（不是 0xFF 残值）");
+    ok(ws.budget == 0 && ws.elapsed == 0 && ws.bytesWritten == 0,
+       "结构体被真正填写：budget / elapsed / bytesWritten 都是 0");
 
     // ---- 2) chunk 枚举：必须真的回调 ----
     const HRESULT hr = XPackageEnumerateChunkAvailability("*", 0 /*selectorType*/,
@@ -97,13 +110,23 @@ int main(int argc, char** argv) {
     ok(SUCCEEDED(XPackageCreateInstallationMonitor("*", 0, nullptr, 1000, nullptr, &monitor)) && monitor,
        "CreateInstallationMonitor 给出非空句柄");
     if (monitor) {
-        unsigned char progress[64];
-        std::memset(progress, 0xCC, sizeof(progress));
-        XPackageGetInstallationProgress(monitor, progress);   // void，无错误通道
-        // 结构体第一个字段是 bool completed：必须被写成 true（不是剩下的 0xCC）
-        ok(progress[0] == 1 || progress[0] == 0, "GetInstallationProgress 写了结构体（非残值 0xCC）",
-           "");
-        ok(progress[0] != 0xCCu, "结构体首字节已被覆盖");
+        // 结构体布局逐字对照 XPackage.h:63-70：三个 uint64 之后才是 launchable/completed。
+        // 旧写法往 unsigned char[64] 里塞 0xCC 再断言 progress[0] == 1 || == 0，
+        // 读到的其实是 totalBytes 的低字节，跟 completed 一点关系都没有（所以恒真）。
+        struct InstallationProgress {
+            unsigned long long totalBytes;
+            unsigned long long installedBytes;
+            unsigned long long launchBytes;
+            bool launchable;
+            bool completed;
+        };
+        InstallationProgress progress;
+        std::memset(&progress, 0xCC, sizeof(progress));
+        XPackageGetInstallationProgress(monitor, &progress);   // void，无错误通道
+        // 注释一直说 completed 必须是 true，就断言 true（以前还允许 0）
+        ok(progress.completed == true, "GetInstallationProgress 把 completed 填成 true（非 0xCC 残值）");
+        ok(progress.totalBytes == 0 && progress.installedBytes == 0 && progress.launchBytes == 0,
+           "壳实现不虚报安装字节数（三项都是 0）");
         ok(XPackageUpdateInstallationMonitor(monitor), "UpdateInstallationMonitor 返回 true");
         XPackageCloseInstallationMonitorHandle(monitor);
         ok(true, "CloseInstallationMonitorHandle 未崩溃");
@@ -122,6 +145,9 @@ int main(int argc, char** argv) {
                        static_cast<unsigned long>(sh), change, buf);
         ok(SUCCEEDED(sh), "TextEntryGetState 成功");
         ok(change == 0, "changeType == None(0)");
+        // 初值必须能读回来：Open 时传的 initialText 是 "abc"（字面量），
+        // 以前只断言 sh 成功，缓冲区里是空串也照样 PASS。
+        ok(std::strcmp(buf, "abc") == 0, "GetState 读回初值 \"abc\"", buf);
         XGameUiTextEntryClose(entry);
         ok(true, "TextEntryClose 未崩溃");
     }

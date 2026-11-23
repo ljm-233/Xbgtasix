@@ -349,8 +349,15 @@ int main(int argc, char** argv) {
 
     const HRESULT trav1 = XGameSaveDeleteContainer(provider, "..");
     const HRESULT trav2 = XGameSaveDeleteContainer(provider, "..\\..\\..\\evil");
-    ok(trav1 == E_GS_INVALID_CONTAINER_NAME || SUCCEEDED(trav1), "容器名 \"..\" 被挡住");
-    ok(trav2 == E_GS_INVALID_CONTAINER_NAME || SUCCEEDED(trav2), "容器名含分隔符被挡住");
+    // 以前写成 `== E_GS_INVALID_CONTAINER_NAME || SUCCEEDED(trav)` —— 成功恰恰是漏洞：
+    // 实现把 ".." sanitize 成 "default" 后当合法名删掉了（本机实测日志：
+    // "[save2] DeleteContainer(..)：目录本就不存在" -> S_OK）。只有错误码才可接受。
+    ok(trav1 == E_GS_INVALID_CONTAINER_NAME,
+       "容器名 \"..\" 被拒绝（E_GS_INVALID_CONTAINER_NAME，不接受 S_OK）",
+       trav1 == E_GS_INVALID_CONTAINER_NAME ? "" : "实现把它当合法名接受了");
+    ok(trav2 == E_GS_INVALID_CONTAINER_NAME,
+       "容器名含分隔符被拒绝（E_GS_INVALID_CONTAINER_NAME）",
+       trav2 == E_GS_INVALID_CONTAINER_NAME ? "" : "实现把它当合法名接受了");
     ok(file_exists(cfg_ns + "\\keep_me"), "穿越尝试后兄弟容器仍在");
     ok(file_exists(cfg_ns), "provider 命名空间仍在（未发生路径穿越）");
     ok(file_exists(pls), "PLS 根目录仍在");

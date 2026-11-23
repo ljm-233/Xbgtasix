@@ -14,7 +14,9 @@
 #include <dxgi1_4.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -121,6 +123,38 @@ std::string read_text(const std::wstring& path, size_t limit = 8u << 20) {
     return out;
 }
 
+// 读文件**尾部**：要看的是"日志末尾"，从开头读到 8MB 只能看到刚开始的那点东西。
+std::string read_text_tail(const std::wstring& path, size_t limit = 2u << 20) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(h, &sz)) {
+        CloseHandle(h);
+        return {};
+    }
+    const long long total = sz.QuadPart;
+    const long long from =
+        total > static_cast<long long>(limit) ? total - static_cast<long long>(limit) : 0;
+    LARGE_INTEGER pos{};
+    pos.QuadPart = from;
+    if (!SetFilePointerEx(h, pos, nullptr, FILE_BEGIN)) {
+        CloseHandle(h);
+        return {};
+    }
+    std::string out(static_cast<size_t>(total - from), 0);
+    DWORD got = 0;
+    if (!out.empty()) ReadFile(h, out.data(), static_cast<DWORD>(out.size()), &got, nullptr);
+    CloseHandle(h);
+    out.resize(got);
+    // 起点大概率落在某一行中间：丢掉第一行残片，否则"日志末尾"会从半行开始
+    if (from > 0) {
+        const size_t nl = out.find('\n');
+        out.erase(0, nl == std::string::npos ? out.size() : nl + 1);
+    }
+    return out;
+}
+
 std::vector<std::string> split_lines(const std::string& text) {
     std::vector<std::string> lines;
     std::string cur;
@@ -152,7 +186,10 @@ std::wstring resolve_dll_dir(const std::wstring& explicit_dir) {
 struct VerifyResult {
     int listed = 0;
     int present = 0;
+    int unexpanded = 0;                     // 含通配符、静态展开不了的条目数
     std::vector<std::string> missing;
+    std::vector<std::string> invalid;       // 归一出包目录（../、绝对路径、盘符）的坏条目
+    std::vector<std::string> unexpanded_list;
     std::string layout_file;
 };
 
@@ -165,6 +202,48 @@ std::string attr_of(const std::string& tag, const char* name) {
     const size_t e = tag.find('"', b);
     if (e == std::string::npos) return {};
     return tag.substr(b, e - b);
+}
+
+// 一项目录信息对应的"包内相对路径"：DestinationPath + Include。
+// verify 和"从包里找 exe"必须用同一条规则，否则会出现一个说存在、一个说缺失。
+//
+// 关键：文件落在 DestinationPath 指定的子目录里（如 \data\ttdb\graphics\），
+// 不是包根目录。之前忽略这一项，把 68 个本来存在的文件误报成缺失。
+std::string dest_rel_of(const std::string& tag, const std::string& include) {
+    std::string dest = attr_of(tag, "DestinationPath");
+    for (auto& c : dest) {
+        if (c == '/') c = '\\';
+    }
+    while (!dest.empty() && (dest.front() == '\\' || dest.front() == '.')) {
+        if (dest.front() == '.') break;
+        dest.erase(dest.begin());
+    }
+    if (dest == ".") dest.clear();
+    if (!dest.empty() && dest.back() != '\\') dest += '\\';
+    return dest + include;
+}
+
+// 相对路径归一化后必须仍落在包目录之下。出现 .. / 绝对路径 / 盘符一律算非法条目：
+// 不能让一份坏清单把核对的视线引到包外面去。
+bool rel_inside(const std::wstring& dir, const std::string& rel, std::wstring* out_full) {
+    if (rel.empty()) return false;
+    if (rel.find(':') != std::string::npos) return false;   // C:\... 这类带盘符的绝对路径
+    if (rel.front() == '\\' || rel.front() == '/') return false;
+    const std::wstring wrel = to_wide(rel);
+    for (size_t i = 0; i <= wrel.size();) {
+        size_t e = wrel.find_first_of(L"\\/", i);
+        if (e == std::wstring::npos) e = wrel.size();
+        if (e - i == 2 && wrel.compare(i, 2, L"..") == 0) return false;
+        i = e + 1;
+    }
+    std::wstring root = abs_path(dir);
+    while (!root.empty() && (root.back() == L'\\' || root.back() == L'/')) root.pop_back();
+    const std::wstring full = abs_path(join(root, wrel));
+    if (root.empty() || full.size() <= root.size()) return false;
+    if (_wcsnicmp(full.c_str(), root.c_str(), root.size()) != 0) return false;
+    if (full[root.size()] != L'\\' && full[root.size()] != L'/') return false;
+    if (out_full) *out_full = full;
+    return true;
 }
 
 VerifyResult do_verify(const std::wstring& dir) {
@@ -194,6 +273,7 @@ VerifyResult do_verify(const std::wstring& dir) {
     r.layout_file = to_utf8(base_of(layout));
 
     const std::string text = read_text(layout);
+    std::vector<std::string> seen;   // 已计过的 rel（小写），用于去重
     size_t pos = 0;
     while ((pos = text.find("<FileGroup", pos)) != std::string::npos) {
         const size_t close = text.find("/>", pos);
@@ -202,24 +282,30 @@ VerifyResult do_verify(const std::wstring& dir) {
         pos = close + 2;
 
         const std::string include = attr_of(tag, "Include");
-        if (include.empty() || include.find('*') != std::string::npos) continue;
+        if (include.empty()) continue;
+        // 通配符条目静态展开不了：单独统计，既不能当"存在"糊过去，也不能静默跳过
+        if (include.find('*') != std::string::npos || include.find('?') != std::string::npos) {
+            ++r.unexpanded;
+            r.unexpanded_list.push_back(include);
+            continue;
+        }
 
         // 关键：文件落在 DestinationPath 指定的子目录里（如 \data\ttdb\graphics\），
-        // 不是包根目录。之前忽略这一项，把 68 个本来存在的文件误报成缺失。
-        std::string dest = attr_of(tag, "DestinationPath");
-        for (auto& c : dest) {
-            if (c == '/') c = '\\';
-        }
-        while (!dest.empty() && (dest.front() == '\\' || dest.front() == '.')) {
-            if (dest.front() == '.') break;
-            dest.erase(dest.begin());
-        }
-        if (dest == ".") dest.clear();
-        if (!dest.empty() && dest.back() != '\\') dest += '\\';
+        // 不是包根目录。拼接规则取自 dest_rel_of，与"从包里找 exe"共用同一套。
+        const std::string rel = dest_rel_of(tag, include);
 
-        const std::string rel = dest + include;
+        // 同一个 rel 在清单里重复出现只算一次
+        std::string low = rel;
+        for (auto& c : low) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+        if (std::find(seen.begin(), seen.end(), low) != seen.end()) continue;
+        seen.push_back(low);
+
         ++r.listed;
-        if (file_exists(join(dir, to_wide(rel)))) {
+        // 归一化后必须仍在包目录里：../ 与绝对路径是坏条目，点名计入失败
+        std::wstring full;
+        if (!rel_inside(dir, rel, &full)) {
+            r.invalid.push_back(rel);
+        } else if (file_exists(full)) {
             ++r.present;
         } else {
             r.missing.push_back(rel);
@@ -242,6 +328,21 @@ int cmd_verify(const std::wstring& dir) {
     say("清单文件：%s", r.layout_file.c_str());
     say("清单 %d 项，存在 %d，缺失 %d", r.listed, r.present,
         static_cast<int>(r.missing.size()));
+    if (r.unexpanded > 0) {
+        say("通配符条目 %d 条（未展开，未计入完整性）", r.unexpanded);
+        for (size_t i = 0; i < r.unexpanded_list.size() && i < 10; ++i) {
+            say("  ~ %s", r.unexpanded_list[i].c_str());
+        }
+        if (r.unexpanded_list.size() > 10) say("  ...（共 %zu 条）", r.unexpanded_list.size());
+    }
+    if (!r.invalid.empty()) {
+        say("");
+        say("非法条目 %d 条（含 .. 或绝对路径，归一化后跑出包目录）：",
+            static_cast<int>(r.invalid.size()));
+        for (size_t i = 0; i < r.invalid.size() && i < 30; ++i) {
+            say("  ! %s", r.invalid[i].c_str());
+        }
+    }
     if (!r.missing.empty()) {
         say("");
         say("缺失清单（最多列 30 个）：");
@@ -250,10 +351,50 @@ int cmd_verify(const std::wstring& dir) {
         }
         if (r.missing.size() > 30) say("  ...（共 %zu 个）", r.missing.size());
     }
-    return r.missing.empty() ? 0 : 1;
+    section("结论");
+    // 只有"一项不缺、没有坏条目、也没有展开不了的通配符"才能报 PASS：
+    // 不然"缺失 0"会变成一张空头保证。
+    if (r.missing.empty() && r.invalid.empty() && r.unexpanded == 0) {
+        say("PASS：清单里的 %d 项全部存在", r.listed);
+        return 0;
+    }
+    if (!r.missing.empty()) {
+        say("FAIL：缺 %d 个文件（见上面的缺失清单）", static_cast<int>(r.missing.size()));
+    }
+    if (!r.invalid.empty()) {
+        say("FAIL：%d 条清单条目非法（../ 或绝对路径），未计入完整性",
+            static_cast<int>(r.invalid.size()));
+    }
+    if (r.unexpanded > 0) {
+        say("FAIL：有 %d 条通配符条目未展开，未计入完整性——这批文件对不对得上要人工确认",
+            r.unexpanded);
+    }
+    return 1;
 }
 
 // ---------------------------------------------------------------- check
+// 探测一个导入模块能不能被解析（不是"我们提供的"，是"系统/包能不能找到"）。
+// 为什么必须真去探测：run 在 MISSING_DLL 时让用户来 check 看，所以 check 只数个数就报
+// PASS 等于把人送进死胡同。
+// 顺序：先在 exe 同目录找（游戏包里的 DLL 不会在系统目录），再交给系统搜索链。
+// LOAD_LIBRARY_AS_DATAFILE 只映射镜像、不跑 DllMain，不会把游戏 DLL 真的拉起来。
+bool module_resolvable(const std::string& module, const std::wstring& near_dir) {
+    const std::wstring name = to_wide(module);
+    if (name.empty()) return false;
+    wchar_t found[MAX_PATH] = {0};
+    const DWORD n = SearchPathW(near_dir.empty() ? nullptr : near_dir.c_str(), name.c_str(),
+                                nullptr, MAX_PATH, found, nullptr);
+    HMODULE h = nullptr;
+    if (n > 0 && n < MAX_PATH) {
+        h = LoadLibraryExW(found, nullptr, LOAD_LIBRARY_AS_DATAFILE);
+    } else {
+        h = LoadLibraryExW(name.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);
+    }
+    if (!h) return false;
+    FreeLibrary(h);
+    return true;
+}
+
 int cmd_check(const std::wstring& exe, const std::wstring& dll_dir_in) {
     const std::wstring dll_dir = resolve_dll_dir(dll_dir_in);
     section("导入面核对");
@@ -309,24 +450,40 @@ int cmd_check(const std::wstring& exe, const std::wstring& dll_dir_in) {
         total_missing += static_cast<int>(missing.size());
     }
 
-    section("其它导入模块（不需要我们提供）");
+    // 非 shim 模块：一个个探能不能解析（按 exe 同目录、再系统）
+    const std::wstring near_dir = dir_of(abs_path(exe));
+    std::vector<std::string> unresolved;
+    section("其它导入模块（不需要我们提供，但必须能找到）");
     for (const auto& imp : target.imports) {
-        if (our_exports.find(imp.module) == our_exports.end()) {
-            say("  %-24s %zu 个符号", imp.module.c_str(), imp.names.size());
-        }
+        if (our_exports.find(imp.module) != our_exports.end()) continue;
+        const bool ok = module_resolvable(imp.module, near_dir);
+        if (!ok) unresolved.push_back(imp.module);
+        say("  %-24s %zu 个符号  %s", imp.module.c_str(), imp.names.size(),
+            ok ? "可解析" : "!! 找不到");
     }
 
     section("结论");
-    if (total_missing == 0) {
-        say("PASS：我们提供的三个模块覆盖了它要的全部符号");
+    if (total_missing == 0 && unresolved.empty()) {
+        say("PASS：我们提供的三个模块覆盖了它要的全部符号，其它依赖模块也都找得到");
         return 0;
     }
-    say("FAIL：共缺 %d 个符号。先补这些，再谈跑起来", total_missing);
+    if (total_missing > 0) {
+        say("FAIL：我们提供的三个模块共缺 %d 个符号。先补这些，再谈跑起来", total_missing);
+    }
+    if (!unresolved.empty()) {
+        say("FAIL：我们提供的三个模块覆盖了 shim 部分，但另有 %d 个依赖模块找不到：",
+            static_cast<int>(unresolved.size()));
+        for (size_t i = 0; i < unresolved.size() && i < 30; ++i) {
+            say("  - %s", unresolved[i].c_str());
+        }
+        if (unresolved.size() > 30) say("  ...（共 %zu 个）", unresolved.size());
+        say("这些模块要跟 exe 放在同一个目录（或系统里装好），否则运行时会 MISSING_DLL。");
+    }
     return 1;
 }
 
 // ---------------------------------------------------------------- doctor
-int cmd_doctor() {
+int cmd_doctor(const std::wstring& dll_dir_in) {
     int critical = 0;
     section("环境自检");
 
@@ -392,14 +549,14 @@ int cmd_doctor() {
             have == 3 ? "齐全" : "游戏可能自带，缺了也不一定致命");
     }
 
-    // 5) 三个 shim
+    // 5) 三个 shim（--dll-dir 优先，其次程序同目录）
     {
-        const std::wstring d = self_dir();
+        const std::wstring d = resolve_dll_dir(dll_dir_in);
         int have = 0;
         for (const wchar_t* s : kShims) {
             if (file_exists(join(d, s))) ++have;
         }
-        say("  shim          %d/3 在本程序同目录（%s）", have, to_utf8(d).c_str());
+        say("  shim          %d/3 在 %s", have, to_utf8(d).c_str());
         if (have != 3) {
             say("                -> 先 build.sh，或用 --dll-dir 指定");
             ++critical;
@@ -446,7 +603,7 @@ int cmd_doctor() {
 
 // ---------------------------------------------------------------- run
 struct RunOptions {
-    bool staging = false;
+    bool dry_run = false;   // 只预检，不写任何文件、不启动进程
     bool stop_mode = false;
     int timeout_sec = 180;
     std::wstring dll_dir;
@@ -460,25 +617,42 @@ std::wstring find_exe_in_dir(const std::wstring& dir) {
     const std::wstring layout = join(dir, fd.cFileName);
     FindClose(h);
     const std::string text = read_text(layout, 4u << 20);
+
+    // 与 do_verify 同一条拼接规则（DestinationPath + Include）：包里的 exe 经常在子目录里，
+    // 之前只看 Include、直接当包根相对路径用，就永远找不到。
+    std::vector<std::wstring> cands;
     size_t pos = 0;
-    while ((pos = text.find("Include=\"", pos)) != std::string::npos) {
-        pos += 9;
-        const size_t end = text.find('"', pos);
-        if (end == std::string::npos) break;
-        std::string name = text.substr(pos, end - pos);
-        pos = end;
-        if (name.size() > 4) {
-            const std::string low = [&] {
-                std::string s = name;
-                for (auto& c : s) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-                return s;
-            }();
-            if (low.size() >= 4 && low.compare(low.size() - 4, 4, ".exe") == 0) {
-                return join(dir, to_wide(name));
-            }
+    while ((pos = text.find("<FileGroup", pos)) != std::string::npos) {
+        const size_t close = text.find("/>", pos);
+        if (close == std::string::npos) break;
+        const std::string tag = text.substr(pos, close - pos + 2);
+        pos = close + 2;
+
+        const std::string include = attr_of(tag, "Include");
+        if (include.empty()) continue;
+        // 通配符条目不是文件名：别把 "*.exe" 当成一个叫 "*.exe" 的文件
+        if (include.find('*') != std::string::npos || include.find('?') != std::string::npos) {
+            continue;
         }
+
+        const std::string rel = dest_rel_of(tag, include);
+        std::string low = rel;
+        for (auto& c : low) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+        if (low.size() < 4 || low.compare(low.size() - 4, 4, ".exe") != 0) continue;
+        // 崩溃处理器不是游戏本体（包里有好几个 exe，crashpad handler 常排在最前）
+        if (low.find("crash") != std::string::npos || low.find("handler") != std::string::npos) {
+            continue;
+        }
+        const std::wstring cand = join(dir, to_wide(rel));
+        if (std::find(cands.begin(), cands.end(), cand) == cands.end()) cands.push_back(cand);
     }
-    return {};
+    if (cands.empty()) return {};
+    if (cands.size() > 1) {
+        say("layout 里声明了 %zu 个候选 exe：", cands.size());
+        for (const auto& c : cands) say("  - %s", to_utf8(base_of(c)).c_str());
+        say("取第一个；不是想要的那个，就直接把 exe 路径传给命令行");
+    }
+    return cands.front();
 }
 
 std::string classify(unsigned long code) {
@@ -501,7 +675,7 @@ std::string advice_for(const std::string& kind, int unimplemented_count, const s
     if (kind == "TIMEOUT")
         return "超时。多半卡在等一个永不完成的异步——看日志最后几行在等什么。";
     if (kind == "MISSING_DLL")
-        return "缺依赖 DLL。把游戏包里同名 DLL 拷到 exe 同目录，再跑一次。";
+        return "缺依赖 DLL。用 `xbgtasix check <exe>` 看哪个依赖模块解析不到，把同名 DLL 拷到 exe 同目录再跑。";
     if (kind == "MISSING_EXPORT")
         return "缺导出符号（入口点未找到）。用 `xbgtasix check <exe>` 看缺哪些名字。";
     if (kind == "ACCESS_VIOLATION")
@@ -565,44 +739,65 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     std::wstring run_dir = abs_path(game_dir);
     std::wstring run_exe = abs_path(target);
     section("准备运行环境");
-    if (opt.staging) {
-        wchar_t tmp[MAX_PATH] = {0};
-        GetTempPathW(MAX_PATH, tmp);
-        const std::wstring stage =
-            join(tmp, L"xbgtasix_stage_" + std::to_wstring(GetCurrentProcessId()));
-        // 用 junction 把整个游戏目录挂进来，保证资源相对路径成立
-        std::wstring cmd = L"cmd.exe /c mklink /J \"" + stage + L"\" \"" + game_dir + L"\"";
-        STARTUPINFOW si{};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION pi{};
-        std::wstring mut = cmd;
-        const BOOL okj = CreateProcessW(nullptr, mut.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                                        nullptr, nullptr, &si, &pi);
-        if (okj) {
-            WaitForSingleObject(pi.hProcess, 15000);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-        }
-        if (dir_exists(stage)) {
-            run_dir = stage;
-            run_exe = join(stage, base_of(target));
-            say("staging       %s（junction，原包未改动）", to_utf8(stage).c_str());
-        } else {
-            say("staging       失败（mklink 不可用），回退到直接放入");
-        }
-    }
+    // 曾经的 --staging 用 junction 指向原包：看上去是"临时目录"，实际上
+    // 三个 DLL 与备份改名**都写进了原包**（实测发现），承诺的"原包不动"根本不成立。
+    // 要跑就必须把 DLL 放在 exe 旁边；所以改成诚实的做法：
+    //   --dry-run  只检查、不写、不启动；真正运行时自动备份同名 DLL。
     if (run_dir == game_dir) {
         say("放置方式      直接放入游戏目录（原目录会被写入 3 个 DLL）");
     }
 
-    // 拷贝三个 shim
+    if (opt.dry_run) {
+        // 只预检：不写任何文件、不启动进程。用来在动手前看清楚"会发生什么"。
+        say("dry-run       只做预检，不写文件、不启动进程");
+        for (const wchar_t* sh : kShims) {
+            const std::wstring src = join(dll_dir, sh);
+            const std::wstring dst = join(run_dir, sh);
+            if (same_file(src, dst)) {
+                say("  %s 已就位（同一文件）", to_utf8(sh).c_str());
+            } else if (file_exists(dst)) {
+                say("  将备份 %s -> %s.xbgtasix-backup 后覆盖", to_utf8(sh).c_str(),
+                    to_utf8(sh).c_str());
+            } else {
+                say("  将写入 %s", to_utf8(dst).c_str());
+            }
+        }
+        say("  将启动 %s", to_utf8(run_exe).c_str());
+        say("");
+        say("预检通过。去掉 --dry-run 即可真正运行。");
+        return 0;
+    }
+
+    // 拷贝三个 shim。覆盖同名文件前必须备份：一次坏构建不至于把包里的原文件永久改坏。
     int copied = 0;
     for (const wchar_t* s : kShims) {
         const std::wstring src = join(dll_dir, s);
         const std::wstring dst = join(run_dir, s);
-        if (same_file(src, dst) || CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
+        if (same_file(src, dst)) {
+            ++copied;   // 自己拷自己会得 ERROR_SHARING_VIOLATION，当成已就位
+            continue;
+        }
+        if (file_exists(dst)) {
+            const std::wstring bak = dst + L".xbgtasix-backup";
+            bool ok = false;
+            if (file_exists(bak)) {
+                // 备份已存在：原文件在备份里，dst 是上次我们放的，删掉 dst 就好，
+                // 绝不能拿 dst 覆盖备份，否则第一次的原文件就永久没了。
+                ok = DeleteFileW(dst.c_str()) != 0;
+                if (ok) say("  备份已在，原文件保留在 %s", to_utf8(bak).c_str());
+            } else {
+                ok = MoveFileW(dst.c_str(), bak.c_str()) != 0;
+                if (ok) {
+                    say("  已备份 %s -> %s", to_utf8(base_of(dst)).c_str(), to_utf8(bak).c_str());
+                }
+            }
+            if (!ok) {
+                say("  ! 备份失败 %s err=%lu —— 中止，包里的原文件没动", to_utf8(s).c_str(),
+                    GetLastError());
+                return 2;
+            }
+        }
+        if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
             ++copied;
         } else {
             say("  ! 拷贝失败 %s err=%lu", to_utf8(s).c_str(), GetLastError());
@@ -642,30 +837,49 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
 
-    // 环境块：当前环境 + 覆盖项
+    // 环境块：当前环境（先剔除我们要覆盖的同名项）+ 覆盖项
+    //
+    // 关键：GetEnvironmentVariable 取**第一次**出现，不是最后一次。原来只会往后追加，
+    // 继承来的 XBGTASIX_LOG 就压过了 --log（实测：--log 指定的文件 0 字节，真日志写在
+    // 继承路径上）。所以先把同名项摘掉，再追加自己的。
+    const std::vector<std::pair<std::wstring, std::wstring>> overrides = {
+        {L"XBGTASIX_UNIMPL", opt.stop_mode ? L"stop" : L"log"},
+        {L"XBGTASIX_LOG", log_path},
+        {L"XBGTASIX_UI", L"immediate"},
+        {L"XBGTASIX_PACKAGE_ROOT", run_dir},
+    };
+    // 只认 "NAME=" 这个形状：XBGTASIX_LOGX 不能被 XBGTASIX_LOG 误伤
+    auto is_overridden = [&overrides](const wchar_t* block) {
+        for (const auto& kv : overrides) {
+            const size_t n = kv.first.size();
+            if (_wcsnicmp(block, kv.first.c_str(), n) != 0) continue;
+            if (block[n] == L'=') return true;
+        }
+        return false;
+    };
     std::vector<wchar_t> env;
     {
         wchar_t* cur = GetEnvironmentStringsW();
         if (cur) {
             for (wchar_t* p = cur; *p;) {
                 const size_t len = wcslen(p);
+                // 以 '=' 开头的伪项（如 "=C:=C:\path"）是盘符当前目录，不能摘
+                if (p[0] != L'=' && is_overridden(p)) {
+                    p += len + 1;
+                    continue;
+                }
                 env.insert(env.end(), p, p + len + 1);
                 p += len + 1;
             }
             FreeEnvironmentStringsW(cur);
         }
+    }
+    for (const auto& kv : overrides) {
+        const std::wstring line = kv.first + L"=" + kv.second;
+        env.insert(env.end(), line.begin(), line.end());
         env.push_back(0);
     }
-    auto set_env = [&](const std::wstring& kv) {
-        // 已有同名项则跳过（简单起见不影响正确性：后面的覆盖前面的由系统取第一次出现？）
-        // Windows 取最后一次出现，所以直接追加即可
-        env.insert(env.end() - 1, kv.begin(), kv.end());
-        env.push_back(0);
-    };
-    set_env(L"XBGTASIX_UNIMPL=" + std::wstring(opt.stop_mode ? L"stop" : L"log"));
-    set_env(L"XBGTASIX_LOG=" + log_path);
-    set_env(L"XBGTASIX_UI=immediate");
-    set_env(L"XBGTASIX_PACKAGE_ROOT=" + run_dir);
+    env.push_back(0);   // 环境块以双 0 结尾
 
     section("运行");
     say("模式          %s，超时 %ds", opt.stop_mode ? "stop（撞到未实现即停）" : "log（跑到底）",
@@ -686,8 +900,27 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
                                         CREATE_UNICODE_ENVIRONMENT, env.data(), run_dir.c_str(), &si,
                                         &pi);
     if (!started) {
+        // 光打 errno 等于没说：这三个错误码占了实际遇到的大半，各自下一步完全不同。
         const DWORD e = GetLastError();
         say("启动失败      CreateProcess err=%lu", e);
+        switch (e) {
+            case ERROR_BAD_EXE_FORMAT:
+            case ERROR_EXE_MACHINE_TYPE_MISMATCH:   // 实测：非 PE 文件这里给 216 而不是 193
+                say("              不是有效的可执行文件（BAD_IMAGE）：PE 头/位数不对，"
+                    "用 `xbgtasix check <exe>` 看它的机器类型");
+                break;
+            case ERROR_FILE_NOT_FOUND:
+                say("              找不到 exe 或它依赖的某个模块：先 `xbgtasix verify <目录>`，"
+                    "再把缺的 DLL 补到 exe 同目录");
+                break;
+            case ERROR_ACCESS_DENIED:
+                say("              拒绝访问：多半被杀软/权限拦了，或目标在受保护目录；"
+                    "换个目录、或提权后重试");
+                break;
+            default:
+                say("              先用 `xbgtasix doctor` 做环境自检，再带 --stop 重跑");
+                break;
+        }
         return 2;
     }
     const DWORD wait = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(opt.timeout_sec) * 1000);
@@ -698,15 +931,23 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
         code = 124;
     } else {
         DWORD ec = 0;
-        GetExitCodeProcess(pi.hProcess, &ec);
+        // 取不到退出码时不能默认 0：那会被 classify 判成 PASS，把人骗得很彻底
+        if (!GetExitCodeProcess(pi.hProcess, &ec)) {
+            const DWORD e = GetLastError();
+            say("错误          读不到退出码 err=%lu", e);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return 2;
+        }
         code = ec;
     }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     const DWORD elapsed = GetTickCount() - t0;
 
-    // 读日志
-    const std::string log_text = read_text(log_path);
+    // 读日志：只取末尾 2MB。日志可能几百 MB，"日志末尾"和 UNIMPLEMENTED 频次都应该基于尾部。
+    constexpr size_t kTailBytes = 2u << 20;
+    const std::string log_text = read_text_tail(log_path, kTailBytes);
     std::vector<std::string> lines = split_lines(log_text);
     std::map<std::string, int> unimpl;
     for (const auto& line : lines) {
@@ -729,8 +970,8 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     say("退出码        0x%08lx", code);
     say("分类          %s", kind.c_str());
     say("耗时          %lu ms", elapsed);
-    say("日志          %zu 行，UNIMPLEMENTED %d 条，FAIL %d 行", lines.size(), unimpl_total,
-        fail_lines);
+    say("日志          %zu 行（仅统计日志末尾 2MB），UNIMPLEMENTED %d 条，FAIL %d 行", lines.size(),
+        unimpl_total, fail_lines);
 
     if (!unimpl.empty()) {
         std::vector<std::pair<std::string, int>> sorted(unimpl.begin(), unimpl.end());
@@ -760,10 +1001,16 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
 // ---------------------------------------------------------------- 交互
 // 双击启动时，控制台只有我们自己（就绪即退出会"一闪而过"）。
 // 这个判断决定要不要在结束前等一次回车。
+// 只在"双击启动、控制台归我们独占"时才等回车。
+// 之前用 n <= 1：没有控制台（DETACHED / stdin 被重定向）时 GetConsoleProcessList 返回 0，
+// 0 <= 1 也成立 → getchar() 永久阻塞（实测无控制台启动会挂死）。所以必须是 n == 1，
+// 再加一道 GetConsoleMode 确认 stdin 真的挂在控制台上。
 bool own_console() {
     DWORD pids[4] = {0};
     const DWORD n = GetConsoleProcessList(pids, 4);
-    return n <= 1;
+    if (n != 1) return false;   // 0 = 没有控制台；>1 = 控制台里还有别的进程
+    DWORD mode = 0;
+    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode) != 0;
 }
 
 void pause_if_interactive() {
@@ -813,7 +1060,7 @@ int interactive_menu() {
 void usage() {
     printf("xbgtasix %s —— Xbox GDK 兼容层的启动器/诊断工具\n\n", kVersion);
     printf("用法：\n");
-    printf("  xbgtasix run    <exe|包目录> [--staging] [--stop] [--timeout 秒]"
+    printf("  xbgtasix run    <exe|包目录> [--dry-run] [--stop] [--timeout 秒]"
            " [--dll-dir 目录] [--log 文件]\n");
     printf("  xbgtasix check  <exe> [--dll-dir 目录]\n");
     printf("  xbgtasix verify <包目录>\n");
@@ -864,6 +1111,7 @@ int main(int argc, char** argv) {
                 pause_if_interactive();
                 return 2;
             }
+            // 直接运行（会先备份同名 DLL）。想只看不写就选命令行 run --dry-run。
             RunOptions ro;
             const int rc = cmd_run(pkg, ro);
             pause_if_interactive();
@@ -891,7 +1139,7 @@ int main(int argc, char** argv) {
             return rc;
         }
         if (pick == 4) {
-            const int rc = cmd_doctor();
+            const int rc = cmd_doctor(L"");
             pause_if_interactive();
             return rc;
         }
@@ -915,43 +1163,53 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--dll-dir" && i + 1 < argc) {
             dll_dir = to_wide(argv[++i]);
+        } else if (a == "--dry-run" || a == "--dryrun") {
+            ro.dry_run = true;
         } else if (a == "--staging") {
-            ro.staging = true;
+            printf("--staging 已移除：它用 junction 指向原包，DLL 实际仍写进包里，"
+                   "承诺的'原包不动'做不到。\n改用 --dry-run 只做预检（不写文件）。\n");
+            return 2;
         } else if (a == "--log" && i + 1 < argc) {
             ro.log_path = to_wide(argv[++i]);
         } else if (a == "--stop") {
             ro.stop_mode = true;
         } else if (a == "--timeout" && i + 1 < argc) {
-            ro.timeout_sec = atoi(argv[++i]);
-            if (ro.timeout_sec <= 0) ro.timeout_sec = 180;
+            // atoi 碰上超长数字是未定义行为；用 strtoull（Windows 的 long 只有 32 位，
+            // 所以不能拿 unsigned long 接）并把上限夹到一天
+            const char* s = argv[++i];
+            char* endp = nullptr;
+            errno = 0;
+            const unsigned long long v = strtoull(s, &endp, 10);
+            if (endp == s || *endp != '\0' || s[0] == '-' || errno == ERANGE || v == 0) {
+                ro.timeout_sec = 180;
+            } else if (v > 86400ull) {
+                printf("--timeout 上限 86400 秒，按 86400 处理\n");
+                ro.timeout_sec = 86400;
+            } else {
+                ro.timeout_sec = static_cast<int>(v);
+            }
         } else if (!a.empty() && a[0] != '-') {
             pos.push_back(a);
         }
     }
     ro.dll_dir = dll_dir;
 
+    // 显式命令（run/check/verify/doctor）一律不 pause：它们是从命令行/脚本里调的，
+    // 卡在 getchar 上等回车只会让批处理挂死。只有无参数交互菜单结束时才等。
     if (cmd == "doctor") {
-        const int rc = cmd_doctor();
-        pause_if_interactive();
-        return rc;
+        return cmd_doctor(dll_dir);
     }
     if (cmd == "verify") {
-        if (pos.empty()) { printf("verify 需要一个包目录\n"); pause_if_interactive(); return 2; }
-        const int rc = cmd_verify(to_wide(pos[0]));
-        pause_if_interactive();
-        return rc;
+        if (pos.empty()) { printf("verify 需要一个包目录\n"); return 2; }
+        return cmd_verify(to_wide(pos[0]));
     }
     if (cmd == "check") {
-        if (pos.empty()) { printf("check 需要一个 exe 路径\n"); pause_if_interactive(); return 2; }
-        const int rc = cmd_check(to_wide(pos[0]), dll_dir);
-        pause_if_interactive();
-        return rc;
+        if (pos.empty()) { printf("check 需要一个 exe 路径\n"); return 2; }
+        return cmd_check(to_wide(pos[0]), dll_dir);
     }
     if (cmd == "run") {
-        if (pos.empty()) { printf("run 需要一个 exe 或包目录\n"); pause_if_interactive(); return 2; }
-        const int rc = cmd_run(to_wide(pos[0]), ro);
-        pause_if_interactive();
-        return rc;
+        if (pos.empty()) { printf("run 需要一个 exe 或包目录\n"); return 2; }
+        return cmd_run(to_wide(pos[0]), ro);
     }
 
     printf("未知命令：%s\n\n", cmd.c_str());
