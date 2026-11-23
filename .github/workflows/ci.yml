@@ -101,3 +101,67 @@ jobs:
             build/ci_*.log
             build/xbgtasix.log
           if-no-files-found: ignore
+
+  linux-cross:
+    name: Linux 交叉编译（Arch 路径的构建环节）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 mingw-w64 交叉编译器
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-mingw-w64-x86-64
+
+      - name: 从 NuGet 拉官方 GDK
+        run: python tools/fetch_gdk.py --out ../gdk
+
+      - name: 交叉编译三个 shim
+        run: |
+          CXX=x86_64-w64-mingw32-g++ GDK_INC=../gdk/include_clean \
+            ./tools/build_linux_cross.sh
+
+      - name: 校验产物（导出数必须与 Windows 构建一致）
+        run: |
+          python - <<'PY'
+          import struct, sys
+
+          def exports(path):
+              d = open(path, "rb").read()
+              e = struct.unpack_from("<I", d, 0x3C)[0]
+              if d[e:e+4] != b"PE\0\0":
+                  return -1
+              nsec = struct.unpack_from("<H", d, e+6)[0]
+              optsz = struct.unpack_from("<H", d, e+20)[0]
+              opt = e + 24
+              plus = struct.unpack_from("<H", d, opt)[0] == 0x20B
+              dd = opt + (112 if plus else 96)
+              exp_rva = struct.unpack_from("<I", d, dd)[0]
+              sec = opt + optsz
+              def off(rva):
+                  for i in range(nsec):
+                      o = sec + i * 40
+                      vs, va, rs, ra = struct.unpack_from("<IIII", d, o + 8)
+                      if va <= rva < va + max(vs, rs):
+                          return ra + (rva - va)
+                  return None
+              eo = off(exp_rva)
+              if eo is None:
+                  return 0
+              return struct.unpack_from("<I", d, eo + 24)[0]
+
+          want = {"xgameruntime.dll": 461, "xmem.dll": 4, "d3d12_xs.dll": 18}
+          bad = 0
+          for name, expect in want.items():
+              got = exports("build/linux/" + name)
+              ok = got == expect
+              print(f"{name:20s} 导出 {got:4d}  期望 {expect:4d}  {'OK' if ok else 'MISMATCH'}")
+              if not ok:
+                  bad += 1
+          sys.exit(1 if bad else 0)
+          PY
