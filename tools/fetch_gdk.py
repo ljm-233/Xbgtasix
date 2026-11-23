@@ -57,22 +57,36 @@ def fetch(pkg, version, dest):
     return path
 
 
+def depth_of(path):
+    """路径深度：用来决定同名头文件里保留哪个（浅的通常是顶层 API 头）。"""
+    return path.count("/")
+
+
 def extract(nupkg, out):
     inc_out = os.path.join(out, "include_clean")
     lib_out = os.path.join(out, "lib")
     os.makedirs(inc_out, exist_ok=True)
     os.makedirs(lib_out, exist_ok=True)
     n_h = n_l = 0
-    # 平铺解包会丢掉子目录：不同子目录下的同名文件会静默互相覆盖。
-    # 记下"这个 basename 是哪个源路径来的"，冲突时明确报错而不是悄悄覆盖。
+    # 平铺解包会丢掉子目录，不同子目录里的同名头会互相覆盖（实测包里就有：
+    # playfab/core/PFTypes.h 与 playfab/services/PFTypes.h）。
+    # 这不能当致命错误（否则整包都解不出来），策略是：
+    #   内容相同 -> 跳过重复；内容不同 -> 保留路径更浅的那个（通常是顶层 API 头），并记录冲突
     seen = {}
+    collisions = []
     with zipfile.ZipFile(nupkg) as z:
         for name in z.namelist():
             low = name.lower()
             if low.endswith(".h") and "/include/" in low:
                 base = os.path.basename(name)
-                if base in seen and seen[base] != name:
-                    raise SystemExit("头文件同名冲突：%s 与 %s 都会解成 %s" % (seen[base], name, base))
+                prev = seen.get(base)
+                if prev is not None and prev != name:
+                    if depth_of(name) < depth_of(prev):
+                        seen[base] = name          # 更浅的优先，覆盖已解出的那个
+                        collisions.append((base, prev, name, "取更浅的"))
+                    else:
+                        collisions.append((base, prev, name, "保留已解出的"))
+                        continue
                 seen[base] = name
                 with z.open(name) as src, open(os.path.join(inc_out, base), "wb") as dst:
                     shutil.copyfileobj(src, dst)
@@ -82,6 +96,12 @@ def extract(nupkg, out):
                 with z.open(name) as src, open(os.path.join(lib_out, base), "wb") as dst:
                     shutil.copyfileobj(src, dst)
                 n_l += 1
+    if collisions:
+        print("  同名头文件 %d 处（平铺后只能留一个，按'路径更浅优先'处理）：" % len(collisions))
+        for base, a, b, how in collisions[:6]:
+            print("    %s：%s / %s -> %s" % (base, a, b, how))
+        if len(collisions) > 6:
+            print("    ...（其余 %d 处同类）" % (len(collisions) - 6))
     return n_h, n_l
 
 
