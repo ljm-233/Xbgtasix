@@ -530,10 +530,27 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
         }
     }
 
+    // d3d12.dll / dxgi.dll 用运行时解析：doctor 是"诊断工具"，
+    // 不该在缺 d3d12.dll 的机器上（Win7/8、Server Core、精简镜像）自己都起不来——
+    // 那种机器恰恰最需要它来报告"D3D12 不可用"。
+    using PFN_CreateDXGIFactory1 = HRESULT(WINAPI*)(REFIID, void**);
+    using PFN_D3D12CreateDevice = HRESULT(WINAPI*)(IUnknown*, int, REFIID, void**);
+    HMODULE dxgi_mod = LoadLibraryW(L"dxgi.dll");
+    HMODULE d3d12_mod = LoadLibraryW(L"d3d12.dll");
+    auto pfn_factory = dxgi_mod ? reinterpret_cast<PFN_CreateDXGIFactory1>(
+                                      GetProcAddress(dxgi_mod, "CreateDXGIFactory1"))
+                                : nullptr;
+    auto pfn_d3d12 = d3d12_mod ? reinterpret_cast<PFN_D3D12CreateDevice>(
+                                     GetProcAddress(d3d12_mod, "D3D12CreateDevice"))
+                               : nullptr;
+
     // 2) 显卡
     {
+        say("  dxgi.dll      %s", dxgi_mod ? "有" : "没有");
+        say("  d3d12.dll     %s", d3d12_mod ? "有" : "没有（Win7/8、Server Core、精简镜像常见）");
         IDXGIFactory1* f = nullptr;
-        if (SUCCEEDED(CreateDXGIFactory1(IID_IDXGIFactory1, reinterpret_cast<void**>(&f))) && f) {
+        if (pfn_factory &&
+            SUCCEEDED(pfn_factory(IID_IDXGIFactory1, reinterpret_cast<void**>(&f))) && f) {
             int idx = 0;
             IDXGIAdapter1* a = nullptr;
             while (f->EnumAdapters1(static_cast<UINT>(idx), &a) != DXGI_ERROR_NOT_FOUND && a) {
@@ -553,10 +570,13 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
     }
 
     // 3) D3D12 能否建设备
-    {
+    if (!pfn_d3d12) {
+        say("  D3D12         不可用：这台机器没有 d3d12.dll —— 游戏必然起不来");
+        ++critical;
+    } else {
         ID3D12Device* dev = nullptr;
-        const HRESULT hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device,
-                                             reinterpret_cast<void**>(&dev));
+        const HRESULT hr = pfn_d3d12(nullptr, 0xb000 /*11_0*/, IID_ID3D12Device,
+                                     reinterpret_cast<void**>(&dev));
         if (SUCCEEDED(hr) && dev) {
             say("  D3D12         可用（feature level 11_0 以上）");
             dev->Release();
@@ -619,6 +639,9 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
         }
         say("  交互桌面      %s", visible ? "有（系统侧 UI 可用）" : "无（面板会降级成立即完成）");
     }
+
+    if (d3d12_mod) FreeLibrary(d3d12_mod);
+    if (dxgi_mod) FreeLibrary(dxgi_mod);
 
     section("结论");
     if (critical == 0) {
@@ -875,6 +898,7 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
         {L"XBGTASIX_LOG", log_path},
         {L"XBGTASIX_UI", L"immediate"},
         {L"XBGTASIX_PACKAGE_ROOT", run_dir},
+        {L"XBGTASIX_CONFIG", join(run_dir, L"MicrosoftGame.Config")},
     };
     // 只认 "NAME=" 这个形状：XBGTASIX_LOGX 不能被 XBGTASIX_LOG 误伤
     auto is_overridden = [&overrides](const wchar_t* block) {
@@ -918,15 +942,26 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     std::wstring cmdline = L"\"" + run_exe + L"\"";
-    // 有配置就作为第一个参数传（本项目测试与工具都按这个约定取配置）
-    const std::wstring cfg = join(run_dir, L"MicrosoftGame.Config");
-    if (file_exists(cfg)) {
-        cmdline += L" \"" + cfg + L"\" \"" + run_dir + L"\"";
+    // 配置路径走环境变量（XBGTASIX_CONFIG），不要塞进 argv：
+    // 多给的参数会让按 argv 取"存档目录/安装模式"的游戏行为不同。
+    // Job Object：游戏常会拉起子进程（崩溃处理器、启动器、平台服务）。
+    // 只 TerminateProcess 直接子进程会留下孤儿，继续写日志、继续占显存。
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof(li));
     }
     const DWORD t0 = GetTickCount();
     const BOOL started = CreateProcessW(run_exe.c_str(), cmdline.data(), nullptr, nullptr, FALSE,
                                         CREATE_UNICODE_ENVIRONMENT, env.data(), run_dir.c_str(), &si,
                                         &pi);
+    if (started && job) {
+        // 分配失败不致命（只影响超时清理），但要记下来
+        if (!AssignProcessToJobObject(job, pi.hProcess)) {
+            say("提示          Job Object 绑定失败 err=%lu（超时可能留下游戏子进程）", GetLastError());
+        }
+    }
     if (!started) {
         // 光打 errno 等于没说：这三个错误码占了实际遇到的大半，各自下一步完全不同。
         const DWORD e = GetLastError();
@@ -954,7 +989,8 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     const DWORD wait = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(opt.timeout_sec) * 1000);
     unsigned long code = 124;
     if (wait == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 124);
+        if (job) TerminateJobObject(job, 124);   // 连游戏拉起的子进程一起收
+        else TerminateProcess(pi.hProcess, 124);
         WaitForSingleObject(pi.hProcess, 5000);
         code = 124;
     } else {
@@ -971,6 +1007,7 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    if (job) CloseHandle(job);   // KILL_ON_JOB_CLOSE：残留子进程在这里被清掉
     const DWORD elapsed = GetTickCount() - t0;
 
     // 读日志：只取末尾 2MB。日志可能几百 MB，"日志末尾"和 UNIMPLEMENTED 频次都应该基于尾部。
