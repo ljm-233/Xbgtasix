@@ -87,6 +87,7 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 拿到 exe 之后（用启动器，纯 C++ 无依赖）：
 
 ```bash
+# 首次运行若被 Defender SmartScreen 拦下：见 docs/smartscreen.md
 build/xbgtasix.exe check  <exe>     # 静态核对导入面（10 秒，不用跑）
 build/xbgtasix.exe run    <exe>     # 跑起来并按退出码分类
 build/xbgtasix.exe verify "<包目录>" # 按 layout 清单核对完整性
@@ -126,6 +127,7 @@ build/xbgtasix.exe doctor           # 环境自检
 | [assets-inventory](docs/assets-inventory.md) | 333 载具 / 160 服装 / 57 GB TTPF 贴图 |
 | [gpu-adaptation](docs/gpu-adaptation.md) | 默认会选中核显的坑；两块 GPU 交叉验证 |
 | [gpu-memory](docs/gpu-memory.md) | 账面 7.0 GB / 实测 6.0 GB；224 GB 资产 → 必须流式加载 |
+| [smartscreen](docs/smartscreen.md) | 被 Defender 拦下时怎么办（解除锁定 / 本机自签名 / 从源码构建） |
 | [launcher](docs/launcher.md) | **xbgtasix.exe**：run / check / verify / doctor 四条命令与失败分类 |
 | [how-it-runs](docs/how-it-runs.md) | **机制**：为什么不需要 PE loader、依赖怎么被满足、五个检查点 |
 | [feasibility](docs/feasibility.md) | **可行性判定 + 性能实测**：已证 / 无法判定 / 不可行 三层 |
