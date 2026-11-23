@@ -9,6 +9,9 @@
 #include <cstring>
 #include <memory>
 
+#include "frame_events.h"
+#include "present_x.h"
+
 extern "C" HRESULT WINAPI D3D12XboxCreateDevice(IUnknown*, void*, REFIID, void**);
 
 namespace {
@@ -177,6 +180,14 @@ int main(int argc, char** argv) {
     Com<ID3D12Device> xbox(static_cast<ID3D12Device*>(raw));
     if (xbox.get() == native.get()) return fail("Xbox device must not be the native COM pointer");
 
+    {
+        raw = nullptr;
+        hr = D3D12XboxCreateDevice(adapter.get(), nullptr, *iid, &raw);
+        if (FAILED(hr) || !raw) return fail("create second Xbox device proxy", hr);
+        Com<ID3D12Device> other(static_cast<ID3D12Device*>(raw));
+        if (check_frame_events(xbox.get(), other.get())) return 1;
+    }
+
     // The ordering here deliberately differs from the C++ PC signature.
     using XboxHeapCall = D3D12_HEAP_PROPERTIES* (WINAPI*)(D3D12_HEAP_PROPERTIES*,
                                                          ID3D12Device*, UINT, D3D12_HEAP_TYPE);
@@ -197,9 +208,58 @@ int main(int argc, char** argv) {
         }
     }
 
+    using XboxQueueCall = HRESULT (WINAPI*)(ID3D12Device*, const void*, REFIID, void**);
+    const auto create_queue = reinterpret_cast<XboxQueueCall>(vtable[8]);
+    const UINT direct_desc[] = {0, 0, 0, 1};
+    raw = nullptr;
+    hr = create_queue(xbox.get(), direct_desc, __uuidof(ID3D12CommandQueue), &raw);
+    if (FAILED(hr) || !raw) return fail("slot 8 must create the title's direct queue", hr);
+    Com<ID3D12CommandQueue> direct_queue(static_cast<ID3D12CommandQueue*>(raw));
+    const auto direct = direct_queue->GetDesc();
+    if (direct.Type != D3D12_COMMAND_LIST_TYPE_DIRECT || direct.Priority != 0 ||
+        direct.Flags != D3D12_COMMAND_QUEUE_FLAG_NONE || direct.NodeMask != 1) {
+        return fail("slot 8 must preserve the direct queue descriptor");
+    }
+    hr = create_queue(xbox.get(), direct_desc, __uuidof(ID3D12Heap), &raw);
+    if (hr != E_NOINTERFACE || raw) return fail("slot 8 must reject unrelated interfaces", hr);
+    hr = create_queue(xbox.get(), nullptr, __uuidof(ID3D12CommandQueue), &raw);
+    if (hr != E_INVALIDARG || raw) return fail("slot 8 must reject a null descriptor", hr);
+
+    using XboxDescriptorHeapCall = HRESULT (WINAPI*)(ID3D12Device*,
+        const D3D12_DESCRIPTOR_HEAP_DESC*, REFIID, void**);
+    const auto make_descriptor_heap = reinterpret_cast<XboxDescriptorHeapCall>(vtable[14]);
+    const D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+        128, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 1};
+    hr = make_descriptor_heap(xbox.get(), &sampler_heap_desc, __uuidof(ID3D12DescriptorHeap), &raw);
+    if (FAILED(hr) || !raw) return fail("slot 14 must create the title's sampler heap", hr);
+    Com<ID3D12DescriptorHeap> sampler_heap(static_cast<ID3D12DescriptorHeap*>(raw));
+    const auto heap_desc = sampler_heap->GetDesc();
+    if (heap_desc.Type != sampler_heap_desc.Type || heap_desc.NumDescriptors != 128 ||
+        heap_desc.Flags != sampler_heap_desc.Flags || heap_desc.NodeMask != 1) {
+        return fail("slot 14 must preserve the sampler heap descriptor");
+    }
+    hr = sampler_heap->QueryInterface(__uuidof(ID3D12Pageable), &raw);
+    if (FAILED(hr) || raw != sampler_heap.get()) return fail("sampler heap QI identity", hr);
+    sampler_heap.reset();
+    sampler_heap.reset(static_cast<ID3D12DescriptorHeap*>(raw));
+    hr = sampler_heap->GetDevice(*iid, &raw);
+    if (FAILED(hr) || raw != xbox.get()) return fail("sampler heap device identity", hr);
+    static_cast<IUnknown*>(raw)->Release();
+
+    const Slot* descriptor_vtable;
+    std::memcpy(&descriptor_vtable, sampler_heap.get(), sizeof(descriptor_vtable));
+    using CpuStart = SIZE_T (WINAPI*)(ID3D12DescriptorHeap*);
+    using GpuStart = UINT64 (WINAPI*)(ID3D12DescriptorHeap*);
+    const auto cpu = reinterpret_cast<CpuStart>(descriptor_vtable[9])(sampler_heap.get());
+    const auto gpu = reinterpret_cast<GpuStart>(descriptor_vtable[10])(sampler_heap.get());
+    if (cpu == 0 || gpu == 0) return fail("sampler heap must return CPU and GPU handles in registers");
+    const D3D12_SAMPLER_DESC sampler{D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, 0, 1,
+        D3D12_COMPARISON_FUNC_NEVER, {}, 0, D3D12_FLOAT32_MAX};
+    xbox->CreateSampler(&sampler, {cpu});
+
     // The four observed Xbox queue descriptors. Slot 48 on desktop is
     // OpenExistingHeapFromAddress, not a queue creation method.
-    using XboxQueueCall = HRESULT (WINAPI*)(ID3D12Device*, const void*, REFIID, void**);
     const auto queue_call = reinterpret_cast<XboxQueueCall>(vtable[48]);
     const UINT queue_descs[][4] = {{2, 0, 1, 0}, {2, 0, 2, 0}, {2, 0, 3, 0}, {2, 0, 0, 1}};
     for (const auto& desc : queue_descs) {
@@ -299,6 +359,8 @@ int main(int argc, char** argv) {
         auto list132 = reinterpret_cast<XboxListStateCall>(list_vtable[132]);
         list131(xbox_list.get(), 0xc3c0, 0x80020000, 0, 0xffffffffff00ull);
         list132(xbox_list.get(), 0x700000, 0, 0, 0xffffffffff00ull);
+        ID3D12DescriptorHeap* heaps[] = {sampler_heap.get()};
+        xbox_list->SetDescriptorHeaps(1, heaps);
         if (xbox_list->Close() != S_OK) return fail("Xbox command-list proxy Close");
         hr = make_list(xbox.get(), desc, allocator.get(), nullptr, &__uuidof(ID3D12CommandQueue),
                        &result.out);
@@ -347,7 +409,9 @@ int main(int argc, char** argv) {
     if (FAILED(hr) || !raw) return fail("pass through CreateCommittedResource", hr);
     static_cast<ID3D12Resource*>(raw)->Release();
 
-    std::printf("[t41] PASS: %s, heap types 1/2/3, slot 48 queue/list proxies, slot 73 Xbox list extensions and GPU copies, IUnknown identity, native passthrough\n",
+    if (present_test::check_present_x(xbox.get(), native.get())) return 1;
+
+    std::printf("[t41] PASS: %s, slot 8 queue, slot 14 descriptor heap, heap types 1/2/3, slot 48 queue/list proxies, slot 73 Xbox list extensions and GPU copies, IUnknown identity, native passthrough\n",
                 iid == &kDevice11 ? "ID3D12Device11" : "ID3D12Device");
     return 0;
 }
