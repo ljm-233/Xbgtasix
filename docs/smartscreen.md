@@ -53,6 +53,34 @@ powershell -ExecutionPolicy Bypass -File tools\sign_local.ps1 -Remove
 **局限（别误解）**：自签名只在这台机器上有效，因为它靠"本机信任该证书"。
 给别人用仍会提示——那需要真正的代码签名证书（EV 证书）+ 信誉积累，属于花钱的事。
 
+## 关键：重新构建会覆盖 exe，签名随之失效
+
+`build.sh` 每次都重写 `build/xbgtasix.exe`——**签名是签在文件上的，文件一变就没了**。
+所以：
+
+- 已经装过自签名证书的机器，`build.sh` 结束时会**自动重签**（脚本会打印
+  `== 重新签名 xbgtasix.exe`）
+- 第一次要先手动装证书：`powershell -ExecutionPolicy Bypass -File tools\sign_local.ps1`
+
+判断一个 exe 到底是不是签名过的：
+
+```powershell
+Get-AuthenticodeSignature .\build\xbgtasix.exe | Select-Object Status,@{n='Signer';e={$_.SignerCertificate.Subject}}
+```
+
+`Status = Valid` 且主体是 `CN=Xbgtasix Local Dev` 才算签过。
+
+## 先确认你双击的是哪个文件
+
+同一个名字可能有多个副本（旧构建、拷到别处的）。看大小最快：
+
+| 文件 | 大小 |
+|---|---|
+| 本项目当前构建 | **1,015 KB**（1,038,984 字节） |
+
+如果双击的那个不是这个大小，说明它**不是当前构建**——旧副本没有新签名，
+SmartScreen 当然还会拦。用完整路径运行当前构建，或把旧副本删掉。
+
 ## 方案 C：不通过 exe 分发
 
 让别人从源码构建（构建产物没有网络标记，也不会被 SmartScreen 当成"下载未知程序"）：
