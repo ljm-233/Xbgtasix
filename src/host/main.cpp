@@ -131,6 +131,15 @@ std::string read_text(const std::wstring& path, size_t limit = 8u << 20) {
     return out;
 }
 
+// 这个文件是不是我们自己构建出来的 shim？判据：文件里含有我们的构建标记。
+// 用来把"游戏自带的原版 DLL"和"我们自己的旧产物"分开——备份机制必须分清这两件事：
+// 一旦把我们的 DLL 当成原版存进 *.xbgtasix-backup，真正的原版就永久没了，
+// 之后 restore 也只是把一个旧 shim 搬回原位，看上去"还原成功"，其实原件早已丢失。
+bool contains_our_marker(const std::wstring& path) {
+    return read_text(path).find("xbgtasix") != std::string::npos;
+}
+
+
 // 读文件**尾部**：要看的是"日志末尾"，从开头读到 8MB 只能看到刚开始的那点东西。
 std::string read_text_tail(const std::wstring& path, size_t limit = 2u << 20) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -994,8 +1003,13 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
             if (same_file(src, dst)) {
                 say("  %s 已就位（同一文件）", to_utf8(sh).c_str());
             } else if (file_exists(dst)) {
-                say("  将备份 %s -> %s.xbgtasix-backup 后覆盖", to_utf8(sh).c_str(),
-                    to_utf8(sh).c_str());
+                if (contains_our_marker(dst)) {
+                    say("  %s 已是我们自己的产物，将直接覆盖（不产生 .xbgtasix-backup）",
+                        to_utf8(sh).c_str());
+                } else {
+                    say("  将备份 %s -> %s.xbgtasix-backup 后覆盖", to_utf8(sh).c_str(),
+                        to_utf8(sh).c_str());
+                }
             } else {
                 say("  将写入 %s", to_utf8(dst).c_str());
             }
@@ -1023,6 +1037,14 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
                 // 绝不能拿 dst 覆盖备份，否则第一次的原文件就永久没了。
                 ok = DeleteFileW(dst.c_str()) != 0;
                 if (ok) say("  备份已在，原文件保留在 %s", to_utf8(bak).c_str());
+            } else if (contains_our_marker(dst)) {
+                // 目标本身已经是我们的产物（可能是上一次用 bash cp 手工部署的，也可能是旧 build）。
+                // 这种情况**没有原件可备份**：把它存成 .xbgtasix-backup 等于伪造一份"原版"，
+                // 以后 restore 会把一个 shim 当原件搬回去。所以直接覆盖，不产生备份。
+                ok = true;
+                say("  %s 已经是我们自己的产物（原版不在这里）——不写入 .xbgtasix-backup",
+                    to_utf8(s).c_str());
+                say("             如果这个位置本该有游戏自带的原版，请从原始包重新取回");
             } else {
                 ok = MoveFileW(dst.c_str(), bak.c_str()) != 0;
                 if (ok) {
@@ -1311,6 +1333,7 @@ int cmd_restore(const std::wstring& target_in, std::wstring dll_dir, bool force 
     int restored = 0;   // 备份改回原名
     int removed = 0;    // 没有备份，直接删掉我们放的 DLL
     int failed = 0;
+    int suspect = 0;    // "备份"其实是我们自己的构建 —— 原件已丢失，只能说清楚
     int skipped = 0;   // 无备份且内容不像我们的 -> 拒绝删除
     for (const wchar_t* s : kShims) {
         const std::wstring dst = join(dir, s);
@@ -1318,6 +1341,9 @@ int cmd_restore(const std::wstring& target_in, std::wstring dll_dir, bool force 
         const bool have_dst = file_exists(dst);
         const bool have_bak = file_exists(bak);
         if (have_bak) {
+            // 备份里本应是游戏自带的原版。但如果它带着我们的标记，说明当年备份时目标是我们的产物，
+            // 原件当时就已经不在了——把它搬回去也变不出原版，必须明说，别让"已还原"掩盖这件事。
+            const bool bak_is_ours = contains_our_marker(bak);
             // 先把我们放的那份删掉：MoveFile 到已存在的目标会失败
             if (have_dst && !DeleteFileW(dst.c_str())) {
                 say("  ! 删除 %s 失败 err=%lu —— 备份还在，排除占用后重试", to_utf8(s).c_str(),
@@ -1326,7 +1352,13 @@ int cmd_restore(const std::wstring& target_in, std::wstring dll_dir, bool force 
                 continue;
             }
             if (MoveFileW(bak.c_str(), dst.c_str())) {
-                say("已还原        %s（原件已回到原位）", to_utf8(s).c_str());
+                if (bak_is_ours) {
+                    say("  ? %s 的备份其实是我们自己的构建 —— 原件已丢失，"
+                        "需要从原始包把同名 DLL 取回", to_utf8(s).c_str());
+                    ++suspect;
+                } else {
+                    say("已还原        %s（原件已回到原位）", to_utf8(s).c_str());
+                }
                 ++restored;
             } else {
                 say("  ! 还原 %s 失败 err=%lu —— 备份仍在 %s，可手工改名", to_utf8(s).c_str(),
@@ -1378,6 +1410,12 @@ int cmd_restore(const std::wstring& target_in, std::wstring dll_dir, bool force 
 
     section("结论");
     say("已还原 %d 个，已移除 %d 个，跳过 %d 个，失败 %d 个", restored, removed, skipped, failed);
+    if (suspect > 0) {
+        say("");
+        say("注意：%d 个\"备份\"其实是我们自己的构建（带构建标记），原件已丢失。",
+            suspect);
+        say("      这些位置需要从原始包重新取回同名 DLL，restore 变不出来。");
+    }
     if (!leftover.empty()) {
         say("");
         say("目录里还剩 %d 个备份文件（需要人工判断，可能里面才是原件）：",
@@ -1395,6 +1433,9 @@ int cmd_restore(const std::wstring& target_in, std::wstring dll_dir, bool force 
         say("PASS：这个目录里没有我们放的 DLL，也没有备份 —— 无需还原");
     } else if (skipped > 0 && restored + removed == 0) {
         say("PASS：跳过 %d 个（内容不像我们的 shim，未动）—— 如需强制删除加 --force", skipped);
+    } else if (suspect > 0) {
+        say("PASS（不完整）：%d 个位置已复位，其中 %d 个不是原件 —— 见上面的 ? 行",
+            restored, suspect);
     } else {
         say("PASS：%d 个原件已归位、%d 个多余 DLL 已清掉", restored, removed);
     }
