@@ -537,11 +537,56 @@ inline HRESULT WINAPI create_command_list_x(DeviceProxy* self, const void* desc,
 // we replace only "this" and preserve all other registers, stack arguments and
 // return values. These leaf thunks have no stack frame or generated code pages.
 // A slot with a differing signature must get its own adapter instead.
+// 槽位转发：**不用裸汇编**。
+//
+// 原来这里是 `__attribute__((naked))` 的 asm 跳板（改 this 后 jmp pc->vtable[N]），
+// 实测它在真实调用下会崩（t41 在 D3D12Core 内 AV），而同样语义的 C 版本正常。
+// 原因大概是内联汇编在 MinGW 下与 SEH/unwind 或寄存器分配冲突；不值得深究，
+// 直接换成"固定参数个数的 C 透传"：x64 下 this 走 rcx，前 4 个整数参数走
+// rcx/rdx/r8/r9，其余在栈上 —— C 函数按同样规则收下再原样传出去即可。
+// 已知边界：浮点参数会丢（设备方法基本没有）；参数超过 9 个会丢尾部（D3D12 里没有）。
 template <std::size_t N>
-__attribute__((naked)) void WINAPI forward_this() {
-    __asm__ volatile("movq 8(%%rcx), %%rcx\n\t"
-                     "movq (%%rcx), %%r11\n\t"
-                     "jmp *%c0(%%r11)" :: "i"(N * 8));
+uintptr_t WINAPI forward_slot(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0, uintptr_t a3 = 0,
+                              uintptr_t a4 = 0, uintptr_t a5 = 0, uintptr_t a6 = 0,
+                              uintptr_t a7 = 0, uintptr_t a8 = 0, uintptr_t a9 = 0) {
+    auto* proxy = static_cast<DeviceProxy*>(self);
+    using Fn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                             uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+    const auto pc_vtable = *reinterpret_cast<void***>(proxy->pc);
+    auto fn = reinterpret_cast<Fn>(pc_vtable[N]);
+    return fn(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+}
+
+// 诊断探针：XBGTASIX_SLOTPROBE=1 时把进过的槽位号记一次（每个槽位只记首次），
+// 然后照常转发。用来确认"调用方实际用的是哪套 vtable 布局"。
+inline bool slot_probe_on() {
+    static const bool on = [] {
+        char b[8] = {0};
+        return GetEnvironmentVariableA("XBGTASIX_SLOTPROBE", b, sizeof(b)) > 0 && b[0] == '1';
+    }();
+    return on;
+}
+
+inline void log_slot_once(std::size_t n) {
+    static std::atomic<unsigned> seen[4] = {};
+    const std::size_t w = n / 64;
+    const std::size_t bit = n % 64;
+    if (w >= 4) return;
+    const unsigned old = seen[w].fetch_or(1u << bit);
+    if ((old & (1u << bit)) == 0) xbgtasix::logf("[d3d12_xs] 槽位探针 slot=%zu", n);
+}
+
+template <std::size_t N>
+uintptr_t WINAPI slot_probe_forward(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                    uintptr_t a3 = 0, uintptr_t a4 = 0, uintptr_t a5 = 0,
+                                    uintptr_t a6 = 0, uintptr_t a7 = 0, uintptr_t a8 = 0,
+                                    uintptr_t a9 = 0) {
+    log_slot_once(N);
+    auto* proxy = static_cast<DeviceProxy*>(self);
+    using Fn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                             uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+    const auto pc_vtable = *reinterpret_cast<void***>(proxy->pc);
+    return reinterpret_cast<Fn>(pc_vtable[N])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
 }
 
 template <std::size_t N>
@@ -560,7 +605,8 @@ Slot device_slot() {
     if constexpr (N == 80) return reinterpret_cast<Slot>(&wait_frame_event_x);
     if constexpr (N == 81) return reinterpret_cast<Slot>(&frame_statistics_x);
     if constexpr (N >= 82) return reinterpret_cast<Slot>(&device_extension_stub);
-    return &forward_this<N>;
+    if (slot_probe_on()) return reinterpret_cast<Slot>(&slot_probe_forward<N>);  // 仅诊断用
+    return reinterpret_cast<Slot>(&forward_slot<N>);
 }
 
 template <std::size_t... N>
