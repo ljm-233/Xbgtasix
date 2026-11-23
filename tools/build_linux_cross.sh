@@ -53,7 +53,8 @@ FLAGS=(-std=c++20 -O2 -D_WIN32_WINNT=0x0A00 -DNOMINMAX -DWIN32_LEAN_AND_MEAN
 fail=0
 
 echo "== 编译 xmem.dll"
-"$CXX" "${FLAGS[@]}" -shared src/xmem/xmem.cpp src/trace.cpp \
+"$CXX" "${FLAGS[@]}" -shared src/xmem/xmem.cpp src/fstrace/fstrace.cpp \
+    src/fstrace/drives.cpp src/trace.cpp \
     -o "$OUT/xmem.dll" -Wl,--out-implib,"$OUT/libxmem.dll.a" || fail=1
 
 echo "== 编译 5 个主机硬件抽象层 DLL"
@@ -67,7 +68,15 @@ for m in AcpHal xapu chad xg_xs XCRDAPI; do
   esac
   echo "== 编译 $m.dll"
   { echo "LIBRARY $m"; echo "EXPORTS"; for x in $syms; do echo "  $x"; done; } > "$OUT/$m.def"
-  "$CXX" "${FLAGS[@]}" -shared src/console_hw/console_hw.cpp src/trace.cpp "$OUT/$m.def" \
+  # 每个模块一份源文件（与 build.sh 保持一致）：console_hw.cpp 已被拆分
+  case "$m" in
+    AcpHal)  SRC=src/console_hw/acphal.cpp ;;
+    xapu)    SRC=src/console_hw/xapu.cpp ;;
+    chad)    SRC=src/console_hw/chad.cpp ;;
+    xg_xs)   SRC=src/console_hw/xg_xs.cpp ;;
+    XCRDAPI) SRC=src/console_hw/xcrdapi.cpp ;;
+  esac
+  "$CXX" "${FLAGS[@]}" -shared "$SRC" src/trace.cpp "$OUT/$m.def" \
       -o "$OUT/$m.dll" -Wl,--out-implib,"$OUT/lib$m.dll.a" || fail=1
 done
 
