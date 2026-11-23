@@ -105,6 +105,43 @@
 
 第 1、2 步都不需要 exe 就能做完。
 
+## 已经做出来的样子
+
+`t38_xboxui` 渲染出的第一版界面（自绘，无第三方 UI 库）：
+
+![Xbox 风格 shell](../docs/images/xboxui.png)
+
+包含：顶部品牌条 + 绿色分隔线、左侧四项导航（选中态高亮）、右侧三张卡片、
+底部操作提示。全部由「色块 + GDI 文字图集」两种图元组成。
+
+技术选择（都是为了避开已知坑）：
+
+| 决定 | 原因 |
+|---|---|
+| 顶点走 `StructuredBuffer` + `SV_VertexID` | 项目里所有验证过的着色器都没用过 D3D12 **输入布局**；缺它 PSO 会 E_INVALIDARG |
+| 坐标在 CPU 算成 NDC | 不需要 cbuffer，少一个绑定点 |
+| 文字用 GDI 渲染进图集 | 不用做字形与排版；原生 `DrawText` 支持中文 |
+| 图集底色为黑 | 之后按亮度算 alpha；底色是白会导致整片文字变成实心块 |
+| 纯色块采样"不透明白像素" | 图集 alpha 全 0 时什么都画不出来（第一版截图全黑） |
+
+### 渲染链路
+
+```
+GDI 画文字 -> 1024x1024 位图（按亮度转 alpha）-> 上传成纹理图集
+D3D12：SV_VertexID 取 StructuredBuffer 顶点 -> 采样图集 * 顶点色
+先渲到离屏 RT -> CopyTextureRegion 读回 -> BMP 截图
+```
+
+`--shot <file.bmp>` 不需要人操作就能出图，所以它能进自动化测试（`run_suite` 里会生成
+`build/suite/xboxui.bmp`）。
+
+### 这一轮踩的四个坑（都记进了图形坑清单）
+
+1. **PSO E_INVALIDARG**：没给 `InputLayout`（VS 吃 POSITION/TEXCOORD/COLOR）
+2. **静态采样器 `ComparisonFunc = 0`** 不是合法枚举，同样让 PSO 创建失败
+3. **图集 alpha 全 0** → 截图全黑（纯色块也是采样图集）
+4. **纹理→缓冲用 `CopyResource`** 是非法操作，D3D12 静默忽略 → 读回永远黑
+
 ## 一句话
 
 **没有现成的"Xbox UI 中间件"可以直接拿**：官方的绑 UWP，最像的（Theseus）是 GPL，
