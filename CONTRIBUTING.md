@@ -11,7 +11,7 @@
 
 ```bash
 ./build.sh                 # 兼容层
-./tools/run_suite.sh       # 21 项测试
+./tools/run_suite.sh       # 39 步测试
 python tools/selftest_tools.py   # Python 工具自检
 python tools/check_docs.py       # 文档链接
 ```
@@ -20,8 +20,8 @@ python tools/check_docs.py       # 文档链接
 
 ## 加一个测试
 
-**命名**：`tests/t<N>_<名词>/`，编号接在现有最大号之后（当前到 `t15`）。
-`t7` 是历史空号，不要再占。
+**命名**：`tests/t<N>_<名词>/`，编号接在现有最大号之后（当前到 `t39`）。
+`t7` 与 `t16` 是历史空号，不要再占（`t16` 这一步是 Python 的 `tools/check_real_dlls.py`）。
 
 **必须遵守的两条约定**：
 

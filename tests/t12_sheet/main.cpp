@@ -20,6 +20,18 @@
 
 namespace {
 
+int g_fail = 0;
+int g_checks = 0;
+void ok(bool cond, const char* what, const char* detail = "") {
+    ++g_checks;
+    if (cond) {
+        xbgtasix::logf("[t12]   PASS  %-46s %s", what, detail);
+    } else {
+        xbgtasix::logf("[t12]   FAIL  %-46s %s", what, detail);
+        ++g_fail;
+    }
+}
+
 std::vector<std::string> list_pngs(const char* dir) {
     std::vector<std::string> out;
     WIN32_FIND_DATAA fd{};
@@ -75,6 +87,7 @@ int main(int argc, char** argv) {
     const std::string idx_path = std::string(outfile) + ".idx.txt";
     fopen_s(&idx, idx_path.c_str(), "w");
 
+    int decoded = 0;   // 真正解码并写进画布的格子数
     for (size_t k = 0; k < files.size(); ++k) {
         const std::string path = std::string(indir) + "\\" + files[k];
         IWICBitmapDecoder* dec = nullptr;
@@ -112,16 +125,41 @@ int main(int argc, char** argv) {
         if (idx) {
             std::fprintf(idx, "%zu\t%s\n", k, files[k].c_str());
         }
+        ++decoded;
         frame->Release();
         dec->Release();
     }
     if (idx) fclose(idx);
 
+    // ---- 断言 1：解码成功的格子数必须等于输入文件数 ----
+    // 以前这里一条断言都没有，只报"写文件成功"：解码全失败但 PNG 编码成功也算 PASS。
+    {
+        char detail[96];
+        _snprintf(detail, sizeof(detail), "decoded=%d files=%zu", decoded, files.size());
+        ok(decoded == static_cast<int>(files.size()), "解码成功的格子数 == 输入文件数", detail);
+    }
+    // ---- 断言 2：每格中心像素必须不是画布背景色 (24,24,28) ----
+    // 这是"这一格真的被贴了图"的像素级证据（空白格会留着背景色）。
+    {
+        int nonbg_cells = 0;
+        for (size_t k = 0; k < files.size(); ++k) {
+            const UINT cx = static_cast<UINT>(k % cols) * tile + tile / 2;
+            const UINT cy = static_cast<UINT>(k / cols) * tile + tile / 2;
+            const size_t i = (static_cast<size_t>(cy) * w + cx) * 4;
+            const bool is_bg = canvas[i + 0] == 24 && canvas[i + 1] == 24 && canvas[i + 2] == 28;
+            if (!is_bg) ++nonbg_cells;
+        }
+        char detail[96];
+        _snprintf(detail, sizeof(detail), "nonbg_cells=%d files=%zu", nonbg_cells, files.size());
+        ok(nonbg_cells == static_cast<int>(files.size()),
+           "每格中心像素都不是背景色 (24,24,28)", detail);
+    }
+
     // 编码
     IWICStream* stream = nullptr;
     IWICBitmapEncoder* enc = nullptr;
     IWICBitmapFrameEncode* ef = nullptr;
-    bool ok = false;
+    bool encoded = false;   // 注意：不能叫 ok，否则遮蔽上面的断言函数 ok()
     if (SUCCEEDED(factory->CreateStream(&stream)) &&
         SUCCEEDED(stream->InitializeFromFilename(widen(outfile).c_str(), GENERIC_WRITE)) &&
         SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc)) &&
@@ -130,14 +168,17 @@ int main(int argc, char** argv) {
         WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
         ef->SetSize(w, h);
         ef->SetPixelFormat(&fmt);
-        ok = SUCCEEDED(ef->WritePixels(h, w * 4, static_cast<UINT>(canvas.size()), canvas.data())) &&
-             SUCCEEDED(ef->Commit()) && SUCCEEDED(enc->Commit());
+        encoded =
+            SUCCEEDED(ef->WritePixels(h, w * 4, static_cast<UINT>(canvas.size()), canvas.data())) &&
+            SUCCEEDED(ef->Commit()) && SUCCEEDED(enc->Commit());
     }
     if (ef) ef->Release();
     if (enc) enc->Release();
     if (stream) stream->Release();
     factory->Release();
 
-    xbgtasix::logf("[t12] %s -> %s（%zu 格）", ok ? "OK" : "FAIL", outfile, files.size());
-    return ok ? 0 : 1;
+    xbgtasix::logf("[t12] %s -> %s（%zu 格，解码 %d 格，断言 %d 条）", encoded ? "OK" : "FAIL",
+                   outfile, files.size(), decoded, g_checks);
+    if (!encoded) return 1;   // 写文件失败
+    return g_fail ? 1 : 0;    // 断言失败
 }

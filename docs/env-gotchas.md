@@ -79,7 +79,8 @@ git -c http.sslBackend=openssl -> "Ignoring unavailable SSL backend 'openssl'"
 从 `.lib` 里解导出名时，会带出 CRT/编译器内部件：
 `RtlAlternateDosPathSeperator`、`HRESULT_FROM_WIN32`、`_XBLD_GRDK_*`、`PFX*` 私有前缀。
 
-31 个这种符号曾让导出数虚高（492 vs 实际 461）。现在 `gen_stubs.py` 按前缀过滤。
+31 个这种符号曾让导出计数虚高（在 461 之外再多出 31 个非 API 名）。现在 `gen_stubs.py`
+按前缀过滤。
 
 ## 7. `tempfile.mkdtemp` 建出来的目录可能与 `os.makedirs` 不可写
 

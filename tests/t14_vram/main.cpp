@@ -32,6 +32,16 @@ std::string fmt_mb(uint64_t bytes) {
 }
 
 int g_fail = 0;
+int g_checks = 0;
+void ok(bool cond, const char* what, const char* detail = "") {
+    ++g_checks;
+    if (cond) {
+        xbgtasix::logf("[t14]   PASS  %-46s %s", what, detail);
+    } else {
+        xbgtasix::logf("[t14]   FAIL  %-46s %s", what, detail);
+        ++g_fail;
+    }
+}
 
 ID3D12Resource* alloc_texture(ID3D12Device* dev, UINT mb) {
     D3D12_HEAP_PROPERTIES hp{};
@@ -105,15 +115,22 @@ int main() {
 
     DXGI_QUERY_VIDEO_MEMORY_INFO local{};
     DXGI_QUERY_VIDEO_MEMORY_INFO nonlocal{};
+    bool budget_ok = false;
     if (adapter3 &&
         SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) &&
         SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal))) {
+        budget_ok = true;
         xbgtasix::logf("[t14] 本地显存: budget=%s usage=%s 可预留=%s",
                        fmt_mb(local.Budget).c_str(), fmt_mb(local.CurrentUsage).c_str(),
                        fmt_mb(local.AvailableForReservation).c_str());
         xbgtasix::logf("[t14] 非本地  : budget=%s usage=%s",
                        fmt_mb(nonlocal.Budget).c_str(), fmt_mb(nonlocal.CurrentUsage).c_str());
     }
+    // 以前这里一条断言都没有：预算查询失败也只是打日志。
+    // 现代 Windows 一定有 IDXGIAdapter3；Budget 必须为正，否则"预算"这个概念没落地。
+    ok(adapter3 != nullptr, "拿到 IDXGIAdapter3（显存预算接口）");
+    ok(budget_ok, "QueryVideoMemoryInfo（LOCAL + NON_LOCAL）成功");
+    ok(local.Budget > 0, "LOCAL 段的 Budget > 0（驱动给了非零额度）");
 
     // ---- 3) 实测：按块递增分配，看真能拿到多少 ----
     std::vector<ID3D12Resource*> held;
@@ -129,20 +146,27 @@ int main() {
         if ((mb / kChunkMB) % 4 == 3) xbgtasix::logf("[t14] 已分配 %u MB", got_mb);
     }
     xbgtasix::logf("[t14] 实测可分配: %u MB（%.1f GB）", got_mb, got_mb / 1024.0);
-
+    // 期望值全是字面量：一块 = 256 MB；比例门槛 10% / 200%
+    ok(got_mb >= kChunkMB, "实测至少分配出一块 256MB 贴图");
     if (local.Budget) {
         const double ratio = 100.0 * (got_mb / 1024.0) / (local.Budget / 1024.0 / 1024.0 / 1024.0);
-        xbgtasix::logf("[t14] 实测/账面 = %.1f%%", ratio);
-    }
-    if (got_mb == 0) {
-        xbgtasix::logf("[t14] FAIL 一块都没分出去");
-        ++g_fail;
+        char detail[64];
+        _snprintf(detail, sizeof(detail), "%.1f%%（预算 %s）", ratio, fmt_mb(local.Budget).c_str());
+        // 下界永远有效：预算说有额度，就必须真的能分配出至少 1/10
+        ok(ratio >= 10.0, "实测可分配 >= 账面的 10%（预算不是空头支票）", detail);
+        // 上界只在"真的分配到失败"时有意义；跑满测试上限说明是我们自己停的
+        if (got_mb < kMaxTestMB) {
+            ok(ratio <= 200.0, "分配耗尽时实测/账面 <= 200%（预算没有明显低估）", detail);
+        } else {
+            xbgtasix::logf("[t14] 分配跑满测试上限 %u MB，未测到真实耗尽点（比例仅记录）", kMaxTestMB);
+        }
     }
 
     for (auto* r : held) r->Release();
     if (adapter3) adapter3->Release();
     dev->Release();
 
-    xbgtasix::logf("[t14] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");
+    xbgtasix::logf("[t14] done checks=%d failures=%d -> %s", g_checks, g_fail,
+                   g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
 }

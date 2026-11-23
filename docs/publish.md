@@ -1,91 +1,110 @@
-# 发布到 GitHub（本机没网络，做完只差 push）
+# 发布现状与重新发布
 
-## 为什么我不能替你推送
+仓库已经在 GitHub 上，CI 也在跑。这份文档只回答两件事：**现在发布到哪一步**、
+**下次怎么发**。
 
-当前环境没有出网能力，实测：
+## 一、现状（2026-11-23 核对）
 
+```bash
+git remote -v      # origin  https://github.com/ljm-233/Xbgtasix.git
+git rev-parse --short HEAD   # 85215e3
+gh api repos/ljm-233/Xbgtasix --jq '{default_branch,pushed_at,private}'
 ```
-Resolve-DnsName github.com  ->  127.0.0.1
-curl https://github.com     ->  000（连不上）
-gh                          ->  未安装
-~/.ssh/*.pub                ->  无
-git remote                  ->  未配置
+
+| 项 | 值 |
+|---|---|
+| 远端 | `https://github.com/ljm-233/Xbgtasix.git`（公开，默认分支 `main`） |
+| 本地提交 | 94 个，分支 `main`（工作区里可能有未提交的改动，`git status --porcelain` 自己确认） |
+| CI | `.github/workflows/ci.yml` 四个 job；Actions 上已有 **49 次运行**，最近一次 `success` |
+| 轮询工具 | `bash tools/ci_watch.sh 240 --jobs`（`gh` 已装在本机） |
+
+**一个必须知道的细节**：远端 `main` 的 head 是 `0fdc671`，本地是 `85215e3`，
+两者 SHA 不同源 —— 当初 git 的 TLS 后端报 `AcquireCredentialsHandle failed`，
+历史是用 `tools/push_via_api.py` 走 GitHub REST API 逐条重放上去的（提交信息、
+作者时间都保留，但 SHA 变了）。核对内容要按 tree 比，不要按 SHA 比：
+
+```bash
+git diff --name-only 0fdc671 HEAD    # 当前只有 1 个文件：src/xgameruntime/xgameruntime.cpp
 ```
 
-所以最后一步需要你在有网的环境执行。
+也就是说：远端内容 = 本地 `ee8e8f1`（tree 完全相同），本地 HEAD 比它多改了 1 个文件，
+**这条还没推上去**。正因为 SHA 不同源，普通 `git push` 会报 non-fast-forward，
+要么 `git push --force-with-lease`（确认 diff 只有上面那 1 个文件），
+要么沿用 `tools/push_via_api.py` 重放。
 
-## 方式一：直接在这台机器上推（最省事）
-
-在有网的时候（比如关掉代理限制、或换到正常网络），两条命令：
+## 二、重新发布（正常有网环境）
 
 ```bash
 cd D:/GTA6/Xbgtasix
-git remote add origin https://github.com/<你的账号>/Xbgtasix.git
-git push -u origin main
+./tools/run_suite.sh             # 39 步，38 PASS / 1 SKIP 才算能发
+python tools/check_docs.py       # 文档相对链接
+git add -A && git commit -m "<type>(<scope>): <一句话>"
+./tools/push.sh ljm-233/Xbgtasix   # export GITHUB_TOKEN=... 后执行，token 只经 stdin
+bash tools/ci_watch.sh 240 --jobs  # 等 CI，最多 4 分钟
 ```
 
-建仓时**不要**勾选 "Add a README / .gitignore / license"——本地已经有一份完整的，
-远程初始化反而要合并。
+`tools/push.sh` 的约定：token 只从 `GITHUB_TOKEN` 环境变量读，不落盘、不写进
+`git config`，推完把 remote 重置成不带凭据的 `https://` 地址。
+用完后到 GitHub 上 revoke 那个 token。
 
-## 方式二：用 bundle 搬运（本机永远没网时）
-
-我已经打了一个单文件仓库快照：
+历史不同源时（见上节），改用：
 
 ```bash
-# 本机生成（已执行）
-git bundle create ../Xbgtasix-<日期>.bundle --all
+git push --force-with-lease origin main          # 前提：diff 只有预期的那几个文件
+# 或
+python tools/push_via_api.py ljm-233/Xbgtasix    # 走 API 逐条重放，避免动 TLS
 ```
 
-到有网的机器上：
-
-```bash
-git clone Xbgtasix-<日期>.bundle Xbgtasix
-cd Xbgtasix
-git remote set-url origin https://github.com/<你的账号>/Xbgtasix.git
-git push -u origin main
-```
-
-bundle 自带全部提交历史，和直接 clone 等价。
-
-## 认证方式二选一
+## 三、认证方式二选一
 
 | 方式 | 命令 / 说明 |
 |---|---|
 | HTTPS + PAT | `git push` 时用户名填账号、密码填 **Personal Access Token**（需 `repo` 权限） |
-| SSH | 先生成 `ssh-keygen -t ed25519`，把 `~/.ssh/id_ed25519.pub` 贴到 GitHub → Settings → SSH keys，再把 remote 换成 `git@github.com:<账号>/Xbgtasix.git` |
+| SSH | 先生成 `ssh-keygen -t ed25519`，把 `~/.ssh/id_ed25519.pub` 贴到 GitHub → Settings → SSH keys，再把 remote 换成 `git@github.com:ljm-233/Xbgtasix.git` |
 
-## 推送前自查（已在本机执行过）
+## 四、推送前自查（2026-11-23 实测值）
 
 ```bash
-git ls-files | wc -l          # 85 个文件
-git ls-files -z | xargs -0 ls -la | sort -k5 -rn | head   # 最大 80 KB
+git ls-files | wc -l          # 142 个文件
+git ls-files -z | xargs -0 ls -la | sort -k5 -rn | head   # 最大 82 KB（docs/gdk_api_surface.md）
 git ls-files | grep -icE '\.(dll|exe|rpf|ttpf|pfx)$|keys' # 0
-du -sh .git                   # 2.7 MB
+du -sh .git                   # 5.1 MB
 ```
 
 - 入库内容：源码、测试、工具、文档
 - **不入库**：微软 GDK 头/库、游戏资产、任何密钥、构建产物（见 `.gitignore`）
 
-## 仓库里没有的东西（很重要）
+## 五、离线搬运（换一台没网的机器时）
+
+```bash
+git bundle create ../Xbgtasix-<日期>.bundle --all   # 单文件仓库快照
+```
+
+到有网的机器上 `git clone Xbgtasix-<日期>.bundle Xbgtasix`，再 `set-url` 到目标仓库、
+`push -u origin main`。bundle 自带全部提交历史，和直接 clone 等价。
+（`../Xbgtasix-20261122.bundle` 就是这样来的，是 11-22 的快照，可直接当备份。）
+
+## 六、仓库里没有的东西（很重要）
 
 这个仓库**不含**：
 
 - 游戏文件（`*.rpf` / `*.ttpf` / `*.dvd` / exe）
 - 微软 GDK 的头文件与导入库
-- 任何解密密钥或绕过手段
+- 解密密钥、破解或 DRM 绕过（`tools/packaging/` 里的工具只做格式解析，不破解）
 
 它包含的是：自写的兼容层、可断言的测试、以及**对公开数据的观测结论**。
 复现任何数据面结论都需要使用者自己的游戏副本。
 
-## CI 说明
+## 七、CI 说明
 
-`.github/workflows/ci.yml` 三个 job：
+`.github/workflows/ci.yml` 四个 job：
 
 | job | 内容 | 需要的条件 |
 |---|---|---|
 | `python-tools` | 用合成样本自检 5 个 Python 工具 | 无（纯标准库） |
 | `docs-links` | 检查 md 里的相对链接 | 无 |
-| `windows-build` | 构建 + 跑 21 项测试 | 需要 GDK 头/库，缺则打印说明后跳过 |
+| `linux-cross` | `ubuntu-latest` 交叉编译三个 shim，校验导出数 461 / 4 / 18 | 无 |
+| `windows-build` | 从 NuGet 拉官方 GDK → 完整构建 + 跑 39 步测试 | 需要 GDK 头/库，缺则打印说明后跳过 |
 
-`windows-build` 设为 `continue-on-error`：因为 GDK 头不能入库，绝大多数 CI 环境都会走"跳过"分支，
+`windows-build` 设为 `continue-on-error`：GDK 头不能入库，拿不到时走"无 GDK 子集"分支，
 这属于预期行为，不应该让 CI 变红。

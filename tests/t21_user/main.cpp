@@ -118,8 +118,11 @@ int main() {
     // ---- 查询 ----
     char tag[64] = {0};
     size_t used = 0;
-    ok(SUCCEEDED(XUserGetGamertag(u1, 0, sizeof(tag), tag, &used)) && std::strlen(tag) > 0,
-       "GetGamertag", tag);
+    // 本实现给本地用户的固定显示名是 "Player"（xgameruntime.cpp 里的常量），
+    // 以前只断言 strlen > 0，等于任何非空串都能过。现在比对固定串与 used 长度。
+    ok(SUCCEEDED(XUserGetGamertag(u1, 0, sizeof(tag), tag, &used)) &&
+           std::strcmp(tag, "Player") == 0 && used == 7,
+       "GetGamertag = \"Player\"，used = 7（含结尾 NUL）", tag);
     char small[3] = {0};
     ok(XUserGetGamertag(u1, 0, sizeof(small), small, &used) == E_NOT_SUFFICIENT_BUFFER,
        "小缓冲区报 E_NOT_SUFFICIENT_BUFFER");

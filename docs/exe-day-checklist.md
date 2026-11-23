@@ -1,6 +1,6 @@
 # exe 到手后：启动流程
 
-前提：`./build.sh` 能过、`./tools/run_suite.sh` 是 28 PASS / 1 SKIP。
+前提：`./build.sh` 能过、`./tools/run_suite.sh` 是 38 PASS / 1 SKIP（共 39 步）。
 下面每一步都有明确的"看到什么算成功、看到什么看哪里"。
 
 ## 0. 先备好环境（30 秒）
@@ -42,7 +42,7 @@ python tools/analyze_exe.py "$XBGTASIX_PKG/game_scarlett_master.exe"
 | `0xC0000135` | 缺依赖 DLL | 把 package 里同名 DLL 拷进 staging |
 | `0xC0000139` | 缺导出（入口点未找到） | 回第 1 步，用 `analyze_exe` 对表 |
 | `0xC0000005` | 访问冲突 | 看最后一条日志：多半是未实现接口返回空指针后被解引用 |
-| 窗口出现但黑屏 | 渲染未出画面 | 参考 [graphics-pitfalls.md](graphics-pitfalls.md) 的 7 条 |
+| 窗口出现但黑屏 | 渲染未出画面 | 参考 [graphics-pitfalls.md](graphics-pitfalls.md) 的 9 条 |
 
 日志里每条 `UNIMPLEMENTED` 后面都带**调用栈地址**——用 `addr2line` 或
 Visual Studio 的符号加载可以定位到是哪个模块调的。这就是排查的起点。

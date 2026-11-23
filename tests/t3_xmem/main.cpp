@@ -256,9 +256,10 @@ void test_query_after_free() {
     XMemFree(p);
     XMemVirtualQueryInfo info{};
     const bool got = XMemVirtualQuery(p, &info);
-    // 释放后地址可能仍在 isolate 区（保留但已 decommit），所以接受 MEM_FREE 或 MEM_RESERVE
-    ok(!got || info.State == MEM_FREE || info.State == MEM_RESERVE,
-       "qaf: 释放后区域已 free 或已 decommit（隔离区）");
+    // 以前写 `!got || State == MEM_FREE || State == MEM_RESERVE` —— !got 这一支
+    // 让"查不到"也算过，"释放了但还查得到"更是完全不管。现在钉死一种语义：
+    // 释放后实现把内存退到隔离区（MEM_DECOMMIT），所以必须查得到且状态是 MEM_RESERVE。
+    ok(got && info.State == MEM_RESERVE, "qaf: 释放后查得到且状态为 MEM_RESERVE（隔离区已 decommit）");
     xbgtasix::logf("[t3] query-after-free: got=%d state=0x%lx", got ? 1 : 0,
                  static_cast<unsigned long>(info.State));
 }

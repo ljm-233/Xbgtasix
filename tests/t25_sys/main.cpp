@@ -229,12 +229,18 @@ int main(int argc, char** argv) {
     }
 
     // ---- 7) 异步面：本模块应为 0 个 *Async ----
+    // 探针拿不到 DLL 导出表（静态链接）时"这一条什么都没验"，
+    // 以前写 ok(true, "跳过…") —— 那是把未验证当成通过。现在记 FAIL 行，
+    // 并让整个测试以 2（SKIP=有项未验证）退出，而不是 0（PASS）。
+    bool async_unverified = false;
     {
         const int n = probe_async_exports();
         if (n >= 0) {
             ok(n == 0, "本模块导出 0 个 *Async（有则必须让 block 完成）");
         } else {
-            ok(true, "跳过 *Async 探针（静态链接，无 DLL 导出表）");
+            ok(false, "异步面探针可用（静态链接时拿不到导出表）",
+               "本条未验证 -> 整体按 SKIP 退出");
+            async_unverified = true;
         }
     }
 
@@ -257,6 +263,12 @@ int main(int argc, char** argv) {
         ok(true, "XError 设置回调/选项不崩溃");
     }
 
-    xbgtasix::logf("[t25] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");
-    return g_fail ? 1 : 0;
+    xbgtasix::logf("[t25] done failures=%d async_unverified=%d -> %s", g_fail,
+                   async_unverified ? 1 : 0,
+                   g_fail ? "FAIL" : (async_unverified ? "SKIP（异步面未验证）" : "PASS"));
+    // 真正的逻辑失败优先（返回 1）；"探针不可用"那一条算 2（SKIP=有项未验证），
+    // 不能把它混进 FAIL，也不能让 0 退出——那正是以前的假绿。
+    if (g_fail - (async_unverified ? 1 : 0) > 0) return 1;
+    if (async_unverified) return 2;
+    return 0;
 }

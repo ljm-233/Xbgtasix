@@ -122,6 +122,9 @@ int main() {
     const std::string t0 = join(dir, "t0_hello.exe");
     const std::string probe_ok = join(dir, "probe_ok.exe");
     const std::string probe_un = join(dir, "probe_unimpl.exe");
+    // 依赖的探针/被检查 exe 缺失 = 对应用例"什么都没验"。
+    // 以前这些分支只打一行日志继续跑，最后照样 PASS；现在整体按 SKIP 退出。
+    bool probe_missing = false;
 
     // ---- 1) --version ----
     {
@@ -137,7 +140,8 @@ int main() {
            "rc=" + std::to_string(r.code));
         ok(contains(r.output, "导入模块"), "check 输出了模块统计");
     } else {
-        xbgtasix::logf("[t39] 缺 t0_hello.exe，跳过 check 用例");
+        xbgtasix::logf("[t39] 缺 t0_hello.exe -> check 用例未验证（整体按 SKIP 退出）");
+        probe_missing = true;
     }
 
     // ---- 3) verify（造一个只有 1/2 文件的假包）----
@@ -206,7 +210,9 @@ int main() {
         ok(contains(r.output, "分类          PASS"), "分类为 PASS");
         ok(contains(r.output, "已放置        3/3"), "三个 DLL 都放到位");
     } else {
-        xbgtasix::logf("[t39] 缺 probe_ok.exe，跳过该用例");
+        // 以前只打一行日志就继续，于是"探针缺失"的测试照样 PASS
+        xbgtasix::logf("[t39] 缺 probe_ok.exe -> 该用例未验证（整体按 SKIP 退出）");
+        probe_missing = true;
     }
 
     // ---- 5) run 未实现 + --stop ----
@@ -222,7 +228,8 @@ int main() {
         ok(contains(r.output, "XLaunchRestartOnCrash"), "列出撞到的 API 名字");
         ok(contains(r.output, "频次"), "给出未实现频次表");
     } else {
-        xbgtasix::logf("[t39] 缺 probe_unimpl.exe，跳过该用例");
+        xbgtasix::logf("[t39] 缺 probe_unimpl.exe -> 该用例未验证（整体按 SKIP 退出）");
+        probe_missing = true;
     }
 
     // ---- 6) run 目标不存在 ----
@@ -235,13 +242,26 @@ int main() {
     // ---- 7) doctor ----
     {
         RunResult r = run_capture(host, {"doctor"}, dir);
-        ok(r.code == 0 || r.code == 1, "doctor 能跑完", "rc=" + std::to_string(r.code));
+        // 以前是 `r.code == 0 || r.code == 1` —— 只要不崩就算过，等于没验结论。
+        // 现在要求退出码与输出自相印证：
+        //   0 -> 结论行是 "PASS："，且没有失败项
+        //   1 -> 结论行是 "FAIL："，且带失败项标记（"->"/"[!]"）
+        // 本机因 %TEMP% 不可写返回 1，属于后者。
+        const bool has_fail_text = contains(r.output, "FAIL：") && contains(r.output, "项需要处理");
+        const bool has_marker = contains(r.output, "->") || contains(r.output, "[!]");
+        const bool has_pass_text = contains(r.output, "PASS：");
+        ok((r.code == 0 && has_pass_text && !has_fail_text) ||
+               (r.code == 1 && has_fail_text && has_marker),
+           "doctor 退出码与结论标记一致（0=PASS / 1=有失败项）", "rc=" + std::to_string(r.code));
         const char* keys[] = {"OS", "GPU", "D3D12", "VC 运行库", "shim", "交互桌面"};
         for (const char* k : keys) {
             ok(contains(r.output, k), (std::string("doctor 输出了「") + k + "」").c_str());
         }
     }
 
-    xbgtasix::logf("[t39] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");
-    return g_fail ? 1 : 0;
+    xbgtasix::logf("[t39] done failures=%d probe_missing=%d -> %s", g_fail, probe_missing ? 1 : 0,
+                   g_fail ? "FAIL" : (probe_missing ? "SKIP（探针缺失，部分用例未验证）" : "PASS"));
+    if (g_fail) return 1;
+    if (probe_missing) return 2;
+    return 0;
 }

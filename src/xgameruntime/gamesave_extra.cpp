@@ -456,10 +456,30 @@ HRESULT peek_hr(XAsyncBlock* async)
 
 // ---------------- 容器目录 / 删除（带穿越检查） ----------------
 
+// 容器名必须"本来就合法"。以前直接用 sanitize()：它会把 ".." 洗成 "default"，
+// 于是 DeleteContainer("..") 返回 S_OK（测试 t24 抓到：这等于放行了路径穿越企图）。
+bool valid_container_name(const char* name)
+{
+    if (!name || !*name) return false;
+    const size_t len = strlen(name);
+    if (len >= GS_MAX_CONTAINER_NAME_SIZE) return false;
+    if (name[0] == '.' && (len == 1 || (name[1] == '.' && len == 2))) return false;  // "." / ".."
+    for (size_t i = 0; i < len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[i]);
+        if (c < 0x20) return false;
+        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' ||
+            c == '>' || c == '|') {
+            return false;
+        }
+    }
+    return !(name[len - 1] == '.' || name[len - 1] == ' ');
+}
+
 std::string container_dir(XGameSaveProviderHandle provider, const char* containerName)
 {
     if (!provider || !containerName || !containerName[0]) return {};
-    const std::string name = sanitize(containerName, GS_MAX_CONTAINER_NAME_SIZE - 1);
+    if (!valid_container_name(containerName)) return {};   // 非法名字直接判无效，不做"净化"
+    const std::string name = containerName;
     const std::string dir = provider->root + "\\" + name;
     if (!is_under(provider->root, dir)) {
         xbgtasix::logf("[save2] 容器名疑似路径穿越（已拒绝）: %s", containerName);

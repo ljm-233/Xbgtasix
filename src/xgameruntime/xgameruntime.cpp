@@ -341,8 +341,36 @@ struct PortHandle {
     XTaskQueuePort port;
 };
 
+// 一次 XTaskQueueTerminate 登记的终止回调（允许多次 Terminate，统一交付）
+struct TerminatedReg {
+    void* context;
+    XTaskQueueTerminatedCallback* callback;
+};
+
+struct TaskQueueState;
+
+// 本线程此刻正在替哪个队列跑 worker 循环 / 回调。
+// Terminate(wait=true) 在这种线程上不能等"自己退出"，否则必然死锁。
+thread_local TaskQueueState* t_worker_queue = nullptr;
+// 本线程此刻正在该队列的终止流程里（取消剩余项 / 交付 terminated 回调）。
+// 期间重入 Terminate 也不能阻塞等待，否则会等一个永远到不了的 cancel_done。
+thread_local TaskQueueState* t_terminating_queue = nullptr;
+
 struct TaskQueueState {
+    // 句柄引用：Create/DuplicateHandle/GetPort/复合持有/临时操作引用都记在这里
     std::atomic<int> refcount{1};
+    // 生命周期参与计数：创建时 1（"所有者"引用），每起一个 worker 再 +1。
+    // 谁把同一个原子减到 0，谁负责 delete —— 用它来选举唯一的销毁者，
+    // 这样"最后一个 Close 的线程"和"最后一个退出的 worker"不会同时判定该自己删。
+    std::atomic<int> lifetime{1};
+    // 还在跑的 worker 数：Terminate(wait=true) 靠它等到"所有回调都已退出"
+    std::atomic<int> workers_alive{0};
+    // worker 启动总数与"已走到退出点的 worker 数"：用序号唯一选出"最后一个退出者"，
+    // 避免两个 worker 同时看到 workers_alive==1 都以为自己是最后一个
+    int workers_total = 0;
+    std::atomic<int> workers_exiting{0};
+    // 最后一个句柄已关闭（进入销毁流程）；记录状态用，真正删不删由 lifetime 选举
+    std::atomic<bool> want_delete{false};
     // 非空表示这是一个复合队列：work/comp 分别转发给这两个队列
     TaskQueueState* forward_work = nullptr;
     TaskQueueState* forward_comp = nullptr;
@@ -354,30 +382,36 @@ struct TaskQueueState {
     std::condition_variable cv;
     std::deque<TaskEntry> work;
     std::deque<TaskEntry> comp;
-    std::atomic<bool> stopped{false};
-    // 线程池模式要按核数起多个 worker：主机上 ThreadPool 就是并行的，
-    // 只起 1 个线程会让"提交 8 个任务"退化成串行（实测这台机器 18 核）
-    std::vector<std::thread> workers;
+    std::atomic<bool> stopped{false};      // 已终止：不再接收新任务
+    std::atomic<bool> cancel_done{true};   // "剩余项以 canceled=true 取消"阶段已结束
+    // terminated 回调登记表；只交付一次
+    std::vector<TerminatedReg> term_cbs;
+    bool term_delivered = false;
+    // 注意：worker 线程一律 detach，不再保存 std::thread。
+    // 线程自己退出时归还 lifetime 引用；归零的那一个负责删除对象。
 
     std::deque<TaskEntry>& queue_for(XTaskQueuePort p) {
         return p == XTaskQueuePort::Completion ? comp : work;
     }
 
     void pump(XTaskQueuePort port) {
+        t_worker_queue = this;
         for (;;) {
             TaskEntry e{};
             {
                 std::unique_lock<std::mutex> lock(mu);
                 cv.wait(lock, [&] { return stopped.load() || !queue_for(port).empty(); });
-                if (queue_for(port).empty()) {
-                    if (stopped.load()) return;
-                    continue;
-                }
+                // 终止后队列里剩下的项由 request_stop 统一以 canceled=true 回调，
+                // pump 不能再抢出来跑成 canceled=false
+                if (stopped.load()) break;
+                if (queue_for(port).empty()) continue;
                 e = queue_for(port).front();
                 queue_for(port).pop_front();
             }
             if (e.callback) e.callback(e.context, false);
         }
+        worker_exit();             // 内部可能 delete this
+        t_worker_queue = nullptr;  // 只写 thread_local，对象已删也安全
     }
 
     static unsigned pool_size(XTaskQueueDispatchMode mode) {
@@ -391,11 +425,15 @@ struct TaskQueueState {
     void start_workers() {
         const unsigned nw = pool_size(work_mode);
         const unsigned nc = pool_size(comp_mode);
+        workers_total = static_cast<int>(nw + nc);
+        // 先把参与计数加上，再起线程：worker 退出时才不会把 lifetime 减成负数
+        workers_alive.fetch_add(workers_total);
+        lifetime.fetch_add(workers_total);
         for (unsigned i = 0; i < nw; ++i) {
-            workers.emplace_back([this] { pump(XTaskQueuePort::Work); });
+            std::thread([this] { pump(XTaskQueuePort::Work); }).detach();
         }
         for (unsigned i = 0; i < nc; ++i) {
-            workers.emplace_back([this] { pump(XTaskQueuePort::Completion); });
+            std::thread([this] { pump(XTaskQueuePort::Completion); }).detach();
         }
         if (nw || nc) {
             xbgtasix::logf("[xgamert] 队列线程: work=%u completion=%u（本机 %u 核）", nw, nc,
@@ -403,22 +441,160 @@ struct TaskQueueState {
         }
     }
 
-    void shutdown(bool wait) {
-        stopped.store(true);
+    // 置停止位，并把 work/comp 里尚未派发的项按 GDK 语义以 canceled=true 取消。
+    // 幂等：只有第一次调用真正取消；取消回调在锁外执行，避免用户代码重入死锁。
+    void request_stop() {
+        std::deque<TaskEntry> canceled;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            if (stopped.exchange(true)) return;   // 已经终止过，不重复取消
+            cancel_done.store(false);
+            canceled.swap(work);
+            canceled.insert(canceled.end(), comp.begin(), comp.end());
+            comp.clear();
+        }
+        cv.notify_all();   // 唤醒 worker：它们看到 stopped 就退出
+        TaskQueueState* prev = t_terminating_queue;
+        t_terminating_queue = this;
+        for (auto& e : canceled) {
+            if (e.callback) e.callback(e.context, true);
+        }
+        t_terminating_queue = prev;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            cancel_done.store(true);
+        }
         cv.notify_all();
-        if (!wait) return;
-        for (auto& t : workers) {
-            if (!t.joinable()) continue;
-            // 在 worker 自己的回调里 Terminate 会对自身 join -> 死锁；
-            // 这种情况交给 detach，让线程自行退出
-            if (t.get_id() == std::this_thread::get_id()) {
-                t.detach();
-            } else {
-                t.join();
+    }
+
+    // 交付所有已登记的 terminated 回调。与 worker_exit 竞争时只有一方能拿到登记表。
+    void deliver_terminated() {
+        std::vector<TerminatedReg> pending;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            if (term_delivered) return;
+            term_delivered = true;
+            pending.swap(term_cbs);
+        }
+        TaskQueueState* prev = t_terminating_queue;
+        t_terminating_queue = this;
+        for (auto& t : pending) {
+            if (t.callback) t.callback(t.context);
+        }
+        t_terminating_queue = prev;
+    }
+
+    void add_terminated(void* ctx, XTaskQueueTerminatedCallback* cb) {
+        bool already = false;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            if (term_delivered) already = true;
+            else term_cbs.push_back(TerminatedReg{ctx, cb});
+        }
+        // 终止已经彻底结束（例如重复 Terminate）：按"已终止"立即回调
+        if (already && cb) cb(ctx);
+    }
+
+    // worker 线程唯一的退出口。可能在这里 delete this，返回后不能再访问任何成员。
+    void worker_exit() {
+        // 第几个走到退出点的 worker。序号等于总数的那一个才是"最后一个"：
+        // 此时其他 worker 都已经跑完回调进入退出流程，terminated 回调可以安全交付。
+        const int idx = workers_exiting.fetch_add(1) + 1;
+        const bool last = (idx == workers_total);
+        std::vector<TerminatedReg> pending;
+        if (last) {
+            std::unique_lock<std::mutex> lock(mu);
+            // 等"取消剩余项"阶段结束：保证 terminated 回调晚于所有 canceled 回调，
+            // 也避免取消回调还在访问队列时对象就被销毁
+            cv.wait(lock, [this] { return cancel_done.load(); });
+            if (!term_delivered) {
+                term_delivered = true;
+                pending.swap(term_cbs);
             }
         }
-        workers.clear();
+        // 最后一个 worker 负责交付 terminated 回调。必须在 workers_alive 归零之前跑完：
+        // Terminate(wait=true) 等到 workers_alive==0 时会认为终止已经完成。
+        for (auto& t : pending) {
+            if (t.callback) t.callback(t.context);
+        }
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            --workers_alive;
+        }
+        cv.notify_all();   // 让 Terminate(wait=true) 看到 workers_alive 归零
+        // 交还本 worker 的生命周期引用：归零的那一个删对象，删完不再碰任何成员
+        if (lifetime.fetch_sub(1) == 1) {
+            xbgtasix::logf("[xgamert] 任务队列销毁（最后一个 worker 退出）");
+            delete this;
+        }
     }
+
+    // XTaskQueueTerminate 的实现。
+    // wait=true：等 worker 全部退出后再交付 terminated；wait=false：交给最后一个退出的 worker 触发。
+    void terminate(bool wait, void* ctx, XTaskQueueTerminatedCallback* cb) {
+        if (cb) add_terminated(ctx, cb);
+        const bool nested = (t_terminating_queue == this);
+        const bool on_self_worker = (t_worker_queue == this);
+        request_stop();
+        if (nested) return;   // 取消回调 / terminated 回调里重入的 Terminate，交给外层收尾
+        if (wait && !on_self_worker) {
+            std::unique_lock<std::mutex> lock(mu);
+            const bool drained = cv.wait_for(lock, std::chrono::seconds(5),
+                                             [this] { return workers_alive.load() == 0; });
+            lock.unlock();
+            if (!drained) {
+                xbgtasix::logf("[xgamert] XTaskQueueTerminate 等待 worker 退出超时（5s），继续交付 terminated");
+            }
+            deliver_terminated();
+        } else if (!on_self_worker && workers_alive.load() == 0) {
+            // 没有 worker 能替我们交付（Manual/Immediate/复合队列，或 worker 已全部退出）
+            deliver_terminated();
+        }
+    }
+};
+
+// 归还一个队列引用：句柄、DuplicateHandle、端口句柄、复合持有、临时操作引用都走这里。
+// 计数归零 → 标记销毁、停止队列并取消剩余项；lifetime 归零的那一个负责 delete。
+void release_queue(TaskQueueState* q) {
+    if (!q) return;
+    const int prev = q->refcount.fetch_sub(1);
+    if (prev > 1) return;    // 还有别的引用，对象继续存活
+    if (prev <= 0) return;   // 重复 Close（契约外）：直接忽略，避免二次销毁
+    // 只有第一个把引用计数减到 0 的调用负责"关闭流程"。取消/终止回调里如果又拿着
+    // 同一个句柄进来（临时引用 0→1→0），这里会直接返回，不会把所有者引用多还一次。
+    if (q->want_delete.exchange(true)) return;
+    q->request_stop();                          // 取消剩余项、唤醒并等 worker 退出
+    // 复合队列持有来源队列的引用，销毁时必须归还，否则来源队列及其线程永久泄漏
+    TaskQueueState* fw = q->forward_work;
+    TaskQueueState* fc = q->forward_comp;
+    q->forward_work = nullptr;
+    q->forward_comp = nullptr;
+    if (fw) release_queue(fw);
+    if (fc) release_queue(fc);
+    // 没有 worker 能替我们交付 terminated 回调（Manual/Immediate/复合队列）：
+    // 补一次交付，避免"取消回调里登记了 Terminate"这种情况把回调永远留在表里
+    if (q->workers_alive.load() == 0) q->deliver_terminated();
+    // 只有把 lifetime 减到 0 的线程删对象：其余线程在 fetch_sub 之后立刻返回，
+    // 不再触碰任何成员，因此不存在"一方 delete 另一方还在访问"的窗口
+    // 删除前的最后一次成员读取：走销毁路径时 want_delete 必定已置位
+    const bool closing = q->want_delete.load();
+    if (q->lifetime.fetch_sub(1) == 1) {
+        xbgtasix::logf("[xgamert] 任务队列销毁 %p（want_delete=%d）", static_cast<void*>(q),
+                       closing ? 1 : 0);
+        delete q;
+    }
+}
+
+// 临时"操作引用"：防止本次调用期间最后一个句柄被回调 Close 掉，
+// 导致函数返回途中还在访问已经销毁的队列。
+struct QueueOpGuard {
+    TaskQueueState* q;
+    explicit QueueOpGuard(TaskQueueState* queue) : q(queue) {
+        if (q) q->refcount.fetch_add(1);
+    }
+    ~QueueOpGuard() { release_queue(q); }
+    QueueOpGuard(const QueueOpGuard&) = delete;
+    QueueOpGuard& operator=(const QueueOpGuard&) = delete;
 };
 
 // ---------------- 用户 ----------------
@@ -476,6 +652,9 @@ STDAPI XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, voi
                                XTaskQueueCallback* callback) noexcept {
     if (!queue || !callback) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    QueueOpGuard op(q);   // 回调里可能把最后一个句柄 Close 掉，本次调用期间对象必须活着
+    // 头文件契约：已终止的队列不能再接收新任务（残余项已在终止时按 canceled=true 取消）
+    if (q->stopped.load()) return S_OK;
     // 复合队列：把任务原样交给来源队列，排队/派发完全由那边负责
     if (q->forward_work || q->forward_comp) {
         TaskQueueState* target = (port == XTaskQueuePort::Completion) ? q->forward_comp
@@ -526,10 +705,7 @@ STDAPI XTaskQueueSubmitDelayedCallback(XTaskQueueHandle queue, XTaskQueuePort po
     std::thread([q, queue, port, delayMs, context, callback] {
         std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
         if (!q->stopped.load()) XTaskQueueSubmitCallback(queue, port, context, callback);
-        if (q->refcount.fetch_sub(1) == 1) {   // 关了句柄才由最后一个人释放
-            q->shutdown(true);
-            delete q;
-        }
+        release_queue(q);   // 归还临时引用；最后一个引用会负责停止并销毁队列
     }).detach();
     return S_OK;
 }
@@ -538,9 +714,12 @@ STDAPI_(bool) XTaskQueueDispatch(XTaskQueueHandle queue, XTaskQueuePort port,
                                 uint32_t timeoutInMs) noexcept {
     if (!queue) return false;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
+    QueueOpGuard op(q);   // 派发的回调里可能 Close 掉最后一个句柄
     TaskEntry e{};
     {
         std::unique_lock<std::mutex> lock(q->mu);
+        // 终止后剩余项已经被 request_stop 以 canceled=true 取消，这里不再派发
+        if (q->stopped.load()) return false;
         auto ready = [&] { return q->stopped.load() || !q->queue_for(port).empty(); };
         if (timeoutInMs == 0 ? !ready() : !q->cv.wait_for(lock, std::chrono::milliseconds(timeoutInMs), ready))
             return false;
@@ -556,8 +735,11 @@ STDAPI XTaskQueueTerminate(XTaskQueueHandle queue, bool wait, void* context,
                            XTaskQueueTerminatedCallback* callback) noexcept {
     if (!queue) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
-    q->shutdown(wait);
-    if (callback) callback(context);
+    {
+        // 终止流程会同步跑取消回调，回调里可能把最后一个句柄 Close 掉
+        QueueOpGuard op(q);
+        q->terminate(wait, context, callback);
+    }
     xbgtasix::logf("[xgamert] XTaskQueueTerminate(wait=%d)", wait ? 1 : 0);
     return S_OK;
 }
@@ -572,14 +754,18 @@ STDAPI_(void) XTaskQueueCloseHandle(XTaskQueueHandle queue) noexcept {
         auto it = g_port_handles.find(reinterpret_cast<void*>(queue));
         if (it != g_port_handles.end()) {
             g_port_handles.erase(it);
-            delete reinterpret_cast<PortHandle*>(queue);
+            // 端口句柄在 GetPort 时给队列加过一次引用，关端口必须归还，
+            // 否则引用计数永不归零，shutdown/delete 永远不会发生
+            auto* ph = reinterpret_cast<PortHandle*>(queue);
+            TaskQueueState* owning = ph->queue;
+            delete ph;
+            release_queue(owning);
             return;
         }
     }
-    auto* q = reinterpret_cast<TaskQueueState*>(queue);
-    if (q->refcount.fetch_sub(1) > 1) return;   // DuplicateHandle 后要等引用计数归零
-    q->shutdown(true);
-    delete q;
+    // 队列句柄：Close 与销毁统一走 release_queue，
+    // 保证"在回调里 Close / GetPort 后再 Close"都能把引用正确归零
+    release_queue(reinterpret_cast<TaskQueueState*>(queue));
 }
 
 STDAPI XTaskQueueDuplicateHandle(XTaskQueueHandle queueHandle, XTaskQueueHandle* duplicated) noexcept {

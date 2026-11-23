@@ -114,7 +114,8 @@ int main(int argc, char** argv) {
     DeleteFileA(file.c_str());
     int64_t quota2 = -1;
     ok(SUCCEEDED(XGameSaveFilesGetRemainingQuota(nullptr, "slot1", &quota2)), "GetRemainingQuota(删除后)");
-    ok(quota2 >= quota0, "删除后配额恢复（>= 写前）");
+    // 以前写 quota2 >= quota0：多还配额（算错账）也能过。删除后必须**精确**回到写前。
+    ok(quota2 == quota0, "删除后配额恢复到写前的精确值（==，不是 >=）");
 
     xbgtasix::logf("[t19] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;

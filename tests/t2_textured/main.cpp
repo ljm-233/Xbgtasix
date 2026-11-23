@@ -503,7 +503,13 @@ int main() {
             xbgtasix::logf("[t2] tint=1.0 -> (%u,%u,%u,%u)", a[0], a[1], a[2], a[3]);
             xbgtasix::logf("[t2] tint=0.5 -> (%u,%u,%u,%u)", b[0], b[1], b[2], b[3]);
 
-            const bool drawn = a[3] == 255 && a[0] + a[1] + a[2] > 30;
+            // 只比 "rgb 之和 > 30" 会放过清屏色：kClear = 0.05 -> (13,13,13)，
+            // 和 = 39 > 30，所以"根本没画东西"也能过。改为逐通道与清屏色 (13,13,13)
+            // 相差都 > 20（实际纹理是 (240,60,40)，三个通道差分别是 227 / 47 / 27）。
+            const bool drawn = a[3] == 255 &&
+                               std::abs(int(a[0]) - 13) > 20 &&
+                               std::abs(int(a[1]) - 13) > 20 &&
+                               std::abs(int(a[2]) - 13) > 20;
             const bool halved = std::abs(int(a[0]) - 2 * int(b[0])) <= 4 &&
                                 std::abs(int(a[1]) - 2 * int(b[1])) <= 4 &&
                                 std::abs(int(a[2]) - 2 * int(b[2])) <= 4;
