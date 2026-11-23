@@ -129,6 +129,7 @@ run_one t31 t31_swapchain.exe
 run_one t32 t32_window.exe
 run_one t33 t33_memory.exe
 run_one t34 t34_residency.exe
+run_one t35 t35_gamepad.exe
 run_one t15 t15_budget.exe
 
 if [ -d "$PKG" ]; then
