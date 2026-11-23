@@ -247,7 +247,22 @@ int main() {
                                   dir);
         ok(r.code == 0, "run 正常程序退出码 0", "rc=" + std::to_string(r.code));
         ok(contains(r.output, "分类          PASS"), "分类为 PASS");
-        ok(contains(r.output, "已放置        3/3"), "三个 DLL 都放到位");
+        // shim 数量会随需求增长（3 -> 8），断言不能写死具体数字：
+        // 只要求 n/n 形式，且 n >= 3
+        ok(contains(r.output, "/"), "run 报告了放置数量");
+        {
+            const size_t p = r.output.find("已放置");
+            bool okn = false;
+            if (p != std::string::npos) {
+                const size_t slash = r.output.find('/', p);
+                if (slash != std::string::npos) {
+                    const int n1 = std::atoi(r.output.c_str() + p + 9);
+                    const int n2 = std::atoi(r.output.c_str() + slash + 1);
+                    okn = (n1 == n2 && n1 >= 3);
+                }
+            }
+            ok(okn, "所有 shim 都放到位（n/n 且 n>=3）");
+        }
     } else {
         // 以前只打一行日志就继续，于是"探针缺失"的测试照样 PASS
         xbgtasix::logf("[t39] 缺 probe_ok.exe -> 该用例未验证（整体按 SKIP 退出）");

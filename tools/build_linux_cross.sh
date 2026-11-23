@@ -56,6 +56,21 @@ echo "== 编译 xmem.dll"
 "$CXX" "${FLAGS[@]}" -shared src/xmem/xmem.cpp src/trace.cpp \
     -o "$OUT/xmem.dll" -Wl,--out-implib,"$OUT/libxmem.dll.a" || fail=1
 
+echo "== 编译 5 个主机硬件抽象层 DLL"
+for m in AcpHal xapu chad xg_xs XCRDAPI; do
+  case "$m" in
+    AcpHal)   syms="AcpHalCreate AcpHalAllocateShapeContexts AcpHalReleaseShapeContexts ApuAlloc ApuCreateHeap ApuFree ApuIsVirtualAddressValid ApuMapApuAddress ApuMapVirtualAddress" ;;
+    xapu)     syms="XApuConnect XApuDisconnect XApuEnqueueCommand XApuDequeueResult XApuGetResultCount" ;;
+    chad)     syms="XDspActivate XDspDeactivate XDspConnectWithMaximumStreamLimit XDspDisconnect XDspSubmitCommand" ;;
+    xg_xs)    syms="XGSuggestSwizzleMode XGCreateTextureComputer" ;;
+    XCRDAPI)  syms="DStorageGetFactory" ;;
+  esac
+  echo "== 编译 $m.dll"
+  { echo "LIBRARY $m"; echo "EXPORTS"; for x in $syms; do echo "  $x"; done; } > "$OUT/$m.def"
+  "$CXX" "${FLAGS[@]}" -shared src/console_hw/console_hw.cpp src/trace.cpp "$OUT/$m.def" \
+      -o "$OUT/$m.dll" -Wl,--out-implib,"$OUT/lib$m.dll.a" || fail=1
+done
+
 echo "== 编译 d3d12_xs.dll"
 "$CXX" "${FLAGS[@]}" -shared src/d3d12_xs/d3d12_xs.cpp src/trace.cpp \
     src/d3d12_xs/forward.def -ldxgi -ldxguid \

@@ -187,6 +187,8 @@ std::string exe_name_of_dir(const std::wstring& dir);   // 前向声明
 const wchar_t* kShims[] = {L"xgameruntime.dll",  L"xmem.dll",   L"d3d12_xs.dll",
                            L"AcpHal.dll",        L"xapu.dll",   L"chad.dll",
                            L"xg_xs.dll",         L"XCRDAPI.dll"};
+// 上面的个数：写死 3 会在扩充 shim 后让 run/doctor 直接判"不齐"（实测 CI 就栽在这）
+constexpr int kShimCount = static_cast<int>(sizeof(kShims) / sizeof(kShims[0]));
 
 // 找 shim 所在目录：优先 --dll-dir，其次自身目录
 std::wstring resolve_dll_dir(const std::wstring& explicit_dir) {
@@ -743,8 +745,8 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
         for (const wchar_t* s : kShims) {
             if (file_exists(join(d, s))) ++have;
         }
-        say("  shim          %d/3 在 %s", have, to_utf8(d).c_str());
-        if (have != 3) {
+        say("  shim          %d/%d 在 %s", have, kShimCount, to_utf8(d).c_str());
+        if (have != kShimCount) {
             say("                -> 先 build.sh，或用 --dll-dir 指定");
             ++critical;
         }
@@ -965,9 +967,9 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     for (const wchar_t* s : kShims) {
         if (file_exists(join(dll_dir, s))) ++shims;
     }
-    say("shim          %d/3 在 %s", shims, to_utf8(dll_dir).c_str());
-    if (shims != 3) {
-        say("错误：三个 shim 不齐，先跑 build.sh");
+    say("shim          %d/%d 在 %s", shims, kShimCount, to_utf8(dll_dir).c_str());
+    if (shims != kShimCount) {
+        say("错误：shim 不齐（需要 %d 个），先跑 build.sh", kShimCount);
         return 2;
     }
 
@@ -1039,8 +1041,8 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
             say("  ! 拷贝失败 %s err=%lu", to_utf8(s).c_str(), GetLastError());
         }
     }
-    say("已放置        %d/3 个 DLL", copied);
-    if (copied != 3) {
+    say("已放置        %d/%d 个 DLL", copied, kShimCount);
+    if (copied != kShimCount) {
         say("错误：DLL 没放全，后面必然起不来");
         return 2;
     }
