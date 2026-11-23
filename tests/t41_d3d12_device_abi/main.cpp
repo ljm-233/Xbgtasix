@@ -347,7 +347,7 @@ int main(int argc, char** argv) {
     if (FAILED(hr) || !raw) return fail("pass through CreateCommittedResource", hr);
     static_cast<ID3D12Resource*>(raw)->Release();
 
-    std::printf("[t41] PASS: %s, heap types 1/2/3, slot 48 queue/native heap paths, slot 73 desktop GPU copies and Xbox IID guard, IUnknown identity, native passthrough\n",
+    std::printf("[t41] PASS: %s, heap types 1/2/3, slot 48 queue/list proxies, slot 73 Xbox list extensions and GPU copies, IUnknown identity, native passthrough\n",
                 iid == &kDevice11 ? "ID3D12Device11" : "ID3D12Device");
     return 0;
 }

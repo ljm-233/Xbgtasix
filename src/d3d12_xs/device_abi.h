@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <utility>
 
@@ -19,7 +20,7 @@ namespace xbgtasix::d3d12 {
 // some supported MinGW headers stop at ID3D12Device10.
 inline constexpr GUID kDevice11 = {0x5405c344, 0xd457, 0x444e,
                                     {0xb4, 0xdd, 0x23, 0x66, 0xe4, 0x5a, 0xee, 0x39}};
-inline constexpr std::size_t kDeviceSlots = 80;
+inline constexpr std::size_t kDeviceSlots = 140;
 inline constexpr std::size_t kCustomHeapPropertiesSlot = 26;
 inline constexpr std::size_t kQueueOrOpenHeapSlot = 48;
 inline constexpr std::size_t kXboxCreateCommandListSlot = 73;
@@ -158,6 +159,91 @@ inline HRESULT WINAPI queue_or_open_heap(DeviceProxy* self, const void* desc,
                    xbox.priority, xbox.flags, flags, xbox.node_mask,
                    static_cast<unsigned long>(hr), *out ? "yes" : "no");
     return (*out || FAILED(hr)) ? hr : E_OUTOFMEMORY;
+}
+
+// Xbox frame pacing occupies device slots 78?81. These calls are not present
+// in the desktop device vtable; keeping them in a small process-local clock is
+// enough to preserve the ABI and to keep the title's startup thread moving.
+struct FrameState {
+    std::mutex mutex;
+    UINT interval_us = 0;
+    bool active = false;
+    std::array<bool, 3> scheduled{};
+    UINT64 next_token = 1;
+};
+
+inline FrameState& frame_state() {
+    static FrameState state;
+    return state;
+}
+
+inline HRESULT WINAPI set_frame_interval_x(DeviceProxy*, void*, UINT interval_us,
+                                           UINT periodicity, UINT flags) {
+    auto& state = frame_state();
+    {
+        std::lock_guard lock(state.mutex);
+        state.interval_us = interval_us;
+        state.active = interval_us != 0;
+        if (!state.active) state.scheduled.fill(false);
+    }
+    xbgtasix::logf("[d3d12_xs] device slot 78 SetFrameIntervalX interval=%u periodicity=%u flags=0x%x",
+                   interval_us, periodicity, flags);
+    return S_OK;
+}
+
+inline HRESULT WINAPI schedule_frame_event_x(DeviceProxy*, UINT type, UINT offset_us,
+                                              const void* block, UINT flags) {
+    auto& state = frame_state();
+    if (type >= state.scheduled.size()) return E_INVALIDARG;
+    {
+        std::lock_guard lock(state.mutex);
+        if (flags & 1u) state.scheduled[type] = false;
+        else {
+            state.active = true;
+            state.scheduled[type] = true;
+        }
+    }
+    xbgtasix::logf("[d3d12_xs] device slot 79 ScheduleFrameEventX type=%u offset=%u block=%p flags=0x%x",
+                   type, offset_us, block, flags);
+    return S_OK;
+}
+
+inline HRESULT WINAPI wait_frame_event_x(DeviceProxy*, UINT type, UINT timeout_ms,
+                                          const void* block, UINT flags, UINT64* token) {
+    auto& state = frame_state();
+    if (type >= state.scheduled.size()) return E_INVALIDARG;
+    UINT64 issued = 0;
+    {
+        std::lock_guard lock(state.mutex);
+        if (token && *token != 0) issued = *token;
+        if (issued == 0) issued = state.next_token++;
+        if (token) *token = issued;
+    }
+    xbgtasix::logf("[d3d12_xs] device slot 80 WaitFrameEventX type=%u timeout=%u block=%p flags=0x%x token=0x%llx",
+                   type, timeout_ms, block, flags, static_cast<unsigned long long>(issued));
+    return S_OK;
+}
+
+inline HRESULT WINAPI frame_statistics_x(DeviceProxy*, UINT64 token, UINT type,
+                                         UINT* count, void* stats) {
+    if (!count) return E_POINTER;
+    if (*count != 0 && stats) {
+        std::memset(stats, 0, 0x20);
+        *static_cast<UINT*>(stats) = type;
+    }
+    if (*count != 0) *count = 1;
+    xbgtasix::logf("[d3d12_xs] device slot 81 GetFrameStatisticsX token=0x%llx type=%u count=%u",
+                   static_cast<unsigned long long>(token), type, *count);
+    return S_OK;
+}
+
+inline HRESULT WINAPI device_extension_stub(DeviceProxy*, UINT64 a, UINT64 b, UINT64 c,
+                                             UINT64 d) {
+    xbgtasix::logf("[d3d12_xs] unmodeled Xbox device extension called a=0x%llx b=0x%llx "
+                   "c=0x%llx d=0x%llx -> S_OK", static_cast<unsigned long long>(a),
+                   static_cast<unsigned long long>(b), static_cast<unsigned long long>(c),
+                   static_cast<unsigned long long>(d));
+    return S_OK;
 }
 
 // The Xbox command-list interface keeps the ordinary D3D12 list methods at
@@ -469,6 +555,11 @@ Slot device_slot() {
         return reinterpret_cast<Slot>(&queue_or_open_heap);
     if constexpr (N == kXboxCreateCommandListSlot)
         return reinterpret_cast<Slot>(&create_command_list_x);
+    if constexpr (N == 78) return reinterpret_cast<Slot>(&set_frame_interval_x);
+    if constexpr (N == 79) return reinterpret_cast<Slot>(&schedule_frame_event_x);
+    if constexpr (N == 80) return reinterpret_cast<Slot>(&wait_frame_event_x);
+    if constexpr (N == 81) return reinterpret_cast<Slot>(&frame_statistics_x);
+    if constexpr (N >= 82) return reinterpret_cast<Slot>(&device_extension_stub);
     return &forward_this<N>;
 }
 
