@@ -504,6 +504,12 @@ else
   echo "  警告：没有 dxc 或 SKIP_SHADERS=1，跳过 UI 着色器（t38 运行时会缺 .cso）" >&2
 fi
 
+echo "== t40_taskqueue3.exe"
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t40_taskqueue3/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t40_taskqueue3.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
