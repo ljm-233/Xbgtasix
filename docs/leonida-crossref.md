@@ -92,6 +92,66 @@ XDAT 目录，tag `0x07` 明确写 `NOBC`（不发 LLVM bitcode），真代码�
 
 ---
 
+## 二之二、实测：直接跑它的 runtime（2026-11-24）
+
+不需要 MSVC —— 用它 CI 的 `runtime-windows` 产物（78,166,622 B，分支
+`runtime/fix-c4456-warnings`，GitHub Actions artifact `14867675762`）就能验。
+
+| 环节 | 命令/工具 | 结果 |
+|---|---|---|
+| 加载本包的真实 EXE | `gta6rt --dry-run` / `--init` | **12 个模块全部映射，0 个未实现导入**，exit 0 |
+| 它的 Vulkan 设备 | `vk_device_pick_test` | 全部用例通过 |
+| 它的渲染回放 | `clear_color_test` | **462** 项 integer/float replay 检查通过 |
+| **驱动能不能吃我们的 SPIR-V** | `vk_pipeline_check <2.1 节的 spirv 目录>` | **6 ok / 0 failed**，RTX 5060 Laptop，mean 0.202 s；工具自报 "64-wide subgroups not supported for ps"，6 条按无 required subgroup size 编译 |
+
+最后一行是这次最值钱的结论：**它自己的工具证明驱动接受了我们翻译出来的 SPIR-V**，
+不是只过 `spirv-val`。
+
+### 跑真标题时撞到的三件事（都不是它的层失败）
+
+1. **`%TEMP%` 不可写 → 它的静态 TLS 克隆失败**，报错却是
+   `gta6rt_tls_host.dll is missing`。实测那个 DLL 是好的（TLS index=2），
+   失败的是 `CopyFileW` 到 `%TEMP%`（err=5）。把 `TMP`/`TEMP` 指到工作区后克隆成功（index=6）。
+   已记进 [env-gotchas](env-gotchas.md) 第 8 条。
+2. **本包的原版 `d3d12_xs.dll` / `xmem.dll` 已经不在了**：两个
+   `*.xbgtasix-backup` 里都含我们的构建标记（"xbgtasix"），说明当年备份时目标已经是我们的产物。
+   换回去等于换回旧 shim，于是它的层根本没被调用——这次运行的 trace 里 **D3D12 事件 0 条**。
+3. 标题在 0.96 s 于 `game+0x1E1D01B` 触发 `0x80000003`(int3)。用 `tools/xref.py` 定位：
+   所属函数 `0x1E1CF60..0x1E1D5ED`，**只引用两个导入**
+   `d3d12_xs.dll!D3D12ConfigureVirtualMemoryX` 与 `xmem.dll!XMemVirtualAlloc`（后者被调 6 次）。
+   即显卡虚拟内存配置那段。因为第 2 条，这次跑到的是"我们的旧 shim + 它的 loader"，
+   **不能算它的层失败**；但它给出了一个有用的事实：`D3D12ConfigureVirtualMemoryX`
+   返回之后紧跟的断言对返回值和分配结果有硬要求，我们现在"记日志 + 返回 S_OK"是恰好没炸，不是对了。
+
+要把它验完整，只差一步：**从原始包把这两个原版 DLL 取回来**。
+
+### 顺带修掉的一个我们自己的 bug
+
+`xbgtasix run` 的备份机制不幂等：只要背包里已经出现过"目标是我们自己的 DLL"的情况
+（例如按 [HANDOFF](HANDOFF-GPT.md) 用 `bash cp` 手工部署），它会把我们的产物存成
+`*.xbgtasix-backup`，**从此原版就没了，而 `restore` 还会报告"已还原"**。
+
+修法（已落地于 `src/host/main.cpp`）：
+
+- 备份前判断目标是否含我们的构建标记；含则**不产生备份**，并提示"原版不在这里，需从原始包取回"；
+- `restore` 遇到带标记的备份时**明说"原件已丢失"**，汇总行改成 `PASS（不完整）`；
+- `--dry-run` 同步显示这条判断。
+
+隔离目录实测三种情形（假 exe + 三个假 DLL）：
+
+```
+已备份 xgameruntime.dll -> ....xbgtasix-backup          ← 原版，正常备份
+已备份 xmem.dll -> ....xbgtasix-backup                  ← 原版，正常备份
+d3d12_xs.dll 已经是我们自己的产物（原版不在这里）——不写入 .xbgtasix-backup
+...
+? xmem.dll 的备份其实是我们自己的构建 —— 原件已丢失，需要从原始包把同名 DLL 取回
+PASS（不完整）：2 个位置已复位，其中 1 个不是原件
+```
+
+回归：`t30_fakegame` 通过，全套 **39 PASS / 2 SKIP / 0 FAIL**。
+
+---
+
 ## 三、三个数字：21,522 / 25,734 / 26,503
 
 [shader-corpus.md](shader-corpus.md) 的 21,522 条、34.8% NEG、p99=98 这些统计，
