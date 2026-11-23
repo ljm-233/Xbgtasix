@@ -46,8 +46,20 @@ def ready(out):
 def fetch(pkg, version, dest):
     path = os.path.join(dest, "%s.%s.nupkg" % (pkg, version))
     if os.path.isfile(path) and os.path.getsize(path) > 1024 * 1024:
-        print("  已有缓存: %s" % os.path.basename(path))
-        return path
+        # 缓存只看大小是不够的：半截下载/错误页只要超过 1MB 就会被永久当成缓存，
+        # 后面 zipfile 才报一个难懂的 BadZipFile。这里先验一次能否打开。
+        try:
+            with zipfile.ZipFile(path) as z:
+                if z.namelist():
+                    print("  已有缓存: %s" % os.path.basename(path))
+                    return path
+            print("  缓存不完整，重新下载")
+        except Exception:
+            print("  缓存损坏（不是有效 zip），重新下载")
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     print("  下载: %s" % url_for(pkg, version))
     # nuget.org 对 uv 或默认 UA 都可能 403，显式给个 UA
     req = urllib.request.Request(url_for(pkg, version), headers={"User-Agent": "xbgtasix-fetch/1.0"})

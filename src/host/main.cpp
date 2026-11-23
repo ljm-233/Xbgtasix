@@ -188,24 +188,59 @@ std::wstring resolve_dll_dir(const std::wstring& explicit_dir) {
 
 // ---------------------------------------------------------------- verify
 struct VerifyResult {
+    bool too_big = false;    // layout 文件过大，无法完整核对
     int listed = 0;
     int present = 0;
     int unexpanded = 0;                     // 含通配符、静态展开不了的条目数
     std::vector<std::string> missing;
+    std::vector<std::string> empty_files;   // 存在但是 0 字节
     std::vector<std::string> invalid;       // 归一出包目录（../、绝对路径、盘符）的坏条目
     std::vector<std::string> unexpanded_list;
     std::string layout_file;
 };
 
 // 从一段 XML 文本里取某个属性值
+// 解析 XML 属性：兼容 `name="v"`、`name = "v"`、`name='v'`，并还原常见实体。
+// 原来的实现只认 `name="`，遇到 `name = "` 或单引号就把整条当不存在
+// （layout 一旦换写法，verify 会静默少算条目 -> 假 PASS）。
+std::string xml_unescape(std::string v) {
+    struct { const char* ent; char ch; } kEnts[] = {
+        {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''}};
+    for (const auto& e : kEnts) {
+        size_t pos = 0;
+        while ((pos = v.find(e.ent, pos)) != std::string::npos) {
+            v.replace(pos, strlen(e.ent), 1, e.ch);
+            ++pos;
+        }
+    }
+    return v;
+}
+
 std::string attr_of(const std::string& tag, const char* name) {
-    const std::string key = std::string(name) + "=\"";
-    const size_t p = tag.find(key);
-    if (p == std::string::npos) return {};
-    const size_t b = p + key.size();
-    const size_t e = tag.find('"', b);
-    if (e == std::string::npos) return {};
-    return tag.substr(b, e - b);
+    const std::string key(name);
+    size_t p = 0;
+    while ((p = tag.find(key, p)) != std::string::npos) {
+        // 必须是"独立属性名"：前面不能紧贴字母数字或下划线
+        if (p > 0) {
+            const char prev = tag[p - 1];
+            if (isalnum(static_cast<unsigned char>(prev)) || prev == '_') {
+                p += key.size();
+                continue;
+            }
+        }
+        size_t q = p + key.size();
+        while (q < tag.size() && (tag[q] == ' ' || tag[q] == '\t')) ++q;
+        if (q >= tag.size() || tag[q] != '=') { p += key.size(); continue; }
+        ++q;
+        while (q < tag.size() && (tag[q] == ' ' || tag[q] == '\t')) ++q;
+        if (q >= tag.size() || (tag[q] != '"' && tag[q] != '\'')) { p += key.size(); continue; }
+        const char quote = tag[q++];
+        const size_t b = q;
+        const size_t e = tag.find(quote, b);
+        if (e == std::string::npos) return {};
+        return xml_unescape(tag.substr(b, e - b));
+    }
+    return {};
 }
 
 // 一项目录信息对应的"包内相对路径"：DestinationPath + Include。
@@ -280,10 +315,11 @@ VerifyResult do_verify(const std::wstring& dir) {
     std::vector<std::string> seen;   // 已计过的 rel（小写），用于去重
     size_t pos = 0;
     while ((pos = text.find("<FileGroup", pos)) != std::string::npos) {
-        const size_t close = text.find("/>", pos);
+        // 不能只找 "/>"：非自闭合写法的属性会被整段丢掉（少算条目 -> 假 PASS）
+        const size_t close = text.find('>', pos);
         if (close == std::string::npos) break;
-        const std::string tag = text.substr(pos, close - pos + 2);
-        pos = close + 2;
+        const std::string tag = text.substr(pos, close - pos + 1);
+        pos = close + 1;
 
         const std::string include = attr_of(tag, "Include");
         if (include.empty()) continue;
@@ -309,10 +345,17 @@ VerifyResult do_verify(const std::wstring& dir) {
         std::wstring full;
         if (!rel_inside(dir, rel, &full)) {
             r.invalid.push_back(rel);
-        } else if (file_exists(full)) {
-            ++r.present;
-        } else {
+        } else if (!file_exists(full)) {
             r.missing.push_back(rel);
+        } else {
+            // 0 字节文件算"存在"会掩盖截断/下载失败（几十 GB 的包尤其危险）
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (GetFileAttributesExW(full.c_str(), GetFileExInfoStandard, &fad) &&
+                fad.nFileSizeHigh == 0 && fad.nFileSizeLow == 0) {
+                r.empty_files.push_back(rel);
+            } else {
+                ++r.present;
+            }
         }
     }
     return r;
@@ -330,8 +373,12 @@ int cmd_verify(const std::wstring& dir) {
         return 2;
     }
     say("清单文件：%s", r.layout_file.c_str());
-    say("清单 %d 项，存在 %d，缺失 %d", r.listed, r.present,
-        static_cast<int>(r.missing.size()));
+    if (r.too_big) {
+        say("FAIL：清单文件超过 64MB，超过本工具的单次核对上限（不给出半份结果）");
+        return 1;
+    }
+    say("清单 %d 项，存在 %d，缺失 %d，0 字节 %d", r.listed, r.present,
+        static_cast<int>(r.missing.size()), static_cast<int>(r.empty_files.size()));
     if (r.unexpanded > 0) {
         say("通配符条目 %d 条（未展开，未计入完整性）", r.unexpanded);
         for (size_t i = 0; i < r.unexpanded_list.size() && i < 10; ++i) {
@@ -347,6 +394,13 @@ int cmd_verify(const std::wstring& dir) {
             say("  ! %s", r.invalid[i].c_str());
         }
     }
+    if (!r.empty_files.empty()) {
+        say("");
+        say("警告：%d 个文件存在但大小为 0（截断/下载失败）：", static_cast<int>(r.empty_files.size()));
+        for (size_t i = 0; i < r.empty_files.size() && i < 10; ++i) {
+            say("  ! %s", r.empty_files[i].c_str());
+        }
+    }
     if (!r.missing.empty()) {
         say("");
         say("缺失清单（最多列 30 个）：");
@@ -358,9 +412,20 @@ int cmd_verify(const std::wstring& dir) {
     section("结论");
     // 只有"一项不缺、没有坏条目、也没有展开不了的通配符"才能报 PASS：
     // 不然"缺失 0"会变成一张空头保证。
-    if (r.missing.empty() && r.invalid.empty() && r.unexpanded == 0) {
-        say("PASS：清单里的 %d 项全部存在", r.listed);
+    if (r.missing.empty() && r.invalid.empty() && r.unexpanded == 0 && r.empty_files.empty()) {
+        say("PASS：清单里的 %d 项全部存在且非空", r.listed);
         return 0;
+    }
+    if (!r.empty_files.empty()) {
+        say("FAIL：%d 个文件是 0 字节 —— 截断或下载失败，不能当完整",
+            static_cast<int>(r.empty_files.size()));
+    }
+    if (!r.empty_files.empty()) {
+        say("");
+        say("警告：%d 个文件存在但大小为 0（截断/下载失败）：", static_cast<int>(r.empty_files.size()));
+        for (size_t i = 0; i < r.empty_files.size() && i < 10; ++i) {
+            say("  ! %s", r.empty_files[i].c_str());
+        }
     }
     if (!r.missing.empty()) {
         say("FAIL：缺 %d 个文件（见上面的缺失清单）", static_cast<int>(r.missing.size()));
@@ -458,6 +523,7 @@ int cmd_check(const std::wstring& exe, const std::wstring& dll_dir_in) {
         const bool ours = it != our_exports.end();
         if (!ours) continue;   // 系统 DLL 不归我们管
         std::vector<std::string> missing;
+    std::vector<std::string> empty_files;   // 存在但是 0 字节
         for (const auto& n : imp.names) {
             // 按序号导入（#N）不能按名字核对，也**不该算缺失**：
             // 算成缺失会让人去 shim 里补一个根本不该按名字补的符号（还可能改乱 .def 序号）
@@ -591,7 +657,11 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
         const wchar_t* dlls[] = {L"vcruntime140.dll", L"msvcp140.dll", L"vcruntime140_1.dll"};
         int have = 0;
         for (const wchar_t* d : dlls) {
-            if (LoadLibraryW(d)) ++have;
+            HMODULE m = LoadLibraryW(d);
+            if (m) {
+                ++have;
+                FreeLibrary(m);   // 顺手释放：doctor 是一次性进程，但没必要留句柄
+            }
         }
         say("  VC 运行库     %d/3（%s）", have,
             have == 3 ? "齐全" : "游戏可能自带，缺了也不一定致命");
@@ -674,10 +744,11 @@ std::wstring find_exe_in_dir(const std::wstring& dir) {
     std::vector<std::wstring> cands;
     size_t pos = 0;
     while ((pos = text.find("<FileGroup", pos)) != std::string::npos) {
-        const size_t close = text.find("/>", pos);
+        // 不能只找 "/>"：非自闭合写法的属性会被整段丢掉（少算条目 -> 假 PASS）
+        const size_t close = text.find('>', pos);
         if (close == std::string::npos) break;
-        const std::string tag = text.substr(pos, close - pos + 2);
-        pos = close + 2;
+        const std::string tag = text.substr(pos, close - pos + 1);
+        pos = close + 1;
 
         const std::string include = attr_of(tag, "Include");
         if (include.empty()) continue;
@@ -706,10 +777,13 @@ std::wstring find_exe_in_dir(const std::wstring& dir) {
     return cands.front();
 }
 
-std::string classify(unsigned long code) {
+std::string classify(unsigned long code, int unimpl_hits = 0) {
     switch (code) {
         case 0: return "PASS";
-        case 70: return "UNIMPL";
+        // 70 是"我们自己的桩在 stop 模式下退出"的约定码。
+        // 游戏自己 exit(70) 也会走到这里，所以只有在日志里真的看到
+        // UNIMPLEMENTED 时才认成 UNIMPL（否则会给出完全错误的待办清单）。
+        case 70: return unimpl_hits > 0 ? "UNIMPL" : "OTHER";
         case 124: return "TIMEOUT";
         case 0xC0000135UL: return "MISSING_DLL";
         case 0xC0000139UL: return "MISSING_EXPORT";
@@ -865,6 +939,13 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     {
         HANDLE h = CreateFileW(log_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE && !opt.log_path.empty()) {
+            // 用户明确指定了 --log：打不开就说清楚，别偷偷换成别的路径
+            // （否则他会在约定的位置找不到日志，还以为是兼容层没写）
+            say("错误          --log 指定的路径打不开：%s err=%lu", to_utf8(log_path).c_str(),
+                GetLastError());
+            return 2;
+        }
         if (h == INVALID_HANDLE_VALUE) {
             // 游戏目录写不了时退到 %LOCALAPPDATA%\Xbgtasix，再不行才用临时目录
             wchar_t local[MAX_PATH] = {0};
@@ -1031,7 +1112,7 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     }
 
     section("结果");
-    const std::string kind = classify(code);
+    const std::string kind = classify(code, unimpl_total);
     say("退出码        0x%08lx", code);
     say("分类          %s", kind.c_str());
     say("耗时          %lu ms", elapsed);
@@ -1111,7 +1192,7 @@ int interactive_menu() {
     printf("选择: ");
     fflush(stdout);
     char line[256] = {0};
-    if (!fgets(line, sizeof(line), stdin)) return 0;
+    if (!fgets(line, sizeof(line), stdin)) return -1;   // EOF：调用方按"缺参数"处理
     switch (line[0]) {
         case '1': return 1;
         case '2': return 2;
@@ -1166,6 +1247,12 @@ int main(int argc, char** argv) {
         }
         usage();
         const int pick = interactive_menu();
+        if (pick < 0) {
+            // stdin 是 EOF（管道/自动化）：没给命令也没给选择，按"缺参数"返回 2，
+            // 原来返回 0 会让"忘了写命令"被当成成功。
+            printf("\n没有可交互的输入（stdin 已是 EOF）。请用命令行参数指定命令。\n");
+            return 2;
+        }
         if (pick == 0) {
             pause_if_interactive();
             return 0;
@@ -1211,7 +1298,8 @@ int main(int argc, char** argv) {
         pause_if_interactive();
         return 2;
     }
-    const std::string cmd = argv[1];
+    std::string cmd = argv[1];
+    for (auto& c : cmd) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
     if (cmd == "--version" || cmd == "-v") {
         printf("xbgtasix %s\n", kVersion);
         return 0;
@@ -1226,6 +1314,10 @@ int main(int argc, char** argv) {
     RunOptions ro;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
+        if ((a == "--dll-dir" || a == "--log" || a == "--timeout") && i + 1 >= argc) {
+            printf("%s 后面需要一个值\n", a.c_str());
+            return 2;
+        }
         if (a == "--dll-dir" && i + 1 < argc) {
             dll_dir = to_wide(argv[++i]);
         } else if (a == "--dry-run" || a == "--dryrun") {
