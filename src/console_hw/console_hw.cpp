@@ -190,6 +190,8 @@ struct Wrap {
     IUnknown* pc;     // PC 的真实工厂；系统没有 dstorage.dll 时为空
 };
 
+// 每槽位首调时的详细信息 + 全部调用的简表（上限 200 行）：
+// 只记首次会漏掉"设置完暂存缓冲后紧跟着建队列/开文件"这类序列。
 bool slot_seen(size_t slot) {
     static std::atomic<unsigned> mask{0};
     if (slot >= 32) return false;
@@ -198,14 +200,58 @@ bool slot_seen(size_t slot) {
     return (old & bit) == 0;
 }
 
+bool slot_budget() {
+    static std::atomic<int> left{200};
+    return left.fetch_sub(1) > 0;
+}
+
 template <size_t N>
 uintptr_t __stdcall wrap_thunk(Wrap* w, uintptr_t a1 = 0, uintptr_t a2 = 0, uintptr_t a3 = 0,
                                uintptr_t a4 = 0) {
     if (slot_seen(N)) {
-        xbgtasix::logf("[xcrdapi] factory vtable[%zu] a1=%p a2=%p a3=%p a4=%p%s", N,
+        // 参数里如果有可读字符串就一起打出来：GDK 的接口布局不公开，
+        // 靠"槽位号 + 参数形态"反推它在做什么（路径 / 描述符 / 队列）。
+        auto sniff = [](uintptr_t p) -> const char* {
+            static char buf[4][128];
+            static int which = 0;
+            if (!p) return "";
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(p), &mbi, sizeof(mbi)) == 0) return "";
+            if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return "";
+            const auto* b = reinterpret_cast<const unsigned char*>(p);
+            char* out = buf[which++ & 3];
+            // UTF-16 形式的宽字符串最常见（路径）
+            bool wide_ok = true;
+            for (int i = 0; i < 60; i += 2) {
+                if (b[i + 1] != 0) { wide_ok = false; break; }
+                if (b[i] == 0) break;
+            }
+            if (wide_ok && b[0]) {
+                char* d = out;
+                for (int i = 0; i < 120 && b[i]; i += 2) *d++ = static_cast<char>(b[i]);
+                *d = 0;
+                return out;
+            }
+            bool asc_ok = true;
+            for (int i = 0; i < 60 && b[i]; ++i) {
+                if (b[i] < 32 || b[i] > 126) { asc_ok = false; break; }
+            }
+            if (asc_ok && b[0]) {
+                for (int i = 0; i < 120 && b[i]; ++i) out[i] = static_cast<char>(b[i]);
+                out[60] = 0;
+                return out;
+            }
+            return "";
+        };
+        xbgtasix::logf("[xcrdapi] factory vtable[%zu] a1=%p(%s) a2=%p(%s) a3=%p(%s) a4=%p", N,
+                       reinterpret_cast<void*>(a1), sniff(a1), reinterpret_cast<void*>(a2),
+                       sniff(a2), reinterpret_cast<void*>(a3), sniff(a3),
+                       reinterpret_cast<void*>(a4));
+    }
+    if (slot_budget()) {
+        xbgtasix::logf("[xcrdapi]   call slot=%zu a1=%p a2=%p a3=%p a4=%p", N,
                        reinterpret_cast<void*>(a1), reinterpret_cast<void*>(a2),
-                       reinterpret_cast<void*>(a3), reinterpret_cast<void*>(a4),
-                       w->pc ? "" : "（无 PC 实现，只记账）");
+                       reinterpret_cast<void*>(a3), reinterpret_cast<void*>(a4));
     }
     // **不盲目转发**：实测把 GDK 的 slot 8 转发给 PC 的实现会直接崩在
     // DStorageCore.dll（两版槽位顺序不同）。在弄清每个槽位的真实含义之前，

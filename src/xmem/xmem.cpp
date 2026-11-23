@@ -218,36 +218,53 @@ __declspec(dllexport) void __cdecl XMemFree(void* ptr) { XB_XMEM_TRACE("XMemFree
 
 // [推断] 字段口径直接映射 Windows MEMORY_BASIC_INFORMATION。主机上没有
 //        PAGE_READWRITE 这类保护概念，Protect 只对调试有意义。
-__declspec(dllexport) bool __cdecl XMemVirtualQuery(void* ptr, XMemVirtualQueryInfo* info) { XB_XMEM_TRACE("XMemVirtualQuery", info, 0);
-    if (!ptr || !info) return false;
-    // 先查自己的表：主机语义里 BaseAddress 就是分配返回的指针，
-    // RegionSize 是这次分配的大小（不是内核合并后的整段空闲区）。
-    {
-        std::lock_guard<std::mutex> lock(g_mu);
-        auto it = g_allocs.find(ptr);
-        if (it != g_allocs.end()) {
-            info->BaseAddress = ptr;
-            info->RegionSize = it->second.committed;
-            info->State = MEM_COMMIT;
-            info->Protect = PAGE_READWRITE;
-            info->Type = MEM_PRIVATE;
-            info->CommittedBytes = it->second.committed;
-            return true;
-        }
+// 结构布局移植自 omonkeyz/xbox-emulator（GPL-3.0）virt.rs 的 XMemBasicInformation
+struct XMemBasicInformation {
+    void* base;
+    void* alloc_base;
+    uint32_t alloc_protect;
+    uint32_t reserved0;
+    size_t region_size;
+    uint32_t state;
+    uint32_t protect;
+    uint32_t kind;
+    uint32_t reserved1;
+    uint64_t flags;
+    uint32_t tag;
+    char tag_text[4];
+};
+
+__declspec(dllexport) int __cdecl XMemVirtualQuery(HANDLE process, const void* address,
+                                                   XMemBasicInformation* out) {
+    XB_XMEM_TRACE("XMemVirtualQuery", address, out);
+    if (!out) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
     }
     MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(ptr, &mbi, sizeof(mbi))) return false;
-    info->BaseAddress = mbi.BaseAddress;
-    info->RegionSize = mbi.RegionSize;
-    info->State = mbi.State;
-    info->Protect = mbi.Protect;
-    info->Type = mbi.Type;
-    info->CommittedBytes = (mbi.State == MEM_COMMIT) ? mbi.RegionSize : 0;
-    return true;
+    if (VirtualQueryEx(process, address, &mbi, sizeof(mbi)) == 0) return 0;
+    std::memset(out, 0, sizeof(*out));
+    out->base = mbi.BaseAddress;
+    out->alloc_base = mbi.AllocationBase;
+    out->alloc_protect = mbi.AllocationProtect;
+    out->region_size = mbi.RegionSize;
+    out->state = mbi.State;
+    out->protect = mbi.Protect;
+    out->kind = mbi.Type;
+    out->flags = 1;   // 非 partition 内存
+    return 1;
 }
 
-// [自定] 主机上这个接口给的是"标题内存使用量"（相对预算），PC 上没有预算概念，
-//        所以我们报自己的分配统计。Reserved[0] 额外塞累计分配次数，仅供测试用。
+namespace {
+
+// "物理页"在 PC 上就是一块 64KB 的普通内存；PFN 用它的地址当不透明句柄。
+// 游戏只会把它原样传回来，不会解析。
+constexpr size_t kPhysPage = 0x10000;
+std::mutex g_phys_mu;
+std::vector<void*> g_phys_pages;   // 每页一项（按分配顺序），便于 map 时找到源数据
+
+}  // namespace
+
 __declspec(dllexport) bool __cdecl XMemGetWorkingSetStatistics(XMemWorkingSetStatistics* stats) { XB_XMEM_TRACE("XMemGetWorkingSetStatistics", stats, 0);
     if (!stats) return false;
     std::lock_guard<std::mutex> lock(g_mu);
@@ -331,43 +348,139 @@ __declspec(dllexport) void __cdecl XMemFreeDefault(void* p) { XB_XMEM_TRACE("XMe
 }
 
 // 虚拟内存分配：主机上是同一套地址空间，PC 上直接给 VirtualAlloc
-__declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* addr, size_t size, uint32_t alloc_type,
-                                                    uint32_t protect) { XB_XMEM_TRACE("XMemVirtualAlloc", size, alloc_type);
-    // 实测：exe 传的 alloc_type=0x20402000、protect=0x21 —— 那是 **XMem 自己的属性位**
-    // （对齐/物理页/无缓存之类），不是 VirtualAlloc 的 flAllocationType。
-    // 第一版把它直接透给 VirtualAlloc，得到 err=87（参数无效），游戏随即断言退出。
-    // 正确做法：忽略这两个参数的位语义，按"保留+提交、可读写"给内存。
-    (void)alloc_type;
-    (void)protect;
-    static bool logged = false;
+// ===========================================================================
+// XMemVirtualAlloc：**5 个参数**，不是 4 个
+//
+// 移植自 omonkeyz/xbox-emulator（GPL-3.0，与本项目同许可）的
+// crates/compat/xmem/src/virt.rs 与 sys.rs。原始实现的关键事实：
+//
+//   XMemVirtualAlloc(address, size, alloc_type: u32, attributes: u64, protect: u32)
+//   alloc_type 的高位编码页粒度：
+//     XMEM_64K_PAGES   = 0x20400000  -> 64 KB 页，要求 64 KB 对齐
+//     XMEM_LARGE_PAGES = 0x20000000  -> 2 MB 大页，要求 2 MB 对齐
+//   低位按 Win32 语义解释（& (MEM_COMMIT|MEM_RESERVE|MEM_RESET|MEM_TOP_DOWN|
+//   MEM_WRITE_WATCH|MEM_RESET_UNDO)），为 0 时默认 保留+提交。
+//   protect 只取低 8 位，PAGE_GUARD 单独保留。
+//
+// 我们此前用的是 4 参数版本：游戏传的 attributes(u64) 落进了第 4 个形参位，
+// 真正的 protect 在栈上被完全忽略 —— 这是必须修掉的 ABI 错误。
+// ===========================================================================
+namespace {
 
-    // 只保留地址段，提交交给缺页钩子按需做（见文件上方的 lazy commit 说明）
-    void* p = VirtualAlloc(addr, size, MEM_RESERVE, PAGE_READWRITE);
-    const char* how = "reserve（按需提交）";
-    if (!p) {
-        // 极少数情况保留也失败（地址空间碎片），再试一次保留+提交
-        p = VirtualAlloc(addr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        how = "commit+reserve";
+constexpr uint32_t XMEM_LARGE_PAGES = 0x20000000u;
+constexpr uint32_t XMEM_64K_PAGES = 0x20400000u;
+constexpr size_t XMEM_PAGE_SIZE = 0x10000;   // 主机页 64 KB
+
+size_t page_granularity(uint32_t alloc_type) {
+    if ((alloc_type & XMEM_64K_PAGES) == XMEM_64K_PAGES) return XMEM_PAGE_SIZE;
+    if (alloc_type & XMEM_LARGE_PAGES) return 0x200000;   // 2 MB 大页
+    return 0x1000;
+}
+
+uint32_t win_alloc_type(uint32_t alloc_type) {
+    const uint32_t mask = MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_TOP_DOWN | MEM_WRITE_WATCH |
+                          MEM_RESET_UNDO;
+    const uint32_t t = alloc_type & mask;
+    return t ? t : (MEM_RESERVE | MEM_COMMIT);
+}
+
+uint32_t win_protect(uint32_t protect) {
+    const uint32_t base = protect & 0xff;
+    switch (base) {
+        case PAGE_NOACCESS:
+        case PAGE_READONLY:
+        case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
+        case PAGE_EXECUTE:
+        case PAGE_EXECUTE_READ:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            return base | (protect & PAGE_GUARD);
+        default:
+            return PAGE_READWRITE | (protect & PAGE_GUARD);
     }
-    if (p) {
-        {
-            std::lock_guard<std::mutex> lock(g_res_mu);
-            g_reserved.push_back(Region{static_cast<uint8_t*>(p), size});
+}
+
+size_t round_up(size_t v, size_t a) { return (v + a - 1) & ~(a - 1); }
+
+// 大于 64 KB 的对齐必须先探测一段空闲地址再在其中对齐保留。
+// 直接 VirtualAlloc 只保证 64 KB 粒度，拿不到 2 MB 对齐。
+void* reserve_aligned(size_t size, size_t align, uint32_t wt, uint32_t wp) {
+    if (align <= XMEM_PAGE_SIZE) {
+        return VirtualAlloc(nullptr, size, wt, wp);
+    }
+    for (int attempt = 0; attempt < 32; ++attempt) {
+        void* probe = VirtualAlloc(nullptr, size + align, MEM_RESERVE, PAGE_NOACCESS);
+        if (!probe) return nullptr;
+        VirtualFree(probe, 0, MEM_RELEASE);
+        void* want = reinterpret_cast<void*>(round_up(reinterpret_cast<size_t>(probe), align));
+        void* p = VirtualAlloc(want, size, wt | MEM_RESERVE, wp);
+        if (p) return p;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+__declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* address, size_t size,
+                                                    uint32_t alloc_type, uint64_t attributes,
+                                                    uint32_t protect) {
+    XB_XMEM_TRACE("XMemVirtualAlloc", size, alloc_type);
+    const size_t gran = page_granularity(alloc_type);
+    const uint32_t wt = win_alloc_type(alloc_type);
+    const uint32_t wp = win_protect(protect);
+
+    size_t base = reinterpret_cast<size_t>(address);
+    size_t len = round_up(size, gran);
+    if (base) {
+        base &= ~(gran - 1);
+        len = round_up(reinterpret_cast<size_t>(address) + size, gran) - base;
+    }
+
+    // 已经在我们保留过的区域里做提交：直接提交这一段
+    if (base && (wt & MEM_COMMIT)) {
+        void* got = VirtualAlloc(reinterpret_cast<void*>(base), len, wt, wp);
+        if (got) {
+            static int n = 0;
+            if (n++ < 32) {
+                xbgtasix::logf("[xmem] 提交已有区域 %p + %.2f GB（gran=%zu）", got,
+                               len / (1024.0 * 1024 * 1024), gran);
+            }
+            return got;
         }
+    }
+
+    void* p = nullptr;
+    if (wt & MEM_RESERVE) {
+        const size_t align = (base == 0 && gran > XMEM_PAGE_SIZE) ? gran : 0;
+        p = reserve_aligned(len, align, wt, wp);
+    } else {
+        p = VirtualAlloc(reinterpret_cast<void*>(base), len, wt, wp);
+    }
+
+    if (!p) {
+        const DWORD e = GetLastError();
+        xbgtasix::logf("[xmem] XMemVirtualAlloc(addr=%p size=%.2f GB type=0x%x->0x%x prot=0x%x->0x%x "
+                       "gran=%zu) 失败 err=%lu",
+                       address, size / (1024.0 * 1024 * 1024), alloc_type, wt, protect, wp, gran, e);
+        return nullptr;
+    }
+
+    // 只保留未提交的区域登记起来：真被访问时按 64 KB 页补提交
+    if ((wt & MEM_COMMIT) == 0) {
+        std::lock_guard<std::mutex> lock(g_res_mu);
+        g_reserved.push_back(Region{static_cast<uint8_t*>(p), len});
         if (!g_veh_installed.exchange(true)) {
             AddVectoredExceptionHandler(1, lazy_commit_handler);
-            xbgtasix::logf("[xmem] 已启用按需提交（缺页时自动 MEM_COMMIT）");
         }
     }
-    // 全量记录（上限 64 行）：内存布局是这类移植最先崩的地方，
-    // 只记第一次不够——后面某次返回 null 才是真凶。
-    static int calls = 0;
-    if (calls < 64) {
-        xbgtasix::logf("[xmem] XMemVirtualAlloc #%d  addr=%p size=%.2f GB type=0x%x prot=0x%x -> %p（%s）",
-                       ++calls, addr, size / (1024.0 * 1024 * 1024), alloc_type, protect, p,
-                       p ? how : "失败");
+
+    static int logged = 0;
+    if (logged++ < 24) {
+        xbgtasix::logf("[xmem] XMemVirtualAlloc(addr=%p size=%.2f GB type=0x%x->0x%x prot=0x%x->0x%x "
+                       "gran=%zu) -> %p",
+                       address, size / (1024.0 * 1024 * 1024), alloc_type, wt, protect, wp, gran, p);
     }
-    (void)logged;
     return p;
 }
 
