@@ -17,6 +17,7 @@
 #include <ctime>
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 
 #include "XAppCapture.h"
 #include "XGameStreaming.h"
@@ -87,22 +88,26 @@ extern "C" {
 
 STDAPI XGameStreamingInitialize() noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingInitialize", 0ULL, 0ULL, 0ULL, 0ULL);
     xbgtasix::logf("[stream] XGameStreamingInitialize（PC 上无串流栈，惰性初始化）");
     return S_OK;
 }
 
 STDAPI_(void) XGameStreamingUninitialize() noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingUninitialize", 0ULL, 0ULL, 0ULL, 0ULL);
     // 没有真实资源要释放；注册表是进程级的，注销由调用方逐个做。
 }
 
 STDAPI_(bool) XGameStreamingIsStreaming() noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingIsStreaming", 0ULL, 0ULL, 0ULL, 0ULL);
     return false;   // 本机没有 xCloud / 远程串流客户端
 }
 
 STDAPI_(uint32_t) XGameStreamingGetClientCount() noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetClientCount", 0ULL, 0ULL, 0ULL, 0ULL);
     return 0;
 }
 
@@ -111,6 +116,7 @@ STDAPI XGameStreamingGetClients(
     XGameStreamingClientId* clients,
     uint32_t* clientsUsed) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetClients", clientCount, clients, clientsUsed, 0ULL);
     if (!clientsUsed) return E_INVALIDARG;   // 唯一的错误通道，先挡 null
     *clientsUsed = 0;                        // "一个客户端都没有"
     if (clientCount != 0 && !clients) return E_INVALIDARG;
@@ -124,6 +130,7 @@ STDAPI XGameStreamingRegisterConnectionStateChanged(
     XGameStreamingConnectionStateChangedCallback* callback,
     XTaskQueueRegistrationToken* token) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingRegisterConnectionStateChanged", queue, context, callback, token);
     if (!token) return E_INVALIDARG;
     fill_registration_token(token);
     xbgtasix::logf("[stream] RegisterConnectionStateChanged(queue=%p ctx=%p cb=%p) token=%llu",
@@ -137,6 +144,7 @@ STDAPI_(bool) XGameStreamingUnregisterConnectionStateChanged(
     XTaskQueueRegistrationToken token,
     bool wait) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingUnregisterConnectionStateChanged", token, wait, 0ULL, 0ULL);
     (void)token;
     (void)wait;
     return true;   // 契约：注销成功（幂等，本来就不会有回调）
@@ -149,6 +157,7 @@ STDAPI XGameStreamingRegisterClientPropertiesChanged(
     XGameStreamingClientPropertiesChangedCallback* callback,
     XTaskQueueRegistrationToken* token) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingRegisterClientPropertiesChanged", client, queue, context, callback);
     if (!token) return E_INVALIDARG;
     fill_registration_token(token);
     xbgtasix::logf("[stream] RegisterClientPropertiesChanged(client=%llu queue=%p ctx=%p cb=%p) token=%llu",
@@ -163,6 +172,7 @@ STDAPI_(bool) XGameStreamingUnregisterClientPropertiesChanged(
     XTaskQueueRegistrationToken token,
     bool wait) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingUnregisterClientPropertiesChanged", client, token, wait, 0ULL);
     (void)client;
     (void)token;
     (void)wait;
@@ -174,6 +184,7 @@ STDAPI XGameStreamingGetStreamPhysicalDimensions(
     uint32_t* horizontalMm,
     uint32_t* verticalMm) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetStreamPhysicalDimensions", client, horizontalMm, verticalMm, 0ULL);
     (void)client;
     if (!horizontalMm || !verticalMm) return E_INVALIDARG;
     *horizontalMm = 0;   // 没有物理屏幕可报
@@ -187,6 +198,7 @@ STDAPI XGameStreamingGetStreamAddedLatency(
     uint32_t* averageOutputLatencyUs,
     uint32_t* standardDeviationUs) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetStreamAddedLatency", client, averageInputLatencyUs, averageOutputLatencyUs, standardDeviationUs);
     (void)client;
     if (!averageInputLatencyUs || !averageOutputLatencyUs || !standardDeviationUs) return E_INVALIDARG;
     *averageInputLatencyUs = 0;
@@ -197,6 +209,7 @@ STDAPI XGameStreamingGetStreamAddedLatency(
 
 STDAPI_(size_t) XGameStreamingGetServerLocationNameSize() noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetServerLocationNameSize", 0ULL, 0ULL, 0ULL, 0ULL);
     return 0;   // 没有串流服务器
 }
 
@@ -204,6 +217,7 @@ STDAPI XGameStreamingGetServerLocationName(
     size_t serverLocationNameSize,
     char* serverLocationName) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetServerLocationName", serverLocationNameSize, serverLocationName, 0ULL, 0ULL);
     // _Out_writes_z_：即使失败也要留一个合法空串，否则调用方一读就飞。
     if (serverLocationName && serverLocationNameSize != 0) serverLocationName[0] = '\0';
     return E_NOTIMPL;
@@ -213,6 +227,7 @@ STDAPI XGameStreamingIsTouchInputEnabled(
     XGameStreamingClientId client,
     bool* touchInputEnabled) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingIsTouchInputEnabled", client, touchInputEnabled, 0ULL, 0ULL);
     (void)client;
     if (!touchInputEnabled) return E_INVALIDARG;
     *touchInputEnabled = false;   // 没有客户端 -> 没有触摸输入
@@ -223,6 +238,7 @@ STDAPI XGameStreamingGetGamepadPhysicality(
     IGameInputReading* gamepadReading,
     XGameStreamingGamepadPhysicality* gamepadPhysicality) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetGamepadPhysicality", gamepadReading, gamepadPhysicality, 0ULL, 0ULL);
     (void)gamepadReading;
     if (!gamepadPhysicality) return E_INVALIDARG;
     // XGameStreamingGamepadPhysicality::None == 0x0（XGameStreaming.h:165）
@@ -232,15 +248,19 @@ STDAPI XGameStreamingGetGamepadPhysicality(
 
 // ---- Touch controls：纯 UI 指令，降级成空操作（void，没有错误通道） ----
 
-STDAPI_(void) XGameStreamingHideTouchControls() noexcept {}
+STDAPI_(void) XGameStreamingHideTouchControls() noexcept {
+    XB_TRACE_ENTRY("XGameStreamingHideTouchControls", 0ULL, 0ULL, 0ULL, 0ULL);
+}
 
 STDAPI_(void) XGameStreamingHideTouchControlsOnClient(XGameStreamingClientId client) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingHideTouchControlsOnClient", client, 0ULL, 0ULL, 0ULL);
     (void)client;
 }
 
 STDAPI_(void) XGameStreamingShowTouchControlLayout(const char* layout) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingShowTouchControlLayout", layout, 0ULL, 0ULL, 0ULL);
     (void)layout;
 }
 
@@ -248,6 +268,7 @@ STDAPI_(void) XGameStreamingShowTouchControlLayoutOnClient(
     XGameStreamingClientId client,
     const char* layout) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingShowTouchControlLayoutOnClient", client, layout, 0ULL, 0ULL);
     (void)client;
     (void)layout;
 }
@@ -256,6 +277,7 @@ STDAPI XGameStreamingUpdateTouchControlsState(
     size_t operationCount,
     const XGameStreamingTouchControlsStateOperation* operations) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingUpdateTouchControlsState", operationCount, operations, 0ULL, 0ULL);
     (void)operationCount;
     (void)operations;
     return S_OK;   // 没有布局在显示，状态更新就地丢弃
@@ -266,6 +288,7 @@ STDAPI XGameStreamingUpdateTouchControlsStateOnClient(
     size_t operationCount,
     const XGameStreamingTouchControlsStateOperation* operations) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingUpdateTouchControlsStateOnClient", client, operationCount, operations, 0ULL);
     (void)client;
     (void)operationCount;
     (void)operations;
@@ -277,6 +300,7 @@ STDAPI XGameStreamingShowTouchControlsWithStateUpdate(
     size_t operationCount,
     const XGameStreamingTouchControlsStateOperation* operations) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingShowTouchControlsWithStateUpdate", layout, operationCount, operations, 0ULL);
     (void)layout;
     (void)operationCount;
     (void)operations;
@@ -289,6 +313,7 @@ STDAPI XGameStreamingShowTouchControlsWithStateUpdateOnClient(
     size_t operationCount,
     const XGameStreamingTouchControlsStateOperation* operations) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingShowTouchControlsWithStateUpdateOnClient", client, layout, operationCount, operations);
     (void)client;
     (void)layout;
     (void)operationCount;
@@ -299,6 +324,7 @@ STDAPI XGameStreamingShowTouchControlsWithStateUpdateOnClient(
 STDAPI_(size_t) XGameStreamingGetTouchBundleVersionNameSize(
     XGameStreamingClientId client) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetTouchBundleVersionNameSize", client, 0ULL, 0ULL, 0ULL);
     (void)client;
     return 0;   // 没有触控适配包
 }
@@ -309,6 +335,7 @@ STDAPI XGameStreamingGetTouchBundleVersion(
     size_t versionNameSize,
     char* versionName) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetTouchBundleVersion", client, version, versionNameSize, versionName);
     (void)client;
     if (version) *version = XVersion{};          // 0.0.0.0 = 没有版本
     if (versionName && versionNameSize) versionName[0] = '\0';
@@ -321,6 +348,7 @@ STDAPI XGameStreamingGetSessionId(
     char* sessionId,
     size_t* sessionIdUsed) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetSessionId", client, sessionIdSize, sessionId, sessionIdUsed);
     (void)client;
     if (!sessionId) return E_INVALIDARG;
     if (sessionIdSize != 0) sessionId[0] = '\0';
@@ -335,6 +363,7 @@ STDAPI XGameStreamingGetDisplayDetails(
     float tallestSupportedAspectRatio,
     XGameStreamingDisplayDetails* displayDetails) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingGetDisplayDetails", client, maxSupportedPixels, widestSupportedAspectRatio, tallestSupportedAspectRatio);
     (void)client;
     (void)maxSupportedPixels;
     (void)widestSupportedAspectRatio;
@@ -346,6 +375,7 @@ STDAPI XGameStreamingGetDisplayDetails(
 
 STDAPI XGameStreamingSetResolution(uint32_t width, uint32_t height) noexcept
 {
+    XB_TRACE_ENTRY("XGameStreamingSetResolution", width, height, 0ULL, 0ULL);
     (void)width;
     (void)height;
     return E_NOTIMPL;   // 本机直接出图，没有"流分辨率"可设
@@ -359,12 +389,14 @@ STDAPI XGameStreamingSetResolution(uint32_t width, uint32_t height) noexcept
 
 STDAPI XAppBroadcastShowUI(XUserHandle requestingUser) noexcept
 {
+    XB_TRACE_ENTRY("XAppBroadcastShowUI", requestingUser, 0ULL, 0ULL, 0ULL);
     (void)requestingUser;
     return E_NOTIMPL;
 }
 
 STDAPI XAppBroadcastGetStatus(XUserHandle requestingUser, XAppBroadcastStatus* appBroadcastStatus) noexcept
 {
+    XB_TRACE_ENTRY("XAppBroadcastGetStatus", requestingUser, appBroadcastStatus, 0ULL, 0ULL);
     (void)requestingUser;
     if (!appBroadcastStatus) return E_INVALIDARG;
     zero_out(appBroadcastStatus);   // 9 个 bool 全 false == 不能播/没在播
@@ -373,6 +405,7 @@ STDAPI XAppBroadcastGetStatus(XUserHandle requestingUser, XAppBroadcastStatus* a
 
 STDAPI_(bool) XAppBroadcastIsAppBroadcasting() noexcept
 {
+    XB_TRACE_ENTRY("XAppBroadcastIsAppBroadcasting", 0ULL, 0ULL, 0ULL, 0ULL);
     return false;
 }
 
@@ -382,6 +415,7 @@ STDAPI XAppBroadcastRegisterIsAppBroadcastingChanged(
     XAppBroadcastMonitorCallback* appBroadcastMonitorCallback,
     XTaskQueueRegistrationToken* token) noexcept
 {
+    XB_TRACE_ENTRY("XAppBroadcastRegisterIsAppBroadcastingChanged", queue, context, appBroadcastMonitorCallback, token);
     if (!token) return E_INVALIDARG;
     fill_registration_token(token);
     xbgtasix::logf("[capture] BroadcastRegister(queue=%p ctx=%p cb=%p) token=%llu",
@@ -395,6 +429,7 @@ STDAPI_(bool) XAppBroadcastUnregisterIsAppBroadcastingChanged(
     XTaskQueueRegistrationToken token,
     bool wait) noexcept
 {
+    XB_TRACE_ENTRY("XAppBroadcastUnregisterIsAppBroadcastingChanged", token, wait, 0ULL, 0ULL);
     (void)token;
     (void)wait;
     return true;
@@ -405,6 +440,7 @@ STDAPI_(bool) XAppBroadcastUnregisterIsAppBroadcastingChanged(
 STDAPI XAppCaptureMetadataAddStringEvent(const char* name, const char* value,
                                          XAppCaptureMetadataPriority priority) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataAddStringEvent", name, value, priority, 0ULL);
     (void)name;
     (void)value;
     (void)priority;
@@ -414,6 +450,7 @@ STDAPI XAppCaptureMetadataAddStringEvent(const char* name, const char* value,
 STDAPI XAppCaptureMetadataAddInt32Event(const char* name, int32_t value,
                                         XAppCaptureMetadataPriority priority) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataAddInt32Event", name, value, priority, 0ULL);
     (void)name;
     (void)value;
     (void)priority;
@@ -423,6 +460,7 @@ STDAPI XAppCaptureMetadataAddInt32Event(const char* name, int32_t value,
 STDAPI XAppCaptureMetadataAddDoubleEvent(const char* name, double value,
                                          XAppCaptureMetadataPriority priority) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataAddDoubleEvent", name, value, priority, 0ULL);
     (void)name;
     (void)value;
     (void)priority;
@@ -432,6 +470,7 @@ STDAPI XAppCaptureMetadataAddDoubleEvent(const char* name, double value,
 STDAPI XAppCaptureMetadataStartStringState(const char* name, const char* value,
                                            XAppCaptureMetadataPriority priority) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataStartStringState", name, value, priority, 0ULL);
     (void)name;
     (void)value;
     (void)priority;
@@ -441,6 +480,7 @@ STDAPI XAppCaptureMetadataStartStringState(const char* name, const char* value,
 STDAPI XAppCaptureMetadataStartInt32State(const char* name, int32_t value,
                                           XAppCaptureMetadataPriority priority) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataStartInt32State", name, value, priority, 0ULL);
     (void)name;
     (void)value;
     (void)priority;
@@ -450,6 +490,7 @@ STDAPI XAppCaptureMetadataStartInt32State(const char* name, int32_t value,
 STDAPI XAppCaptureMetadataStartDoubleState(const char* name, double value,
                                            XAppCaptureMetadataPriority priority) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataStartDoubleState", name, value, priority, 0ULL);
     (void)name;
     (void)value;
     (void)priority;
@@ -458,17 +499,20 @@ STDAPI XAppCaptureMetadataStartDoubleState(const char* name, double value,
 
 STDAPI XAppCaptureMetadataStopState(const char* name) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataStopState", name, 0ULL, 0ULL, 0ULL);
     (void)name;
     return E_NOTIMPL;
 }
 
 STDAPI XAppCaptureMetadataStopAllStates() noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataStopAllStates", 0ULL, 0ULL, 0ULL, 0ULL);
     return E_NOTIMPL;
 }
 
 STDAPI XAppCaptureMetadataRemainingStorageBytesAvailable(uint64_t* value) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureMetadataRemainingStorageBytesAvailable", value, 0ULL, 0ULL, 0ULL);
     if (!value) return E_INVALIDARG;
     *value = 0;   // 没有给本作的捕获配额
     return S_OK;
@@ -480,6 +524,7 @@ STDAPI XAppCaptureRegisterMetadataPurged(
     XAppCaptureMetadataPurgedCallback* callback,
     XTaskQueueRegistrationToken* token) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureRegisterMetadataPurged", queue, context, callback, token);
     if (!token) return E_INVALIDARG;
     fill_registration_token(token);
     xbgtasix::logf("[capture] RegisterMetadataPurged(queue=%p ctx=%p cb=%p) token=%llu",
@@ -491,6 +536,7 @@ STDAPI XAppCaptureRegisterMetadataPurged(
 STDAPI_(bool) XAppCaptureUnRegisterMetadataPurged(XTaskQueueRegistrationToken token,
                                                   bool wait) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureUnRegisterMetadataPurged", token, wait, 0ULL, 0ULL);
     (void)token;
     (void)wait;
     return true;
@@ -504,6 +550,7 @@ STDAPI XAppCaptureTakeDiagnosticScreenshot(
     const char* filenamePrefix,
     XAppCaptureDiagnosticScreenshotResult* result) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureTakeDiagnosticScreenshot", gamescreenOnly, captureFlags, filenamePrefix, result);
     (void)gamescreenOnly;
     (void)captureFlags;
     (void)filenamePrefix;
@@ -518,6 +565,7 @@ STDAPI XAppCaptureRecordDiagnosticClip(
     const char* filenamePrefix,
     XAppCaptureRecordClipResult* result) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureRecordDiagnosticClip", startTime, durationInMs, filenamePrefix, result);
     (void)startTime;
     (void)durationInMs;
     (void)filenamePrefix;
@@ -530,6 +578,7 @@ STDAPI XAppCaptureRecordDiagnosticClip(
 
 STDAPI XAppCaptureGetVideoCaptureSettings(XAppCaptureVideoCaptureSettings* userCaptureSettings) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureGetVideoCaptureSettings", userCaptureSettings, 0ULL, 0ULL, 0ULL);
     if (!userCaptureSettings) return E_INVALIDARG;
     zero_out(userCaptureSettings);
     // 显式写一遍"没有"的语义（数值都是 0，但读代码的人不该去猜）：
@@ -548,6 +597,7 @@ STDAPI XAppCaptureRecordTimespan(
     uint64_t durationInMilliseconds,
     XAppCaptureLocalResult* result) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureRecordTimespan", startTimestamp, durationInMilliseconds, result, 0ULL);
     (void)startTimestamp;
     (void)durationInMilliseconds;
     if (!result) return E_INVALIDARG;
@@ -562,6 +612,7 @@ STDAPI XAppCaptureReadLocalStream(
     uint8_t* buffer,
     uint32_t* bytesWritten) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureReadLocalStream", handle, startPosition, bytesToRead, buffer);
     (void)handle;
     (void)startPosition;
     if (!bytesWritten) return E_INVALIDARG;
@@ -572,6 +623,7 @@ STDAPI XAppCaptureReadLocalStream(
 
 STDAPI XAppCaptureCloseLocalStream(XAppCaptureLocalStreamHandle handle) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureCloseLocalStream", handle, 0ULL, 0ULL, 0ULL);
     if (!handle) return E_INVALIDARG;
     return E_NOTIMPL;
 }
@@ -581,6 +633,7 @@ STDAPI XAppCaptureStartUserRecord(
     uint32_t localIdBufferLength,
     char* localIdBuffer) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureStartUserRecord", requestingUser, localIdBufferLength, localIdBuffer, 0ULL);
     (void)requestingUser;
     if (localIdBufferLength != 0 && !localIdBuffer) return E_INVALIDARG;
     if (localIdBuffer && localIdBufferLength != 0)
@@ -592,6 +645,7 @@ STDAPI XAppCaptureStopUserRecord(
     const char* localId,
     XAppCaptureUserRecordingResult* result) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureStopUserRecord", localId, result, 0ULL, 0ULL);
     (void)localId;
     if (!result) return E_INVALIDARG;
     zero_out(result);
@@ -600,6 +654,7 @@ STDAPI XAppCaptureStopUserRecord(
 
 STDAPI XAppCaptureCancelUserRecord(const char* localId) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureCancelUserRecord", localId, 0ULL, 0ULL, 0ULL);
     (void)localId;
     return E_NOTIMPL;
 }
@@ -610,6 +665,7 @@ STDAPI XAppCaptureTakeScreenshot(
     XUserHandle requestingUser,
     XAppCaptureTakeScreenshotResult* result) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureTakeScreenshot", requestingUser, result, 0ULL, 0ULL);
     (void)requestingUser;
     if (!result) return E_INVALIDARG;
     zero_out(result);   // localId = ""，availableScreenshotFormats = 无格式
@@ -622,6 +678,7 @@ STDAPI XAppCaptureOpenScreenshotStream(
     XAppCaptureScreenshotStreamHandle* handle,
     uint64_t* totalBytes) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureOpenScreenshotStream", localId, screenshotFormat, handle, totalBytes);
     (void)localId;
     (void)screenshotFormat;
     if (!handle) return E_INVALIDARG;
@@ -637,6 +694,7 @@ STDAPI XAppCaptureReadScreenshotStream(
     uint8_t* buffer,
     uint32_t* bytesWritten) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureReadScreenshotStream", handle, startPosition, bytesToRead, buffer);
     (void)handle;
     (void)startPosition;
     if (!bytesWritten) return E_INVALIDARG;
@@ -647,6 +705,7 @@ STDAPI XAppCaptureReadScreenshotStream(
 
 STDAPI XAppCaptureCloseScreenshotStream(XAppCaptureScreenshotStreamHandle handle) noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureCloseScreenshotStream", handle, 0ULL, 0ULL, 0ULL);
     if (!handle) return E_INVALIDARG;
     return E_NOTIMPL;
 }
@@ -655,12 +714,14 @@ STDAPI XAppCaptureCloseScreenshotStream(XAppCaptureScreenshotStreamHandle handle
 
 STDAPI XAppCaptureEnableRecord() noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureEnableRecord", 0ULL, 0ULL, 0ULL, 0ULL);
     xbgtasix::logf("[capture] EnableRecord -> E_NOTIMPL（PC 上没有系统捕获服务）");
     return E_NOTIMPL;
 }
 
 STDAPI XAppCaptureDisableRecord() noexcept
 {
+    XB_TRACE_ENTRY("XAppCaptureDisableRecord", 0ULL, 0ULL, 0ULL, 0ULL);
     return E_NOTIMPL;   // 本来就没开，但也不假装成功
 }
 
@@ -671,6 +732,7 @@ STDAPI XAppCaptureDisableRecord() noexcept
 STDAPI XNetworkingQueryPreferredLocalUdpMultiplayerPort(
     uint16_t* preferredLocalUdpMultiplayerPort) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQueryPreferredLocalUdpMultiplayerPort", preferredLocalUdpMultiplayerPort, 0ULL, 0ULL, 0ULL);
     if (!preferredLocalUdpMultiplayerPort) return E_INVALIDARG;
     *preferredLocalUdpMultiplayerPort = 0;   // 0 = 没有系统保留端口，调用方自选
     return S_OK;
@@ -678,6 +740,7 @@ STDAPI XNetworkingQueryPreferredLocalUdpMultiplayerPort(
 
 STDAPI XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync(XAsyncBlock* asyncBlock) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync", asyncBlock, 0ULL, 0ULL, 0ULL);
     return begin_async_not_implemented(asyncBlock, "QueryPreferredLocalUdpMultiplayerPortAsync");
 }
 
@@ -685,6 +748,7 @@ STDAPI XNetworkingQueryPreferredLocalUdpMultiplayerPortAsyncResult(
     XAsyncBlock* asyncBlock,
     uint16_t* preferredLocalUdpMultiplayerPort) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQueryPreferredLocalUdpMultiplayerPortAsyncResult", asyncBlock, preferredLocalUdpMultiplayerPort, 0ULL, 0ULL);
     (void)asyncBlock;
     if (!preferredLocalUdpMultiplayerPort) return E_INVALIDARG;
     *preferredLocalUdpMultiplayerPort = 0;
@@ -697,6 +761,7 @@ STDAPI XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged(
     XNetworkingPreferredLocalUdpMultiplayerPortChangedCallback* callback,
     XTaskQueueRegistrationToken* token) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged", queue, context, callback, token);
     if (!token) return E_INVALIDARG;
     fill_registration_token(token);
     xbgtasix::logf("[net] RegisterPreferredLocalUdpMultiplayerPortChanged(queue=%p ctx=%p cb=%p) token=%llu",
@@ -709,6 +774,7 @@ STDAPI_(bool) XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged(
     XTaskQueueRegistrationToken token,
     bool wait) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged", token, wait, 0ULL, 0ULL);
     (void)token;
     (void)wait;
     return true;
@@ -720,6 +786,7 @@ STDAPI XNetworkingQuerySecurityInformationForUrlAsync(
     const char* url,
     XAsyncBlock* asyncBlock) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQuerySecurityInformationForUrlAsync", url, asyncBlock, 0ULL, 0ULL);
     (void)url;
     return begin_async_not_implemented(asyncBlock, "QuerySecurityInformationForUrlAsync");
 }
@@ -728,6 +795,7 @@ STDAPI XNetworkingQuerySecurityInformationForUrlAsyncResultSize(
     XAsyncBlock* asyncBlock,
     size_t* securityInformationBufferByteCount) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQuerySecurityInformationForUrlAsyncResultSize", asyncBlock, securityInformationBufferByteCount, 0ULL, 0ULL);
     (void)asyncBlock;
     if (!securityInformationBufferByteCount) return E_INVALIDARG;
     *securityInformationBufferByteCount = 0;
@@ -741,6 +809,7 @@ STDAPI XNetworkingQuerySecurityInformationForUrlAsyncResult(
     uint8_t* securityInformationBuffer,
     XNetworkingSecurityInformation** securityInformation) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQuerySecurityInformationForUrlAsyncResult", asyncBlock, securityInformationBufferByteCount, securityInformationBufferByteCountUsed, securityInformationBuffer);
     (void)asyncBlock;
     if (!securityInformation) return E_INVALIDARG;
     *securityInformation = nullptr;
@@ -754,6 +823,7 @@ STDAPI XNetworkingQuerySecurityInformationForUrlUtf16Async(
     const wchar_t* url,
     XAsyncBlock* asyncBlock) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQuerySecurityInformationForUrlUtf16Async", url, asyncBlock, 0ULL, 0ULL);
     (void)url;
     return begin_async_not_implemented(asyncBlock, "QuerySecurityInformationForUrlUtf16Async");
 }
@@ -762,6 +832,7 @@ STDAPI XNetworkingQuerySecurityInformationForUrlUtf16AsyncResultSize(
     XAsyncBlock* asyncBlock,
     size_t* securityInformationBufferByteCount) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQuerySecurityInformationForUrlUtf16AsyncResultSize", asyncBlock, securityInformationBufferByteCount, 0ULL, 0ULL);
     (void)asyncBlock;
     if (!securityInformationBufferByteCount) return E_INVALIDARG;
     *securityInformationBufferByteCount = 0;
@@ -775,6 +846,7 @@ STDAPI XNetworkingQuerySecurityInformationForUrlUtf16AsyncResult(
     uint8_t* securityInformationBuffer,
     XNetworkingSecurityInformation** securityInformation) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQuerySecurityInformationForUrlUtf16AsyncResult", asyncBlock, securityInformationBufferByteCount, securityInformationBufferByteCountUsed, securityInformationBuffer);
     (void)asyncBlock;
     if (!securityInformation) return E_INVALIDARG;
     *securityInformation = nullptr;
@@ -788,6 +860,7 @@ STDAPI XNetworkingVerifyServerCertificate(
     void* requestHandle,
     const XNetworkingSecurityInformation* securityInformation) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingVerifyServerCertificate", requestHandle, securityInformation, 0ULL, 0ULL);
     (void)requestHandle;
     (void)securityInformation;
     return E_NOTIMPL;   // 没有平台证书链可校验
@@ -797,6 +870,7 @@ STDAPI XNetworkingVerifyServerCertificate(
 
 STDAPI XNetworkingGetConnectivityHint(XNetworkingConnectivityHint* connectivityHint) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingGetConnectivityHint", connectivityHint, 0ULL, 0ULL, 0ULL);
     if (!connectivityHint) return E_INVALIDARG;
     zero_out(connectivityHint);
     // XNetworking.h:107 —— 枚举的"无"值是 None(1)，不是 0（0 是 Unknown，语义是"还不知道"）
@@ -817,6 +891,7 @@ STDAPI XNetworkingRegisterConnectivityHintChanged(
     XNetworkingConnectivityHintChangedCallback* callback,
     XTaskQueueRegistrationToken* token) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingRegisterConnectivityHintChanged", queue, context, callback, token);
     if (!token) return E_INVALIDARG;
     fill_registration_token(token);
     xbgtasix::logf("[net] RegisterConnectivityHintChanged(queue=%p ctx=%p cb=%p) token=%llu",
@@ -829,6 +904,7 @@ STDAPI_(bool) XNetworkingUnregisterConnectivityHintChanged(
     XTaskQueueRegistrationToken token,
     bool wait) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingUnregisterConnectivityHintChanged", token, wait, 0ULL, 0ULL);
     (void)token;
     (void)wait;
     return true;
@@ -840,6 +916,7 @@ STDAPI XNetworkingQueryConfigurationSetting(
     XNetworkingConfigurationSetting configurationSetting,
     uint64_t* value) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQueryConfigurationSetting", configurationSetting, value, 0ULL, 0ULL);
     (void)configurationSetting;
     if (!value) return E_INVALIDARG;
     *value = 0;
@@ -850,6 +927,7 @@ STDAPI XNetworkingSetConfigurationSetting(
     XNetworkingConfigurationSetting configurationSetting,
     uint64_t value) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingSetConfigurationSetting", configurationSetting, value, 0ULL, 0ULL);
     (void)configurationSetting;
     (void)value;
     return E_NOTIMPL;   // 不接管 TCP 缓冲，设置也无处生效
@@ -859,6 +937,7 @@ STDAPI XNetworkingQueryStatistics(
     XNetworkingStatisticsType statisticsType,
     XNetworkingStatisticsBuffer* statisticsBuffer) noexcept
 {
+    XB_TRACE_ENTRY("XNetworkingQueryStatistics", statisticsType, statisticsBuffer, 0ULL, 0ULL);
     (void)statisticsType;
     if (!statisticsBuffer) return E_INVALIDARG;
     zero_out(statisticsBuffer);   // union 整块清零，5 个 uint64 全是 0 而不是残值

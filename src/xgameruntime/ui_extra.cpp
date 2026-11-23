@@ -10,6 +10,7 @@
 #include "XGameUI.h"
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 
 #include <atomic>
 #include <cstddef>
@@ -204,6 +205,7 @@ extern "C" {
 // 成就面板（XGameUI.h:82）
 STDAPI XGameUiShowAchievementsAsync(XAsyncBlock* async, XUserHandle requestingUser,
                                     uint32_t titleId) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowAchievementsAsync", async, requestingUser, titleId, 0ULL);
     (void)requestingUser;
     (void)titleId;
     return not_impl_async("XGameUiShowAchievementsAsync", async);
@@ -211,12 +213,14 @@ STDAPI XGameUiShowAchievementsAsync(XAsyncBlock* async, XUserHandle requestingUs
 
 // 成就面板结果（XGameUI.h:88）：语义就是"回异步状态"
 STDAPI XGameUiShowAchievementsResult(XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowAchievementsResult", async, 0ULL, 0ULL, 0ULL);
     return result_of(async);
 }
 
 // State Share（XGameUI.h:453）：声明在头文件末尾的 Authentication 段之后
 STDAPI XGameUiShowStateShareAsync(XAsyncBlock* async, XUserHandle requestingUser,
                                   const char* linkToken) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowStateShareAsync", async, requestingUser, linkToken, 0ULL);
     (void)requestingUser;
     (void)linkToken;
     return not_impl_async("XGameUiShowStateShareAsync", async);
@@ -224,6 +228,7 @@ STDAPI XGameUiShowStateShareAsync(XAsyncBlock* async, XUserHandle requestingUser
 
 // State Share 结果（XGameUI.h:459）
 STDAPI XGameUiShowStateShareResult(XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowStateShareResult", async, 0ULL, 0ULL, 0ULL);
     return result_of(async);
 }
 
@@ -233,6 +238,7 @@ STDAPI XGameUiShowSendGameInviteAsync(XAsyncBlock* async, XUserHandle requesting
                                       const char* sessionTemplateName, const char* sessionId,
                                       const char* invitationText,
                                       const char* customActivationContext) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowSendGameInviteAsync", async, requestingUser, sessionConfigurationId, sessionTemplateName);
     (void)requestingUser;
     (void)sessionConfigurationId;
     (void)sessionTemplateName;
@@ -244,18 +250,21 @@ STDAPI XGameUiShowSendGameInviteAsync(XAsyncBlock* async, XUserHandle requesting
 
 // 发送游戏邀请结果（XGameUI.h:53）
 STDAPI XGameUiShowSendGameInviteResult(XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowSendGameInviteResult", async, 0ULL, 0ULL, 0ULL);
     return result_of(async);
 }
 
 // MultiplayerActivity 邀请（XGameUI.h:59）
 STDAPI XGameUiShowMultiplayerActivityGameInviteAsync(XAsyncBlock* async,
                                                      XUserHandle requestingUser) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowMultiplayerActivityGameInviteAsync", async, requestingUser, 0ULL, 0ULL);
     (void)requestingUser;
     return not_impl_async("XGameUiShowMultiplayerActivityGameInviteAsync", async);
 }
 
 // MultiplayerActivity 邀请结果（XGameUI.h:64）
 STDAPI XGameUiShowMultiplayerActivityGameInviteResult(XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowMultiplayerActivityGameInviteResult", async, 0ULL, 0ULL, 0ULL);
     return result_of(async);
 }
 
@@ -267,6 +276,7 @@ STDAPI XGameUiShowPlayerPickerAsync(XAsyncBlock* async, XUserHandle requestingUs
                                     const uint64_t* preSelectedPlayers,
                                     uint32_t minSelectionCount,
                                     uint32_t maxSelectionCount) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowPlayerPickerAsync", async, requestingUser, promptText, selectFromPlayersCount);
     (void)requestingUser;
     (void)promptText;
     (void)selectFromPlayersCount;
@@ -281,6 +291,7 @@ STDAPI XGameUiShowPlayerPickerAsync(XAsyncBlock* async, XUserHandle requestingUs
 // 玩家选择器结果数量（XGameUI.h:106）：视为"用户没选人"，count=0 且 S_OK
 STDAPI XGameUiShowPlayerPickerResultCount(XAsyncBlock* async,
                                           uint32_t* resultPlayersCount) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowPlayerPickerResultCount", async, resultPlayersCount, 0ULL, 0ULL);
     if (!async || !resultPlayersCount) return E_INVALIDARG;
     if (!completed(async)) return E_PENDING;
     *resultPlayersCount = 0;
@@ -291,6 +302,7 @@ STDAPI XGameUiShowPlayerPickerResultCount(XAsyncBlock* async,
 STDAPI XGameUiShowPlayerPickerResult(XAsyncBlock* async, uint32_t resultPlayersCount,
                                      uint64_t* resultPlayers,
                                      uint32_t* resultPlayersUsed) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowPlayerPickerResult", async, resultPlayersCount, resultPlayers, resultPlayersUsed);
     (void)resultPlayers;
     (void)resultPlayersCount;
     if (!async) return E_INVALIDARG;
@@ -305,12 +317,14 @@ STDAPI XGameUiShowPlayerPickerResult(XAsyncBlock* async, uint32_t resultPlayersC
 
 STDAPI XGameUiShowPlayerProfileCardAsync(XAsyncBlock* async, XUserHandle requestingUser,
                                          uint64_t targetPlayer) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowPlayerProfileCardAsync", async, requestingUser, targetPlayer, 0ULL);
     (void)requestingUser;
     (void)targetPlayer;
     return not_impl_async("XGameUiShowPlayerProfileCardAsync", async);
 }
 
 STDAPI XGameUiShowPlayerProfileCardResult(XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowPlayerProfileCardResult", async, 0ULL, 0ULL, 0ULL);
     return result_of(async);
 }
 
@@ -321,6 +335,7 @@ STDAPI XGameUiShowPlayerProfileCardResult(XAsyncBlock* async) noexcept {
 STDAPI XGameUiTextEntryOpen(const XGameUiTextEntryOptions* options, uint32_t maxLength,
                             const char* initialText, uint32_t cursorIndex,
                             XGameUiTextEntryHandle* handle) noexcept {
+    XB_TRACE_ENTRY("XGameUiTextEntryOpen", options, maxLength, initialText, cursorIndex);
     if (!handle) return E_INVALIDARG;
     *handle = nullptr; // _Out_ 先写，避免调用方拿到栈垃圾
 
@@ -356,6 +371,7 @@ STDAPI XGameUiTextEntryOpen(const XGameUiTextEntryOptions* options, uint32_t max
 
 // STDAPI_(void)：返回类型必须逐字跟随头文件（XGameUI.h:414），否则 ABI/导出不匹配
 STDAPI_(void) XGameUiTextEntryClose(XGameUiTextEntryHandle handle) noexcept {
+    XB_TRACE_ENTRY("XGameUiTextEntryClose", handle, 0ULL, 0ULL, 0ULL);
     if (!handle) return;
     // 只有还在存活表里的句柄才 delete；重复 Close / 野句柄一律无声忽略（不解引用）
     {
@@ -373,6 +389,7 @@ STDAPI XGameUiTextEntryGetState(XGameUiTextEntryHandle handle,
                                uint32_t* cursorIndex, uint32_t* imeClauseStartIndex,
                                uint32_t* imeClauseEndIndex, uint32_t bufferSize,
                                char* buffer) noexcept {
+    XB_TRACE_ENTRY("XGameUiTextEntryGetState", handle, changeType, cursorIndex, imeClauseStartIndex);
     if (!handle || !changeType) return E_INVALIDARG;
 
     std::lock_guard<std::mutex> lock(g_te_mu);
@@ -396,6 +413,7 @@ STDAPI XGameUiTextEntryGetState(XGameUiTextEntryHandle handle,
 
 STDAPI XGameUiTextEntryGetExtents(XGameUiTextEntryHandle handle,
                                  XGameUiTextEntryExtents* extents) noexcept {
+    XB_TRACE_ENTRY("XGameUiTextEntryGetExtents", handle, extents, 0ULL, 0ULL);
     if (!extents) return E_INVALIDARG;
     // XGameUiTextEntryExtents 是 4 个 float，共 16 字节（全 0 的 bit 模式就是 0.0f）
     std::memset(extents, 0, sizeof(*extents));
@@ -407,6 +425,7 @@ STDAPI XGameUiTextEntryGetExtents(XGameUiTextEntryHandle handle,
 
 STDAPI XGameUiTextEntryUpdatePositionHint(XGameUiTextEntryHandle handle,
                                          XGameUiTextEntryPositionHint positionHint) noexcept {
+    XB_TRACE_ENTRY("XGameUiTextEntryUpdatePositionHint", handle, positionHint, 0ULL, 0ULL);
     if (!handle) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_te_mu);
     if (g_te_live.find(handle) == g_te_live.end()) return E_INVALIDARG;
@@ -416,6 +435,7 @@ STDAPI XGameUiTextEntryUpdatePositionHint(XGameUiTextEntryHandle handle,
 
 STDAPI XGameUiTextEntryUpdateVisibility(XGameUiTextEntryHandle handle,
                                        XGameUiTextEntryVisibilityFlags visibilityFlags) noexcept {
+    XB_TRACE_ENTRY("XGameUiTextEntryUpdateVisibility", handle, visibilityFlags, 0ULL, 0ULL);
     if (!handle) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_te_mu);
     if (g_te_live.find(handle) == g_te_live.end()) return E_INVALIDARG;

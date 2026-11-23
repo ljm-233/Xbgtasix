@@ -29,6 +29,7 @@
 #include "XTaskQueue.h"
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 
 // GDK 的 E_NOTFOUND = HRESULT_FROM_WIN32(ERROR_NOT_FOUND)，但这套精简过的头文件没带
 // 那个宏。按同一数值补一个，语义与真 GDK 一致（xgameruntime.cpp 里也是这个值）。
@@ -196,6 +197,7 @@ static std::atomic<uint64_t> g_bytes_written{0};
 
 STDAPI XPackageGetWriteStats(XPackageWriteStats* writeStats) noexcept
 {
+    XB_TRACE_ENTRY("XPackageGetWriteStats", writeStats, 0ULL, 0ULL, 0ULL);
     if (!writeStats) return E_INVALIDARG;
     writeStats->interval = 1000; // ms
     writeStats->budget = 0;      // 0 = 不设上限
@@ -206,6 +208,7 @@ STDAPI XPackageGetWriteStats(XPackageWriteStats* writeStats) noexcept
 
 STDAPI XPackageGetUserLocale(size_t localeSize, char* locale) noexcept
 {
+    XB_TRACE_ENTRY("XPackageGetUserLocale", localeSize, locale, 0ULL, 0ULL);
     if (!locale || localeSize == 0) return E_INVALIDARG;
 
     std::string loc;
@@ -254,6 +257,7 @@ STDAPI XPackageEnumerateChunkAvailability(
     void* context,
     XPackageChunkAvailabilityCallback* callback) noexcept
 {
+    XB_TRACE_ENTRY("XPackageEnumerateChunkAvailability", packageIdentifier, type, context, callback);
     (void)packageIdentifier; // 单包进程：包标识符不参与定位，目录才是唯一事实
     if (!callback) return E_INVALIDARG;
 
@@ -294,6 +298,7 @@ STDAPI XPackageFindChunkAvailability(
     XPackageChunkSelector* selectors,
     XPackageChunkAvailability* availability) noexcept
 {
+    XB_TRACE_ENTRY("XPackageFindChunkAvailability", packageIdentifier, selectorCount, selectors, availability);
     (void)packageIdentifier;
     if (!availability) return E_INVALIDARG;
     *availability = XPackageChunkAvailability::Unavailable;
@@ -343,6 +348,7 @@ STDAPI XPackageChangeChunkInstallOrder(
     uint32_t selectorCount,
     XPackageChunkSelector* selectors) noexcept
 {
+    XB_TRACE_ENTRY("XPackageChangeChunkInstallOrder", packageIdentifier, selectorCount, selectors, 0ULL);
     (void)selectors;
     xbgtasix::logf("[xgamert] ChangeChunkInstallOrder(%s, %u)：本实现无安装队列，记下即返回 S_OK",
                    packageIdentifier ? packageIdentifier : "(null)", selectorCount);
@@ -359,6 +365,7 @@ STDAPI XPackageCreateInstallationMonitor(
     XTaskQueueHandle queue,
     XPackageInstallationMonitorHandle* installationMonitor) noexcept
 {
+    XB_TRACE_ENTRY("XPackageCreateInstallationMonitor", packageIdentifier, selectorCount, selectors, minimumUpdateIntervalMs);
     if (!installationMonitor) return E_INVALIDARG;
     *installationMonitor = nullptr;
     if (!packageIdentifier) return E_INVALIDARG;
@@ -382,6 +389,7 @@ STDAPI XPackageCreateInstallationMonitor(
 STDAPI_(void) XPackageCloseInstallationMonitorHandle(
     XPackageInstallationMonitorHandle installationMonitor) noexcept
 {
+    XB_TRACE_ENTRY("XPackageCloseInstallationMonitorHandle", installationMonitor, 0ULL, 0ULL, 0ULL);
     if (!installationMonitor) return; // GDK 允许传空
     {
         std::lock_guard<std::mutex> lock(installationMonitor->mu);
@@ -395,6 +403,7 @@ STDAPI_(void) XPackageGetInstallationProgress(
     XPackageInstallationMonitorHandle installationMonitor,
     XPackageInstallationProgress* progress) noexcept
 {
+    XB_TRACE_ENTRY("XPackageGetInstallationProgress", installationMonitor, progress, 0ULL, 0ULL);
     (void)installationMonitor; // 壳：不跟踪真实安装
     if (!progress) return;
     std::memset(progress, 0, sizeof(*progress));
@@ -405,6 +414,7 @@ STDAPI_(void) XPackageGetInstallationProgress(
 STDAPI_(bool) XPackageUpdateInstallationMonitor(
     XPackageInstallationMonitorHandle installationMonitor) noexcept
 {
+    XB_TRACE_ENTRY("XPackageUpdateInstallationMonitor", installationMonitor, 0ULL, 0ULL, 0ULL);
     (void)installationMonitor;
     return true; // "有变化"：让引擎立刻去读 GetInstallationProgress
 }
@@ -415,6 +425,7 @@ STDAPI XPackageRegisterInstallationProgressChanged(
     XPackageInstallationProgressCallback* callback,
     XTaskQueueRegistrationToken* token) noexcept
 {
+    XB_TRACE_ENTRY("XPackageRegisterInstallationProgressChanged", installationMonitor, context, callback, token);
     if (!installationMonitor || !callback || !token) return E_INVALIDARG;
     XPackageInstallationMonitor::Reg reg{};
     reg.token = g_next_token.fetch_add(1);
@@ -433,6 +444,7 @@ STDAPI_(bool) XPackageUnregisterInstallationProgressChanged(
     XTaskQueueRegistrationToken token,
     bool wait) noexcept
 {
+    XB_TRACE_ENTRY("XPackageUnregisterInstallationProgressChanged", installationMonitor, token, wait, 0ULL);
     (void)wait; // 本实现回调从不排队，没有需要等待的在途调用
     if (!installationMonitor) return false;
     std::lock_guard<std::mutex> lock(installationMonitor->mu);
@@ -456,6 +468,7 @@ STDAPI XPackageInstallChunksAsync(
     bool suppressUserConfirmation,
     XAsyncBlock* asyncBlock) noexcept
 {
+    XB_TRACE_ENTRY("XPackageInstallChunksAsync", packageIdentifier, selectorCount, selectors, minimumUpdateIntervalMs);
     if (!asyncBlock) return E_INVALIDARG;
     (void)selectors;
     xbgtasix::logf("[xgamert] InstallChunksAsync(%s, %u selectors, %u ms, suppressUi=%d)："
@@ -470,6 +483,7 @@ STDAPI XPackageInstallChunksResult(
     XAsyncBlock* asyncBlock,
     XPackageInstallationMonitorHandle* installationMonitor) noexcept
 {
+    XB_TRACE_ENTRY("XPackageInstallChunksResult", asyncBlock, installationMonitor, 0ULL, 0ULL);
     if (!asyncBlock) return E_INVALIDARG;
     if (installationMonitor) *installationMonitor = nullptr; // 失败时绝不留野句柄
     // 宿主状态表由 XAsyncRun 写入；未完成时这里是 E_PENDING。
@@ -481,6 +495,7 @@ STDAPI XPackageUninstallChunks(
     uint32_t selectorCount,
     XPackageChunkSelector* selectors) noexcept
 {
+    XB_TRACE_ENTRY("XPackageUninstallChunks", packageIdentifier, selectorCount, selectors, 0ULL);
     (void)selectors;
     xbgtasix::logf("[xgamert] UninstallChunks(%s, %u selectors) -> E_NOTIMPL（不删用户目录）",
                    packageIdentifier ? packageIdentifier : "(null)", selectorCount);
@@ -494,6 +509,7 @@ STDAPI XPackageEstimateDownloadSize(
     uint64_t* downloadSize,
     bool* shouldPresentUserConfirmation) noexcept
 {
+    XB_TRACE_ENTRY("XPackageEstimateDownloadSize", packageIdentifier, selectorCount, selectors, downloadSize);
     (void)selectors;
     // 输出参数先写干净：调用方可能在 FAILED 之后仍然读它们
     if (downloadSize) *downloadSize = 0;
@@ -512,6 +528,7 @@ STDAPI XPackageEnumeratePackages(
     void* context,
     XPackageEnumerationCallback* callback) noexcept
 {
+    XB_TRACE_ENTRY("XPackageEnumeratePackages", kind, scope, context, callback);
     (void)scope; // 本实现只有一个包，ThisOnly / ThisAndRelated / ThisPublisher 结果相同
     if (!callback) return E_INVALIDARG;
 

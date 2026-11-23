@@ -26,6 +26,7 @@
 #include "XLauncher.h"
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 
 #include <atomic>
 #include <cstddef>
@@ -216,6 +217,7 @@ extern "C" {
 // 关键点：*consoleIdUsed 必须写。_Out_opt_ 允许 null，但非 null 时必须给真值。
 STDAPI XSystemGetConsoleId(size_t consoleIdSize, char* consoleId,
                            size_t* consoleIdUsed) noexcept {
+    XB_TRACE_ENTRY("XSystemGetConsoleId", consoleIdSize, consoleId, consoleIdUsed, 0ULL);
     static constexpr char kPlaceholder[] = "{00000000-0000-0000-0000-000000000000}";
     static_assert(sizeof(kPlaceholder) == XSystemConsoleIdBytes, "占位串长度必须是 39 字节");
     return copy_out(kPlaceholder, consoleIdSize, consoleId, consoleIdUsed);
@@ -225,6 +227,7 @@ STDAPI XSystemGetConsoleId(size_t consoleIdSize, char* consoleId,
 //（这正是 Windows 上零售包的沙箱名，不是随手编的串）。长度 7 <= 16 上限。
 STDAPI XSystemGetXboxLiveSandboxId(size_t sandboxIdSize, char* sandboxId,
                                    size_t* sandboxIdUsed) noexcept {
+    XB_TRACE_ENTRY("XSystemGetXboxLiveSandboxId", sandboxIdSize, sandboxId, sandboxIdUsed, 0ULL);
     return copy_out("RETAIL", sandboxIdSize, sandboxId, sandboxIdUsed);
 }
 
@@ -233,6 +236,7 @@ STDAPI XSystemGetXboxLiveSandboxId(size_t sandboxIdSize, char* sandboxId,
 STDAPI XSystemGetAppSpecificDeviceId(size_t appSpecificDeviceIdSize,
                                      char* appSpecificDeviceId,
                                      size_t* appSpecificDeviceIdUsed) noexcept {
+    XB_TRACE_ENTRY("XSystemGetAppSpecificDeviceId", appSpecificDeviceIdSize, appSpecificDeviceId, appSpecificDeviceIdUsed, 0ULL);
     const std::string id = make_app_device_id();
     return copy_out(id.c_str(), appSpecificDeviceIdSize, appSpecificDeviceId,
                     appSpecificDeviceIdUsed);
@@ -242,6 +246,7 @@ STDAPI XSystemGetAppSpecificDeviceId(size_t appSpecificDeviceIdSize,
 // 注意固有局限：句柄值被关闭后若立刻被别的 Create* 复用，这里会回答 true——
 // 这是 Win32 句柄语义本身的性质，不是本实现能消除的。
 STDAPI_(bool) XSystemIsHandleValid(XSystemHandle handle) noexcept {
+    XB_TRACE_ENTRY("XSystemIsHandleValid", handle, 0ULL, 0ULL, 0ULL);
     if (!handle) return false;
     // 实测（MinGW64 + Win10/11）：GetHandleInformation(INVALID_HANDLE_VALUE) 返回 TRUE。
     // 原因不是 bug：INVALID_HANDLE_VALUE 就是 -1，而 -1 同时是 GetCurrentProcess() 的
@@ -254,6 +259,7 @@ STDAPI_(bool) XSystemIsHandleValid(XSystemHandle handle) noexcept {
 
 // 句柄生命周期回调注册（XSystem.h:117）。重复注册=替换；callback 传 null 表示取消。
 STDAPI XSystemHandleTrack(XSystemHandleCallback callback, void* context) noexcept {
+    XB_TRACE_ENTRY("XSystemHandleTrack", callback, context, 0ULL, 0ULL);
     {
         std::lock_guard<std::mutex> lock(g_track_mu);
         g_track_cb = callback;
@@ -289,6 +295,7 @@ std::atomic<bool> g_defer_applied{false};
 // 就在哪个线程生效。跨线程 Acquire/Close 只能近似（计数是进程级的，恢复动作在最后
 // 一个 Close 的线程上执行）。对单线程的引擎主循环来说这是精确正确的。
 STDAPI XDisplayAcquireTimeoutDeferral(XDisplayTimeoutDeferralHandle* handle) noexcept {
+    XB_TRACE_ENTRY("XDisplayAcquireTimeoutDeferral", handle, 0ULL, 0ULL, 0ULL);
     if (!handle) return E_INVALIDARG;
     *handle = nullptr;   // _Out_ 先写，别让调用方拿到栈垃圾
 
@@ -326,6 +333,7 @@ STDAPI XDisplayAcquireTimeoutDeferral(XDisplayTimeoutDeferralHandle* handle) noe
 
 // STDAPI_(void)：返回类型逐字跟随 XDisplay.h:44，不能写成 HRESULT。
 STDAPI_(void) XDisplayCloseTimeoutDeferralHandle(XDisplayTimeoutDeferralHandle handle) noexcept {
+    XB_TRACE_ENTRY("XDisplayCloseTimeoutDeferralHandle", handle, 0ULL, 0ULL, 0ULL);
     if (!handle) return;
 
     bool last = false;
@@ -365,6 +373,7 @@ STDAPI_(void) XDisplayCloseTimeoutDeferralHandle(XDisplayTimeoutDeferralHandle h
 // 备选的近似实现是 SetThreadPriority(THREAD_PRIORITY_HIGHEST)，这里故意不做：
 // 全局抬高游戏主线程优先级会在 PC 上与系统/驱动线程抢时间片，反而更容易卡顿。
 STDAPI XThreadSetTimeSensitive(bool isTimeSensitiveThread) noexcept {
+    XB_TRACE_ENTRY("XThreadSetTimeSensitive", isTimeSensitiveThread, 0ULL, 0ULL, 0ULL);
     xbgtasix::logf("[sys_extra] XThreadSetTimeSensitive(%s)：PC 无此概念，仅记录",
                    isTimeSensitiveThread ? "true" : "false");
     return S_OK;
@@ -373,12 +382,14 @@ STDAPI XThreadSetTimeSensitive(bool isTimeSensitiveThread) noexcept {
 // 不撒谎也不虚构：既然上面没有真的给线程打标，这里恒 false。
 // 返回 true 会让调用方跳掉自己本该做的"非时间敏感路径"检查。
 STDAPI_(bool) XThreadIsTimeSensitive() noexcept {
+    XB_TRACE_ENTRY("XThreadIsTimeSensitive", 0ULL, 0ULL, 0ULL, 0ULL);
     return false;
 }
 
 // STDAPI_(void)：见 XThread.h:29。IsTimeSensitive 恒 false，所以这个断言永远不成立，
 // 空实现即可；它位于热路径上，连日志都不打。
 STDAPI_(void) XThreadAssertNotTimeSensitive() noexcept {
+    XB_TRACE_ENTRY("XThreadAssertNotTimeSensitive", 0ULL, 0ULL, 0ULL, 0ULL);
 }
 
 }  // extern "C"
@@ -389,6 +400,7 @@ STDAPI_(void) XThreadAssertNotTimeSensitive() noexcept {
 
 // XLauncher.h:17 —— 在 PC 上等价于 ShellExecute("open", uri)
 STDAPI XLaunchUri(XUserHandle requestingUser, const char* uri) noexcept {
+    XB_TRACE_ENTRY("XLaunchUri", requestingUser, uri, 0ULL, 0ULL);
     (void)requestingUser;
     if (!uri || !uri[0]) return E_INVALIDARG;
     const HINSTANCE r = ShellExecuteA(nullptr, "open", uri, nullptr, nullptr, SW_SHOWNORMAL);
@@ -403,6 +415,7 @@ static bool g_cc_enabled = false;
 
 // XAccessibility.h:53
 STDAPI XClosedCaptionSetEnabled(bool enabled) noexcept {
+    XB_TRACE_ENTRY("XClosedCaptionSetEnabled", enabled, 0ULL, 0ULL, 0ULL);
     g_cc_enabled = enabled;
     xbgtasix::logf("[xacc] 字幕: %s", enabled ? "开" : "关");
     return S_OK;
@@ -410,6 +423,7 @@ STDAPI XClosedCaptionSetEnabled(bool enabled) noexcept {
 
 // XAccessibility.h:49 —— 必须整块填满：调用方按结构体读，残值会被当成颜色/字号
 STDAPI XClosedCaptionGetProperties(XClosedCaptionProperties* properties) noexcept {
+    XB_TRACE_ENTRY("XClosedCaptionGetProperties", properties, 0ULL, 0ULL, 0ULL);
     if (!properties) return E_INVALIDARG;
     std::memset(properties, 0, sizeof(*properties));
     // 跟随 Windows 的无障碍设置（关掉时给一套安全默认值）
@@ -434,6 +448,7 @@ static void* g_error_ctx = nullptr;
 static XErrorOptions g_error_opts = XErrorOptions::None;
 
 STDAPI_(void) XErrorSetCallback(XErrorCallback* callback, void* context) noexcept {
+    XB_TRACE_ENTRY("XErrorSetCallback", callback, context, 0ULL, 0ULL);
     g_error_cb = callback;
     g_error_ctx = context;
 }
@@ -441,6 +456,7 @@ STDAPI_(void) XErrorSetCallback(XErrorCallback* callback, void* context) noexcep
 // 头文件是**两个**参数：有调试器时 / 无调试器时各一套选项
 STDAPI_(void) XErrorSetOptions(XErrorOptions optionsDebuggerPresent,
                                XErrorOptions optionsDebuggerNotPresent) noexcept {
+    XB_TRACE_ENTRY("XErrorSetOptions", optionsDebuggerPresent, optionsDebuggerNotPresent, 0ULL, 0ULL);
     g_error_opts = optionsDebuggerPresent | optionsDebuggerNotPresent;
     xbgtasix::logf("[xerror] 选项: 有调试器=0x%x 无调试器=0x%x"
                    "（DebugBreak/FailFast 我们不执行，避免没有调试器时直接杀进程）",

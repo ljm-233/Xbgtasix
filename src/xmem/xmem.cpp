@@ -75,6 +75,39 @@ bool poison_enabled() {
 
 }  // namespace
 
+namespace {
+// 入口追踪：XBGTASIX_TRACE=1 时记录每次调用（xmem 只有十来个导出，值得全记）。
+// 游戏崩在"某个字段为 0"时，先确认 xmem 到底被调了哪几个、什么顺序。
+bool xtrace_on() {
+    static const bool on = [] {
+        char b[8] = {0};
+        return GetEnvironmentVariableA("XBGTASIX_TRACE", b, sizeof(b)) > 0 && b[0] == '1';
+    }();
+    return on;
+}
+int xtrace_budget() {
+    static int left = xtrace_on() ? 200 : 0;
+    return left-- > 0 ? 1 : 0;
+}
+}  // namespace
+
+template <typename T>
+inline unsigned long long xb_arg(T* p) {   // 任意指针（含非 void*）：走地址值
+    return static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(p));
+}
+template <typename T>
+inline unsigned long long xb_arg(T v) {    // 整数/枚举/布尔
+    return static_cast<unsigned long long>(v);
+}
+
+#define XB_XMEM_TRACE(name, a1, a2)                                     \
+    do {                                                                \
+        if (xtrace_on() && xtrace_budget()) {                           \
+            xbgtasix::logf("[trace] xmem::%s(%llx, %llx)", name,        \
+                           xb_arg(a1), xb_arg(a2));                     \
+        }                                                               \
+    } while (0)
+
 extern "C" {
 
 // [自定] 结构体布局是猜的（没有 xmem.h）。字段顺序依据是"主机查询接口通常给出
@@ -98,7 +131,7 @@ struct XMemWorkingSetStatistics {
 
 // [推断] 签名顺序 (attributes, size)。公开资料只提到"XMemAlloc 系列"，
 //        没有给出逐字声明；顺序反了会静默破坏 ABI，是这块最大的风险点。
-__declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) {
+__declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) { XB_XMEM_TRACE("XMemAlloc", attributes, size);
     if (size == 0) return nullptr;  // [自定]
 
     const size_t align = alignment_from(attributes);
@@ -144,7 +177,7 @@ __declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) 
 
 // [推断] 二次释放/野指针在主机上是 undefined；我们选择"忽略 + 记日志"，
 //        因为让移植过程崩溃在这里毫无诊断价值。
-__declspec(dllexport) void __cdecl XMemFree(void* ptr) {
+__declspec(dllexport) void __cdecl XMemFree(void* ptr) { XB_XMEM_TRACE("XMemFree", 0, 0);
     if (!ptr) return;
     Header h{};
     bool unknown = false;
@@ -185,7 +218,7 @@ __declspec(dllexport) void __cdecl XMemFree(void* ptr) {
 
 // [推断] 字段口径直接映射 Windows MEMORY_BASIC_INFORMATION。主机上没有
 //        PAGE_READWRITE 这类保护概念，Protect 只对调试有意义。
-__declspec(dllexport) bool __cdecl XMemVirtualQuery(void* ptr, XMemVirtualQueryInfo* info) {
+__declspec(dllexport) bool __cdecl XMemVirtualQuery(void* ptr, XMemVirtualQueryInfo* info) { XB_XMEM_TRACE("XMemVirtualQuery", info, 0);
     if (!ptr || !info) return false;
     // 先查自己的表：主机语义里 BaseAddress 就是分配返回的指针，
     // RegionSize 是这次分配的大小（不是内核合并后的整段空闲区）。
@@ -215,7 +248,7 @@ __declspec(dllexport) bool __cdecl XMemVirtualQuery(void* ptr, XMemVirtualQueryI
 
 // [自定] 主机上这个接口给的是"标题内存使用量"（相对预算），PC 上没有预算概念，
 //        所以我们报自己的分配统计。Reserved[0] 额外塞累计分配次数，仅供测试用。
-__declspec(dllexport) bool __cdecl XMemGetWorkingSetStatistics(XMemWorkingSetStatistics* stats) {
+__declspec(dllexport) bool __cdecl XMemGetWorkingSetStatistics(XMemWorkingSetStatistics* stats) { XB_XMEM_TRACE("XMemGetWorkingSetStatistics", stats, 0);
     if (!stats) return false;
     std::lock_guard<std::mutex> lock(g_mu);
     std::memset(stats, 0, sizeof(*stats));
@@ -288,18 +321,18 @@ LONG WINAPI lazy_commit_handler(PEXCEPTION_POINTERS info) {
 extern "C" {
 
 // 默认分配器：等价于 XMemAlloc(0, size)
-__declspec(dllexport) void* __cdecl XMemAllocDefault(size_t size) {
+__declspec(dllexport) void* __cdecl XMemAllocDefault(size_t size) { XB_XMEM_TRACE("XMemAllocDefault", size, 0);
     return XMemAlloc(0, size);
 }
 
 // 默认释放：等价于 XMemFree
-__declspec(dllexport) void __cdecl XMemFreeDefault(void* p) {
+__declspec(dllexport) void __cdecl XMemFreeDefault(void* p) { XB_XMEM_TRACE("XMemFreeDefault", 0, 0);
     XMemFree(p);
 }
 
 // 虚拟内存分配：主机上是同一套地址空间，PC 上直接给 VirtualAlloc
 __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* addr, size_t size, uint32_t alloc_type,
-                                                    uint32_t protect) {
+                                                    uint32_t protect) { XB_XMEM_TRACE("XMemVirtualAlloc", size, alloc_type);
     // 实测：exe 传的 alloc_type=0x20402000、protect=0x21 —— 那是 **XMem 自己的属性位**
     // （对齐/物理页/无缓存之类），不是 VirtualAlloc 的 flAllocationType。
     // 第一版把它直接透给 VirtualAlloc，得到 err=87（参数无效），游戏随即断言退出。
@@ -339,30 +372,30 @@ __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* addr, size_t size, ui
 }
 
 // 工具内存是否可用：PC 上"工具内存"概念不存在
-__declspec(dllexport) bool __cdecl XMemIsToolsMemAvailable(void) { return false; }
+__declspec(dllexport) bool __cdecl XMemIsToolsMemAvailable(void) { XB_XMEM_TRACE("XMemIsToolsMemAvailable", 0, 0); return false; }
 
 // 以下四个是主机 APU/GPU 的物理页映射，PC 上没有对应硬件。
 // 返回 null / 0 让游戏立刻知道"拿不到物理页"，而不是给它一个假地址。
-__declspec(dllexport) void* __cdecl XMemAllocatePhysicalPages(size_t pages, size_t align) {
+__declspec(dllexport) void* __cdecl XMemAllocatePhysicalPages(size_t pages, size_t align) { XB_XMEM_TRACE("XMemAllocatePhysicalPages", pages, align);
     xbgtasix::logf("[xmem] XMemAllocatePhysicalPages(%zu, %zu)：主机物理页分配，PC 无对应能力",
                    pages, align);
     return nullptr;
 }
-__declspec(dllexport) bool __cdecl XMemFreePhysicalPages(void* ptr, size_t pages) {
+__declspec(dllexport) bool __cdecl XMemFreePhysicalPages(void* ptr, size_t pages) { XB_XMEM_TRACE("XMemFreePhysicalPages", pages, 0);
     (void)ptr; (void)pages;
     return false;
 }
-__declspec(dllexport) void* __cdecl XMemMapPhysicalPages(void* physical, size_t size) {
+__declspec(dllexport) void* __cdecl XMemMapPhysicalPages(void* physical, size_t size) { XB_XMEM_TRACE("XMemMapPhysicalPages", size, 0);
     (void)physical; (void)size;
     xbgtasix::logf("[xmem] XMemMapPhysicalPages：主机物理页映射，PC 无对应能力");
     return nullptr;
 }
-__declspec(dllexport) void* __cdecl XMemMapPhysicalPagesScatter(void* physical, size_t count) {
+__declspec(dllexport) void* __cdecl XMemMapPhysicalPagesScatter(void* physical, size_t count) { XB_XMEM_TRACE("XMemMapPhysicalPagesScatter", count, 0);
     (void)physical; (void)count;
     xbgtasix::logf("[xmem] XMemMapPhysicalPagesScatter：主机物理页映射，PC 无对应能力");
     return nullptr;
 }
-__declspec(dllexport) bool __cdecl XMemTransferMemory(void* dst, const void* src, size_t size) {
+__declspec(dllexport) bool __cdecl XMemTransferMemory(void* dst, const void* src, size_t size) { XB_XMEM_TRACE("XMemTransferMemory", size, 0);
     if (!dst || !src || !size) return false;
     std::memcpy(dst, src, size);   // 主机上是 DMA，PC 上用内存拷贝等效
     return true;
