@@ -201,6 +201,33 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
         rva = reinterpret_cast<unsigned long long>(addr) - reinterpret_cast<unsigned long long>(mod);
     }
     logf("[xbgtasix] FATAL 异常 0x%08lX at %s+0x%llX", code, name, rva);
+    // 现场寄存器 + 关键指针指向的内存：断言检查的是"某对象某字段非 0"，
+    // 光有栈看不出那个对象是什么，把 rsi/rdi/rax 与 rsi 前 48 字节打出来。
+    {
+        const CONTEXT* c = info->ContextRecord;
+        logf("[xbgtasix] 现场寄存器 rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p",
+             reinterpret_cast<void*>(c->Rax), reinterpret_cast<void*>(c->Rbx),
+             reinterpret_cast<void*>(c->Rcx), reinterpret_cast<void*>(c->Rdx),
+             reinterpret_cast<void*>(c->Rsi), reinterpret_cast<void*>(c->Rdi),
+             reinterpret_cast<void*>(c->R8), reinterpret_cast<void*>(c->R9));
+        auto dump = [](const char* tag, unsigned long long addr) {
+            if (!addr) return;
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0) return;
+            if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return;
+            const auto* b = reinterpret_cast<const unsigned char*>(addr);
+            char hex[3 * 32 + 1] = {0};
+            char asc[33] = {0};
+            for (int i = 0; i < 32 && i < 32; ++i) {
+                snprintf(hex + i * 3, 4, "%02X ", b[i]);
+                asc[i] = (b[i] >= 32 && b[i] < 127) ? static_cast<char>(b[i]) : '.';
+            }
+            logf("[xbgtasix]   %s @%p: %s |%s|", tag, reinterpret_cast<void*>(addr), hex, asc);
+        };
+        dump("rsi", c->Rsi);
+        dump("rdi", c->Rdi);
+    }
+
     // 同时 dump 调用栈（模块+RVA）：断言点本身信息很少，栈才能说明"谁把它逼到这里"。
     // 尤其是崩在游戏内部时，栈上能看出最后一个返回去的是我们的哪个 DLL。
     {

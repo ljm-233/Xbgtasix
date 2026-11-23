@@ -43,6 +43,7 @@
 #include "XUser.h"
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 
 // 精简过的 GDK 头文件没带这个宏；数值与真 GDK / xgameruntime.cpp 一致。
 #ifndef E_NOTFOUND
@@ -575,6 +576,7 @@ STDAPI XGameSaveInitializeProvider(XUserHandle requestingUser, const char* confi
                                    bool syncOnDemand,
                                    XGameSaveProviderHandle* provider) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveInitializeProvider", requestingUser, configurationId, syncOnDemand, provider);
     (void)requestingUser; // 本地模拟用户，不校验（与 XGameSaveFiles 一致）
     (void)syncOnDemand;   // 没有云，需求式同步退化为"本地直读"
     if (!provider) return E_INVALIDARG;
@@ -597,6 +599,7 @@ STDAPI XGameSaveInitializeProvider(XUserHandle requestingUser, const char* confi
 STDAPI XGameSaveInitializeProviderAsync(XUserHandle requestingUser, const char* configurationId,
                                         bool syncOnDemand, XAsyncBlock* async) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveInitializeProviderAsync", requestingUser, configurationId, syncOnDemand, async);
     if (!async) return E_INVALIDARG;
     XGameSaveProviderHandle provider = nullptr;
     const HRESULT hr =
@@ -615,6 +618,7 @@ STDAPI XGameSaveInitializeProviderAsync(XUserHandle requestingUser, const char* 
 STDAPI XGameSaveInitializeProviderResult(XAsyncBlock* async,
                                          XGameSaveProviderHandle* provider) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveInitializeProviderResult", async, provider, 0ULL, 0ULL);
     if (!async || !provider) return E_INVALIDARG;
     Outcome o;
     if (!take_outcome(async, &o)) return E_UNEXPECTED;
@@ -628,6 +632,7 @@ STDAPI XGameSaveInitializeProviderResult(XAsyncBlock* async,
 
 STDAPI_(void) XGameSaveCloseProvider(XGameSaveProviderHandle provider) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveCloseProvider", provider, 0ULL, 0ULL, 0ULL);
     if (!provider) return;
     xbgtasix::logf("[save2] CloseProvider %s", provider->root.c_str());
     delete provider;
@@ -671,12 +676,14 @@ HRESULT quota_impl(XGameSaveProviderHandle provider, int64_t* remainingQuota)
 STDAPI XGameSaveGetRemainingQuota(XGameSaveProviderHandle provider,
                                   int64_t* remainingQuota) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveGetRemainingQuota", provider, remainingQuota, 0ULL, 0ULL);
     return quota_impl(provider, remainingQuota);
 }
 
 STDAPI XGameSaveGetRemainingQuotaAsync(XGameSaveProviderHandle provider,
                                        XAsyncBlock* async) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveGetRemainingQuotaAsync", provider, async, 0ULL, 0ULL);
     if (!async) return E_INVALIDARG;
     int64_t quota = 0;
     const HRESULT hr = quota_impl(provider, &quota);
@@ -692,6 +699,7 @@ STDAPI XGameSaveGetRemainingQuotaAsync(XGameSaveProviderHandle provider,
 
 STDAPI XGameSaveGetRemainingQuotaResult(XAsyncBlock* async, int64_t* remainingQuota) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveGetRemainingQuotaResult", async, remainingQuota, 0ULL, 0ULL);
     if (!async || !remainingQuota) return E_INVALIDARG;
     const HRESULT hr = peek_hr(async);
     if (hr == E_PENDING) return E_PENDING;
@@ -709,6 +717,7 @@ STDAPI XGameSaveGetRemainingQuotaResult(XAsyncBlock* async, int64_t* remainingQu
 STDAPI XGameSaveCreateContainer(XGameSaveProviderHandle provider, const char* containerName,
                                 XGameSaveContainerHandle* containerContext) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveCreateContainer", provider, containerName, containerContext, 0ULL);
     if (!provider || !containerName || !containerContext) return E_INVALIDARG;
     *containerContext = nullptr;
     const std::string dir = container_dir(provider, containerName);
@@ -730,6 +739,7 @@ STDAPI XGameSaveCreateContainer(XGameSaveProviderHandle provider, const char* co
 
 STDAPI_(void) XGameSaveCloseContainer(XGameSaveContainerHandle context) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveCloseContainer", context, 0ULL, 0ULL, 0ULL);
     if (!context) return;
     xbgtasix::logf("[save2] CloseContainer(%s)", context->name.c_str());
     delete context;
@@ -738,12 +748,14 @@ STDAPI_(void) XGameSaveCloseContainer(XGameSaveContainerHandle context) noexcept
 STDAPI XGameSaveDeleteContainer(XGameSaveProviderHandle provider,
                                 const char* containerName) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveDeleteContainer", provider, containerName, 0ULL, 0ULL);
     return delete_container_impl(provider, containerName);
 }
 
 STDAPI XGameSaveDeleteContainerAsync(XGameSaveProviderHandle provider, const char* containerName,
                                      XAsyncBlock* async) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveDeleteContainerAsync", provider, containerName, async, 0ULL);
     if (!async) return E_INVALIDARG;
     gs_complete(async, delete_container_impl(provider, containerName));
     return S_OK;
@@ -751,6 +763,7 @@ STDAPI XGameSaveDeleteContainerAsync(XGameSaveProviderHandle provider, const cha
 
 STDAPI XGameSaveDeleteContainerResult(XAsyncBlock* async) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveDeleteContainerResult", async, 0ULL, 0ULL, 0ULL);
     if (!async) return E_INVALIDARG;
     const HRESULT hr = peek_hr(async);
     if (hr == E_PENDING) return E_PENDING;
@@ -763,6 +776,7 @@ STDAPI XGameSaveGetContainerInfo(XGameSaveProviderHandle provider, const char* c
                                  void* context,
                                  XGameSaveContainerInfoCallback* callback) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveGetContainerInfo", provider, containerName, context, callback);
     if (!provider || !containerName || !callback) return E_INVALIDARG;
     const std::string dir = container_dir(provider, containerName);
     if (dir.empty()) return E_GS_INVALID_CONTAINER_NAME;
@@ -814,6 +828,7 @@ HRESULT enumerate_containers_impl(XGameSaveProviderHandle provider, const char* 
 STDAPI XGameSaveEnumerateContainerInfo(XGameSaveProviderHandle provider, void* context,
                                        XGameSaveContainerInfoCallback* callback) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveEnumerateContainerInfo", provider, context, callback, 0ULL);
     return enumerate_containers_impl(provider, nullptr, context, callback);
 }
 
@@ -821,6 +836,7 @@ STDAPI XGameSaveEnumerateContainerInfoByName(XGameSaveProviderHandle provider,
                                              const char* containerNamePrefix, void* context,
                                              XGameSaveContainerInfoCallback* callback) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveEnumerateContainerInfoByName", provider, containerNamePrefix, context, callback);
     return enumerate_containers_impl(provider, containerNamePrefix, context, callback);
 }
 
@@ -858,6 +874,7 @@ HRESULT enumerate_blobs_impl(XGameSaveContainerHandle container, const char* pre
 STDAPI XGameSaveEnumerateBlobInfo(XGameSaveContainerHandle container, void* context,
                                   XGameSaveBlobInfoCallback* callback) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveEnumerateBlobInfo", container, context, callback, 0ULL);
     return enumerate_blobs_impl(container, nullptr, context, callback);
 }
 
@@ -865,6 +882,7 @@ STDAPI XGameSaveEnumerateBlobInfoByName(XGameSaveContainerHandle container,
                                         const char* blobNamePrefix, void* context,
                                         XGameSaveBlobInfoCallback* callback) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveEnumerateBlobInfoByName", container, blobNamePrefix, context, callback);
     return enumerate_blobs_impl(container, blobNamePrefix, context, callback);
 }
 
@@ -912,6 +930,7 @@ STDAPI XGameSaveReadBlobData(XGameSaveContainerHandle container, const char** bl
                              uint32_t* countOfBlobs, size_t blobsSize,
                              XGameSaveBlob* blobData) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveReadBlobData", container, blobNames, countOfBlobs, blobsSize);
     if (!container || !countOfBlobs) return E_INVALIDARG;
     std::vector<PendingBlob> blobs;
     const HRESULT hr = collect_blobs(container, blobNames, countOfBlobs, &blobs);
@@ -922,6 +941,7 @@ STDAPI XGameSaveReadBlobData(XGameSaveContainerHandle container, const char** bl
 STDAPI XGameSaveReadBlobDataAsync(XGameSaveContainerHandle container, const char** blobNames,
                                   uint32_t countOfBlobs, XAsyncBlock* async) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveReadBlobDataAsync", container, blobNames, countOfBlobs, async);
     if (!container || !async) return E_INVALIDARG;
     uint32_t n = countOfBlobs;
     std::vector<PendingBlob> blobs;
@@ -939,6 +959,7 @@ STDAPI XGameSaveReadBlobDataAsync(XGameSaveContainerHandle container, const char
 STDAPI XGameSaveReadBlobDataResult(XAsyncBlock* async, size_t blobsSize,
                                    XGameSaveBlob* blobData, uint32_t* countOfBlobs) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveReadBlobDataResult", async, blobsSize, blobData, countOfBlobs);
     if (!async || !countOfBlobs) return E_INVALIDARG;
     const HRESULT hr = peek_hr(async);
     if (hr == E_PENDING) return E_PENDING;
@@ -961,6 +982,7 @@ STDAPI XGameSaveReadBlobDataResult(XAsyncBlock* async, size_t blobsSize,
 STDAPI XGameSaveCreateUpdate(XGameSaveContainerHandle container, const char* containerDisplayName,
                              XGameSaveUpdateHandle* updateContext) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveCreateUpdate", container, containerDisplayName, updateContext, 0ULL);
     if (!container || !containerDisplayName || !updateContext) return E_INVALIDARG;
     *updateContext = nullptr;
     if (std::strlen(containerDisplayName) >= GS_MAX_CONTAINER_DISPLAY_NAME_SIZE) {
@@ -978,6 +1000,7 @@ STDAPI XGameSaveCreateUpdate(XGameSaveContainerHandle container, const char* con
 
 STDAPI_(void) XGameSaveCloseUpdate(XGameSaveUpdateHandle context) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveCloseUpdate", context, 0ULL, 0ULL, 0ULL);
     if (!context) return;
     delete context;
 }
@@ -985,6 +1008,7 @@ STDAPI_(void) XGameSaveCloseUpdate(XGameSaveUpdateHandle context) noexcept
 STDAPI XGameSaveSubmitBlobWrite(XGameSaveUpdateHandle updateContext, const char* blobName,
                                 const uint8_t* data, size_t byteCount) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveSubmitBlobWrite", updateContext, blobName, data, byteCount);
     if (!updateContext || !blobName || !blobName[0]) return E_INVALIDARG;
     if (byteCount > 0 && !data) return E_INVALIDARG;
     if (std::strlen(blobName) >= GS_MAX_BLOB_NAME_SIZE) {
@@ -1006,6 +1030,7 @@ STDAPI XGameSaveSubmitBlobWrite(XGameSaveUpdateHandle updateContext, const char*
 
 STDAPI XGameSaveSubmitBlobDelete(XGameSaveUpdateHandle updateContext, const char* blobName) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveSubmitBlobDelete", updateContext, blobName, 0ULL, 0ULL);
     if (!updateContext || !blobName || !blobName[0]) return E_INVALIDARG;
     updateContext->deletes.emplace_back(blobName);
     return S_OK;
@@ -1053,12 +1078,14 @@ HRESULT submit_update_impl(XGameSaveUpdateHandle u)
 
 STDAPI XGameSaveSubmitUpdate(XGameSaveUpdateHandle updateContext) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveSubmitUpdate", updateContext, 0ULL, 0ULL, 0ULL);
     return submit_update_impl(updateContext);
 }
 
 STDAPI XGameSaveSubmitUpdateAsync(XGameSaveUpdateHandle updateContext,
                                   XAsyncBlock* async) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveSubmitUpdateAsync", updateContext, async, 0ULL, 0ULL);
     if (!async) return E_INVALIDARG;
     gs_complete(async, submit_update_impl(updateContext));
     return S_OK;
@@ -1066,6 +1093,7 @@ STDAPI XGameSaveSubmitUpdateAsync(XGameSaveUpdateHandle updateContext,
 
 STDAPI XGameSaveSubmitUpdateResult(XAsyncBlock* async) noexcept
 {
+    XB_TRACE_ENTRY("XGameSaveSubmitUpdateResult", async, 0ULL, 0ULL, 0ULL);
     if (!async) return E_INVALIDARG;
     const HRESULT hr = peek_hr(async);
     if (hr == E_PENDING) return E_PENDING;

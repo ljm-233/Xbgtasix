@@ -106,3 +106,22 @@ grep "UNIMPLEMENTED" build/launch/xbgtasix.log | sed 's/.*: //' | sort | uniq -c
 
 不管成不成，把这三样记下来：`build/launch/xbgtasix.log`、退出码、以及
 `grep UNIMPLEMENTED | sort | uniq -c` 的结果。这三样决定了下一轮该补什么。
+
+## 崩了怎么看日志
+
+一次真机运行的日志有几千行，`tail` 只能看到最后一条 FATAL。用：
+
+```bash
+python tools/summarize_run.py build/first_run.log --tail 15
+```
+
+它给出：各子系统调用计数、未实现 API 清单、**第一次致命异常**及其符号化调用栈
+（`模块+RVA`，可直接 `objdump -d` 定位）、以及断言前最后 15 个调用。
+
+跑的时候建议带上这三个开关：
+
+| 环境变量 | 作用 |
+|---|---|
+| `XBGTASIX_VEH=1` | 致命异常处 dump 调用栈（模块+RVA） |
+| `XBGTASIX_TRACE=1` | 记录所有 shim 调用（含主机硬件层） |
+| `XBGTASIX_UNIMPL=log` | 撞到未实现 API 时继续跑而不是退出 |

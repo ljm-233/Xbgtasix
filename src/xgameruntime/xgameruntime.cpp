@@ -44,6 +44,7 @@
 #include "XUser.h"
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 #include "system_ui.h"
 
 namespace {
@@ -616,18 +617,21 @@ extern "C" {
 // ---- 生命周期 ----
 
 STDAPI XGameRuntimeInitialize() {
+    XB_TRACE_ENTRY("XGameRuntimeInitialize", 0ULL, 0ULL, 0ULL, 0ULL);
     load_game_config();
     xbgtasix::logf("[xgamert] XGameRuntimeInitialize()");
     return S_OK;
 }
 
 STDAPI XGameRuntimeInitializeWithOptions(const XGameRuntimeOptions* options) {
+    XB_TRACE_ENTRY("XGameRuntimeInitializeWithOptions", options, 0ULL, 0ULL, 0ULL);
     xbgtasix::logf("[xgamert] XGameRuntimeInitializeWithOptions(source=%d)",
                    options ? static_cast<int>(options->gameConfigSource) : -1);
     return XGameRuntimeInitialize();
 }
 
 STDAPI_(void) XGameRuntimeUninitialize() {
+    XB_TRACE_ENTRY("XGameRuntimeUninitialize", 0ULL, 0ULL, 0ULL, 0ULL);
     xbgtasix::logf("[xgamert] XGameRuntimeUninitialize()");
 }
 
@@ -636,6 +640,7 @@ STDAPI_(void) XGameRuntimeUninitialize() {
 STDAPI XTaskQueueCreate(XTaskQueueDispatchMode workDispatchMode,
                         XTaskQueueDispatchMode completionDispatchMode,
                         XTaskQueueHandle* queue) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueCreate", workDispatchMode, completionDispatchMode, queue, 0ULL);
     if (!queue) return E_INVALIDARG;
     auto* q = new (std::nothrow) TaskQueueState();
     if (!q) return E_OUTOFMEMORY;
@@ -651,6 +656,7 @@ STDAPI XTaskQueueCreate(XTaskQueueDispatchMode workDispatchMode,
 
 STDAPI XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, void* context,
                                XTaskQueueCallback* callback) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueSubmitCallback", queue, port, context, callback);
     if (!queue || !callback) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     QueueOpGuard op(q);   // 回调里可能把最后一个句柄 Close 掉，本次调用期间对象必须活着
@@ -699,6 +705,7 @@ STDAPI XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, voi
 
 STDAPI XTaskQueueSubmitDelayedCallback(XTaskQueueHandle queue, XTaskQueuePort port, uint32_t delayMs,
                                       void* context, XTaskQueueCallback* callback) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueSubmitDelayedCallback", queue, port, delayMs, context);
     if (!queue || !callback) return E_INVALIDARG;
     // 简化实现：起一个一次性线程，到点再投递（真实 GDK 是队列内定时器）
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
@@ -713,6 +720,7 @@ STDAPI XTaskQueueSubmitDelayedCallback(XTaskQueueHandle queue, XTaskQueuePort po
 
 STDAPI_(bool) XTaskQueueDispatch(XTaskQueueHandle queue, XTaskQueuePort port,
                                 uint32_t timeoutInMs) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueDispatch", queue, port, timeoutInMs, 0ULL);
     if (!queue) return false;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     QueueOpGuard op(q);   // 派发的回调里可能 Close 掉最后一个句柄
@@ -734,6 +742,7 @@ STDAPI_(bool) XTaskQueueDispatch(XTaskQueueHandle queue, XTaskQueuePort port,
 
 STDAPI XTaskQueueTerminate(XTaskQueueHandle queue, bool wait, void* context,
                            XTaskQueueTerminatedCallback* callback) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueTerminate", queue, wait, context, callback);
     if (!queue) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     {
@@ -749,6 +758,7 @@ std::mutex g_port_mu;
 std::unordered_set<void*> g_port_handles;
 
 STDAPI_(void) XTaskQueueCloseHandle(XTaskQueueHandle queue) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueCloseHandle", queue, 0ULL, 0ULL, 0ULL);
     if (!queue) return;
     {
         std::lock_guard<std::mutex> lock(g_port_mu);
@@ -770,6 +780,7 @@ STDAPI_(void) XTaskQueueCloseHandle(XTaskQueueHandle queue) noexcept {
 }
 
 STDAPI XTaskQueueDuplicateHandle(XTaskQueueHandle queueHandle, XTaskQueueHandle* duplicated) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueDuplicateHandle", queueHandle, duplicated, 0ULL, 0ULL);
     if (!queueHandle || !duplicated) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queueHandle);
     q->refcount.fetch_add(1);
@@ -782,6 +793,7 @@ STDAPI XTaskQueueDuplicateHandle(XTaskQueueHandle queueHandle, XTaskQueueHandle*
 STDAPI XTaskQueueRegisterWaiter(XTaskQueueHandle queue, XTaskQueuePort port, HANDLE waitHandle,
                                 void* callbackContext, XTaskQueueCallback* callback,
                                 XTaskQueueRegistrationToken* token) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueRegisterWaiter", queue, port, waitHandle, callbackContext);
     if (!queue || !waitHandle || !token) return E_INVALIDARG;
     (void)callbackContext;   // 真 GDK 里 waiter 的回调由调用方线程执行，我们只负责 signal
     (void)callback;
@@ -800,6 +812,7 @@ STDAPI XTaskQueueRegisterWaiter(XTaskQueueHandle queue, XTaskQueuePort port, HAN
 
 STDAPI_(void) XTaskQueueUnregisterWaiter(XTaskQueueHandle queue,
                                          XTaskQueueRegistrationToken token) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueUnregisterWaiter", queue, token, 0ULL, 0ULL);
     if (!queue) return;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     std::lock_guard<std::mutex> lock(q->mu);
@@ -811,6 +824,7 @@ STDAPI_(void) XTaskQueueUnregisterWaiter(XTaskQueueHandle queue,
 STDAPI XTaskQueueRegisterMonitor(XTaskQueueHandle queue, void* callbackContext,
                                  XTaskQueueMonitorCallback* callback,
                                  XTaskQueueRegistrationToken* token) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueRegisterMonitor", queue, callbackContext, callback, token);
     if (!queue || !callback || !token) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     {
@@ -826,6 +840,7 @@ STDAPI XTaskQueueRegisterMonitor(XTaskQueueHandle queue, void* callbackContext,
 
 STDAPI_(void) XTaskQueueUnregisterMonitor(XTaskQueueHandle queue,
                                           XTaskQueueRegistrationToken token) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueUnregisterMonitor", queue, token, 0ULL, 0ULL);
     if (!queue) return;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     std::lock_guard<std::mutex> lock(q->mu);
@@ -840,6 +855,7 @@ std::mutex g_proc_queue_mu;
 XTaskQueueHandle g_proc_queue = nullptr;
 
 STDAPI_(void) XTaskQueueSetCurrentProcessTaskQueue(XTaskQueueHandle queue) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueSetCurrentProcessTaskQueue", queue, 0ULL, 0ULL, 0ULL);
     XTaskQueueHandle old = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_proc_queue_mu);
@@ -854,6 +870,7 @@ STDAPI_(void) XTaskQueueSetCurrentProcessTaskQueue(XTaskQueueHandle queue) noexc
 
 STDAPI XTaskQueueGetPort(XTaskQueueHandle queue, XTaskQueuePort port,
                          XTaskQueuePortHandle* portHandle) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueGetPort", queue, port, portHandle, 0ULL);
     if (!queue || !portHandle) return E_INVALIDARG;
     auto* q = reinterpret_cast<TaskQueueState*>(queue);
     auto* ph = new (std::nothrow) PortHandle{q, port};
@@ -869,6 +886,7 @@ STDAPI XTaskQueueGetPort(XTaskQueueHandle queue, XTaskQueuePort port,
 
 STDAPI XTaskQueueCreateComposite(XTaskQueuePortHandle workPort, XTaskQueuePortHandle completionPort,
                                  XTaskQueueHandle* queue) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueCreateComposite", workPort, completionPort, queue, 0ULL);
     if (!workPort || !queue) return E_INVALIDARG;
     auto* wp = reinterpret_cast<PortHandle*>(workPort);
     auto* q = new (std::nothrow) TaskQueueState();
@@ -893,6 +911,7 @@ STDAPI XTaskQueueCreateComposite(XTaskQueuePortHandle workPort, XTaskQueuePortHa
 }
 
 STDAPI_(bool) XTaskQueueGetCurrentProcessTaskQueue(XTaskQueueHandle* queue) noexcept {
+    XB_TRACE_ENTRY("XTaskQueueGetCurrentProcessTaskQueue", queue, 0ULL, 0ULL, 0ULL);
     if (queue) *queue = nullptr;   // _Out_ 必须写，否则调用方拿到栈垃圾再去 Close
     std::lock_guard<std::mutex> lock(g_proc_queue_mu);
     if (!g_proc_queue) return false;
@@ -904,6 +923,7 @@ STDAPI_(bool) XTaskQueueGetCurrentProcessTaskQueue(XTaskQueueHandle* queue) noex
 // ---- XAsync ----
 
 STDAPI XAsyncGetStatus(XAsyncBlock* asyncBlock, bool wait) noexcept {
+    XB_TRACE_ENTRY("XAsyncGetStatus", asyncBlock, wait, 0ULL, 0ULL);
     if (!asyncBlock) return E_INVALIDARG;
     if (is_async_done(asyncBlock)) return async_status(asyncBlock);
     if (!wait) return E_PENDING;
@@ -917,6 +937,7 @@ STDAPI XAsyncGetStatus(XAsyncBlock* asyncBlock, bool wait) noexcept {
 }
 
 STDAPI_(void) XAsyncCancel(XAsyncBlock* asyncBlock) noexcept {
+    XB_TRACE_ENTRY("XAsyncCancel", asyncBlock, 0ULL, 0ULL, 0ULL);
     if (!asyncBlock) return;
     // 头文件：已完成的操作 cancel 应当什么都不做（否则会把 S_OK 抹成 E_ABORT 并二次回调）
     {
@@ -929,6 +950,7 @@ STDAPI_(void) XAsyncCancel(XAsyncBlock* asyncBlock) noexcept {
 
 // 通用异步：把 work 丢到线程里跑，完成时按 GDK 语义回调
 STDAPI XAsyncRun(XAsyncBlock* asyncBlock, XAsyncWork* work) noexcept {
+    XB_TRACE_ENTRY("XAsyncRun", asyncBlock, work, 0ULL, 0ULL);
     if (!asyncBlock || !work) return E_INVALIDARG;
     begin_async(asyncBlock);   // 自己管锁；外面再包一层就是自死锁
     std::thread([asyncBlock, work] {
@@ -939,6 +961,7 @@ STDAPI XAsyncRun(XAsyncBlock* asyncBlock, XAsyncWork* work) noexcept {
 }
 
 STDAPI XAsyncGetResultSize(XAsyncBlock* asyncBlock, size_t* bufferSize) noexcept {
+    XB_TRACE_ENTRY("XAsyncGetResultSize", asyncBlock, bufferSize, 0ULL, 0ULL);
     if (!asyncBlock || !bufferSize) return E_INVALIDARG;
     // 注意：只加一次锁。std::mutex 不可重入，持锁再调 async_status() 会自死锁（踩过，60 秒超时）
     std::lock_guard<std::mutex> lock(g_async_mu);
@@ -951,6 +974,7 @@ STDAPI XAsyncGetResultSize(XAsyncBlock* asyncBlock, size_t* bufferSize) noexcept
 // ---- 用户（本地模拟） ----
 
 STDAPI XUserAddAsync(XUserAddOptions options, XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XUserAddAsync", options, async, 0ULL, 0ULL);
     (void)options;
     if (!async) return E_INVALIDARG;
     auto* u = new (std::nothrow) UserState();
@@ -967,6 +991,7 @@ STDAPI XUserAddAsync(XUserAddOptions options, XAsyncBlock* async) noexcept {
 }
 
 STDAPI XUserAddResult(XAsyncBlock* async, XUserHandle* newUser) noexcept {
+    XB_TRACE_ENTRY("XUserAddResult", async, newUser, 0ULL, 0ULL);
     if (!async || !newUser) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_user_mu);
     auto it = g_pending_user.find(async);
@@ -977,6 +1002,7 @@ STDAPI XUserAddResult(XAsyncBlock* async, XUserHandle* newUser) noexcept {
 }
 
 STDAPI XUserGetId(XUserHandle user, uint64_t* userId) noexcept {
+    XB_TRACE_ENTRY("XUserGetId", user, userId, 0ULL, 0ULL);
     if (!user || !userId) return E_INVALIDARG;
     *userId = reinterpret_cast<UserState*>(user)->id;
     return S_OK;
@@ -985,6 +1011,7 @@ STDAPI XUserGetId(XUserHandle user, uint64_t* userId) noexcept {
 // 本地模拟用户：没有微软账号、没有网络，但查询类接口可以有稳定语义
 STDAPI XUserGetGamertag(XUserHandle user, XUserGamertagComponent component, size_t gamertagSize,
                         char* gamertag, size_t* gamertagUsed) noexcept {
+    XB_TRACE_ENTRY("XUserGetGamertag", user, component, gamertagSize, gamertag);
     if (!user || !gamertag) return E_INVALIDARG;
     (void)component;   // 只是显示名，不同组件给同一份
     const char* name = "Player";
@@ -996,24 +1023,28 @@ STDAPI XUserGetGamertag(XUserHandle user, XUserGamertagComponent component, size
 }
 
 STDAPI XUserGetLocalId(XUserHandle user, XUserLocalId* localId) noexcept {
+    XB_TRACE_ENTRY("XUserGetLocalId", user, localId, 0ULL, 0ULL);
     if (!user || !localId) return E_INVALIDARG;
     localId->value = reinterpret_cast<UserState*>(user)->id;
     return S_OK;
 }
 
 STDAPI XUserGetIsGuest(XUserHandle user, bool* isGuest) noexcept {
+    XB_TRACE_ENTRY("XUserGetIsGuest", user, isGuest, 0ULL, 0ULL);
     if (!user || !isGuest) return E_INVALIDARG;
     *isGuest = false;
     return S_OK;
 }
 
 STDAPI XUserGetState(XUserHandle user, XUserState* state) noexcept {
+    XB_TRACE_ENTRY("XUserGetState", user, state, 0ULL, 0ULL);
     if (!user || !state) return E_INVALIDARG;
     *state = XUserState::SignedIn;   // 本地用户永远是"已登录"
     return S_OK;
 }
 
 STDAPI XUserFindUserById(uint64_t userId, XUserHandle* user) noexcept {
+    XB_TRACE_ENTRY("XUserFindUserById", userId, user, 0ULL, 0ULL);
     if (!user) return E_INVALIDARG;
     if (userId == 0) return E_INVALIDARG;
     auto* u = new (std::nothrow) UserState();
@@ -1024,6 +1055,7 @@ STDAPI XUserFindUserById(uint64_t userId, XUserHandle* user) noexcept {
 }
 
 STDAPI_(void) XUserCloseHandle(XUserHandle user) noexcept {
+    XB_TRACE_ENTRY("XUserCloseHandle", user, 0ULL, 0ULL, 0ULL);
     if (!user) return;
     auto* u = reinterpret_cast<UserState*>(user);
     if (u->refs.fetch_sub(1) > 1) return;   // DuplicateHandle 过的不释放
@@ -1033,12 +1065,14 @@ STDAPI_(void) XUserCloseHandle(XUserHandle user) noexcept {
 // ---- XUser 本地可实现的查询/句柄管理（签名全部对照 XUser.h） ----
 
 STDAPI XUserGetMaxUsers(uint32_t* maxUsers) noexcept {
+    XB_TRACE_ENTRY("XUserGetMaxUsers", maxUsers, 0ULL, 0ULL, 0ULL);
     if (!maxUsers) return E_INVALIDARG;
     *maxUsers = 8;
     return S_OK;
 }
 
 STDAPI_(int32_t) XUserCompare(XUserHandle user1, XUserHandle user2) noexcept {
+    XB_TRACE_ENTRY("XUserCompare", user1, user2, 0ULL, 0ULL);
     if (user1 == user2) return 0;
     if (!user1) return -1;
     if (!user2) return 1;
@@ -1048,6 +1082,7 @@ STDAPI_(int32_t) XUserCompare(XUserHandle user1, XUserHandle user2) noexcept {
 }
 
 STDAPI XUserDuplicateHandle(XUserHandle user, XUserHandle* duplicatedUser) noexcept {
+    XB_TRACE_ENTRY("XUserDuplicateHandle", user, duplicatedUser, 0ULL, 0ULL);
     if (!user || !duplicatedUser) return E_INVALIDARG;
     reinterpret_cast<UserState*>(user)->refs.fetch_add(1);
     *duplicatedUser = user;
@@ -1055,14 +1090,17 @@ STDAPI XUserDuplicateHandle(XUserHandle user, XUserHandle* duplicatedUser) noexc
 }
 
 STDAPI_(bool) XUserIsStoreUser(XUserHandle user) noexcept {
+    XB_TRACE_ENTRY("XUserIsStoreUser", user, 0ULL, 0ULL, 0ULL);
     return user != nullptr;
 }
 
 STDAPI_(bool) XUserIsSignOutPresent() noexcept {
+    XB_TRACE_ENTRY("XUserIsSignOutPresent", 0ULL, 0ULL, 0ULL, 0ULL);
     return false;   // 本地用户不会被系统登出
 }
 
 STDAPI XUserGetAgeGroup(XUserHandle user, XUserAgeGroup* ageGroup) noexcept {
+    XB_TRACE_ENTRY("XUserGetAgeGroup", user, ageGroup, 0ULL, 0ULL);
     if (!user || !ageGroup) return E_INVALIDARG;
     *ageGroup = XUserAgeGroup::Adult;
     return S_OK;
@@ -1070,6 +1108,7 @@ STDAPI XUserGetAgeGroup(XUserHandle user, XUserAgeGroup* ageGroup) noexcept {
 
 STDAPI XUserCheckPrivilege(XUserHandle user, XUserPrivilegeOptions options, XUserPrivilege privilege,
                            bool* hasPrivilege, XUserPrivilegeDenyReason* reason) noexcept {
+    XB_TRACE_ENTRY("XUserCheckPrivilege", user, options, privilege, hasPrivilege);
     (void)options;
     (void)privilege;
     if (!user || !hasPrivilege) return E_INVALIDARG;
@@ -1079,6 +1118,7 @@ STDAPI XUserCheckPrivilege(XUserHandle user, XUserPrivilegeOptions options, XUse
 }
 
 STDAPI XUserFindUserByLocalId(XUserLocalId localId, XUserHandle* user) noexcept {
+    XB_TRACE_ENTRY("XUserFindUserByLocalId", localId, user, 0ULL, 0ULL);
     if (!user) return E_INVALIDARG;
     if (localId.value == 0) return E_INVALIDARG;
     auto* u = new (std::nothrow) UserState();
@@ -1095,6 +1135,7 @@ uint64_t g_user_evt_next = 1;
 STDAPI XUserRegisterForChangeEvent(XTaskQueueHandle queue, void* context,
                                    XUserChangeEventCallback* callback,
                                    XTaskQueueRegistrationToken* token) noexcept {
+    XB_TRACE_ENTRY("XUserRegisterForChangeEvent", queue, context, callback, token);
     (void)queue;
     (void)context;
     (void)callback;
@@ -1106,12 +1147,14 @@ STDAPI XUserRegisterForChangeEvent(XTaskQueueHandle queue, void* context,
 
 STDAPI_(bool) XUserUnregisterForChangeEvent(XTaskQueueRegistrationToken token,
                                             bool wait) noexcept {
+    XB_TRACE_ENTRY("XUserUnregisterForChangeEvent", token, wait, 0ULL, 0ULL);
     (void)token;
     (void)wait;
     return true;
 }
 
 STDAPI XUserSignOutAsync(XUserHandle user, XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XUserSignOutAsync", user, async, 0ULL, 0ULL);
     if (!user || !async) return E_INVALIDARG;
     {
         std::lock_guard<std::mutex> lock(g_async_mu);
@@ -1123,6 +1166,7 @@ STDAPI XUserSignOutAsync(XUserHandle user, XAsyncBlock* async) noexcept {
 }
 
 STDAPI XUserSignOutResult(XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XUserSignOutResult", async, 0ULL, 0ULL, 0ULL);
     if (!async) return E_INVALIDARG;
     return is_async_done(async) ? S_OK : E_PENDING;
 }
@@ -1130,6 +1174,7 @@ STDAPI XUserSignOutResult(XAsyncBlock* async) noexcept {
 // ---- 持久化本地存储 ----
 
 STDAPI XPersistentLocalStorageGetPathSize(size_t* pathSize) noexcept {
+    XB_TRACE_ENTRY("XPersistentLocalStorageGetPathSize", pathSize, 0ULL, 0ULL, 0ULL);
     if (!pathSize) return E_INVALIDARG;
     if (!ensure_pls_path()) return E_FAIL;
     *pathSize = g_pls_path.size() + 1;
@@ -1137,6 +1182,7 @@ STDAPI XPersistentLocalStorageGetPathSize(size_t* pathSize) noexcept {
 }
 
 STDAPI XPersistentLocalStorageGetPath(size_t pathSize, char* path, size_t* pathUsed) noexcept {
+    XB_TRACE_ENTRY("XPersistentLocalStorageGetPath", pathSize, path, pathUsed, 0ULL);
     if (!path || pathSize == 0) return E_INVALIDARG;
     if (!ensure_pls_path()) return E_FAIL;
     const size_t need = g_pls_path.size() + 1;
@@ -1147,6 +1193,7 @@ STDAPI XPersistentLocalStorageGetPath(size_t pathSize, char* path, size_t* pathU
 }
 
 STDAPI XPersistentLocalStorageGetSpaceInfo(XPersistentLocalStorageSpaceInfo* info) noexcept {
+    XB_TRACE_ENTRY("XPersistentLocalStorageGetSpaceInfo", info, 0ULL, 0ULL, 0ULL);
     if (!info) return E_INVALIDARG;
     if (!ensure_pls_path()) return E_FAIL;
     const uint64_t total = pls_total_bytes();
@@ -1170,6 +1217,7 @@ std::mutex g_mount_mu;
 std::unordered_map<XAsyncBlock*, XPackageMountHandle> g_pending_mount;
 
 STDAPI XPackageGetCurrentProcessPackageIdentifier(size_t bufferSize, char* buffer) noexcept {
+    XB_TRACE_ENTRY("XPackageGetCurrentProcessPackageIdentifier", bufferSize, buffer, 0ULL, 0ULL);
     if (!buffer || bufferSize == 0) return E_INVALIDARG;
     const std::string& id = g_rt.package_id;
     if (id.empty()) return E_FAIL;
@@ -1179,21 +1227,25 @@ STDAPI XPackageGetCurrentProcessPackageIdentifier(size_t bufferSize, char* buffe
 }
 
 STDAPI_(bool) XPackageIsPackagedProcess() noexcept {
+    XB_TRACE_ENTRY("XPackageIsPackagedProcess", 0ULL, 0ULL, 0ULL, 0ULL);
     // 只要读到了 MicrosoftGame.Config 就当成"打包进程"
     return g_rt.config_loaded;
 }
 
 STDAPI_(void) XPackageCloseMountHandle(XPackageMountHandle mount) noexcept {
+    XB_TRACE_ENTRY("XPackageCloseMountHandle", mount, 0ULL, 0ULL, 0ULL);
     delete reinterpret_cast<MountInstance*>(mount);
 }
 
 STDAPI XPackageGetMountPathSize(XPackageMountHandle mount, size_t* pathSize) noexcept {
+    XB_TRACE_ENTRY("XPackageGetMountPathSize", mount, pathSize, 0ULL, 0ULL);
     if (!mount || !pathSize) return E_INVALIDARG;
     *pathSize = reinterpret_cast<MountInstance*>(mount)->path.size() + 1;
     return S_OK;
 }
 
 STDAPI XPackageGetMountPath(XPackageMountHandle mount, size_t pathSize, char* path) noexcept {
+    XB_TRACE_ENTRY("XPackageGetMountPath", mount, pathSize, path, 0ULL);
     if (!mount || !path || pathSize == 0) return E_INVALIDARG;
     const std::string& p = reinterpret_cast<MountInstance*>(mount)->path;
     if (pathSize < p.size() + 1) return E_NOT_SUFFICIENT_BUFFER;
@@ -1229,10 +1281,12 @@ static HRESULT mount_impl(const char* packageId, XPackageMountHandle* mount) {
 
 STDAPI_(HRESULT STDAPICALLTYPE) XPackageMount(const char* packageIdentifier,
                                               XPackageMountHandle* mount) noexcept {
+    XB_TRACE_ENTRY("XPackageMount", packageIdentifier, mount, 0ULL, 0ULL);
     return mount_impl(packageIdentifier, mount);
 }
 
 STDAPI XPackageMountWithUiAsync(const char* packageIdentifier, XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XPackageMountWithUiAsync", packageIdentifier, async, 0ULL, 0ULL);
     if (!async) return E_INVALIDARG;
     XPackageMountHandle handle = nullptr;
     const HRESULT hr = mount_impl(packageIdentifier, &handle);
@@ -1250,6 +1304,7 @@ STDAPI XPackageMountWithUiAsync(const char* packageIdentifier, XAsyncBlock* asyn
 }
 
 STDAPI XPackageMountWithUiResult(XAsyncBlock* async, XPackageMountHandle* mount) noexcept {
+    XB_TRACE_ENTRY("XPackageMountWithUiResult", async, mount, 0ULL, 0ULL);
     if (!async || !mount) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_async_mu);
     auto it = g_async.find(async);
@@ -1290,6 +1345,7 @@ static std::string save_folder_for(const char* configurationId) {
 
 STDAPI XGameSaveFilesGetFolderWithUiAsync(XUserHandle requestingUser, const char* configurationId,
                                           XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XGameSaveFilesGetFolderWithUiAsync", requestingUser, configurationId, async, 0ULL);
     (void)requestingUser;   // 本地模拟用户，不校验
     if (!async || !configurationId) return E_INVALIDARG;
     const std::string dir = save_folder_for(configurationId);
@@ -1310,6 +1366,7 @@ STDAPI XGameSaveFilesGetFolderWithUiAsync(XUserHandle requestingUser, const char
 
 STDAPI XGameSaveFilesGetFolderWithUiResult(XAsyncBlock* async, size_t folderSize,
                                            char* folderResult) noexcept {
+    XB_TRACE_ENTRY("XGameSaveFilesGetFolderWithUiResult", async, folderSize, folderResult, 0ULL);
     if (!async || !folderResult || folderSize == 0) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_save_mu);
     auto it = g_pending_save.find(async);
@@ -1322,6 +1379,7 @@ STDAPI XGameSaveFilesGetFolderWithUiResult(XAsyncBlock* async, size_t folderSize
 
 STDAPI XGameSaveFilesGetRemainingQuota(XUserHandle userContext, const char* configurationId,
                                        int64_t* remainingQuota) noexcept {
+    XB_TRACE_ENTRY("XGameSaveFilesGetRemainingQuota", userContext, configurationId, remainingQuota, 0ULL);
     (void)userContext;
     if (!configurationId || !remainingQuota) return E_INVALIDARG;
     const std::string dir = save_folder_for(configurationId);
@@ -1336,6 +1394,7 @@ STDAPI XGameSaveFilesGetRemainingQuota(XUserHandle userContext, const char* conf
 
 STDAPI XStoreQueryProductForCurrentGameAsync(const XStoreContextHandle storeContextHandle,
                                              XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XStoreQueryProductForCurrentGameAsync", storeContextHandle, async, 0ULL, 0ULL);
     (void)storeContextHandle;
     (void)async;
     XB_UNIMPL("XStoreQueryProductForCurrentGameAsync");
@@ -1345,6 +1404,7 @@ STDAPI XStoreQueryProductForCurrentGameAsync(const XStoreContextHandle storeCont
 // ---- 能力门（返回值直接决定游戏走哪条分支，必须是真的） ----
 
 STDAPI_(bool) XGameRuntimeIsFeatureAvailable(XGameRuntimeFeature feature) noexcept {
+    XB_TRACE_ENTRY("XGameRuntimeIsFeatureAvailable", feature, 0ULL, 0ULL, 0ULL);
     // 我们确实实现了的：XAsync / XPackage / XPersistentLocalStorage / XTaskQueue / XUser / XError
     // 明确没实现的主机功能一律 false —— 宁可让游戏走降级路径，也不要让它以为能用
     switch (feature) {
@@ -1375,6 +1435,7 @@ uint64_t g_game_evt_next = 1;
 STDAPI XGameActivationRegisterForEvent(XTaskQueueHandle queue, void* context,
                                        XGameActivationCallback* callback,
                                        XTaskQueueRegistrationToken* token) noexcept {
+    XB_TRACE_ENTRY("XGameActivationRegisterForEvent", queue, context, callback, token);
     (void)queue;
     (void)context;
     (void)callback;
@@ -1389,6 +1450,7 @@ STDAPI XGameActivationRegisterForEvent(XTaskQueueHandle queue, void* context,
 
 STDAPI_(bool) XGameActivationUnregisterForEvent(XTaskQueueRegistrationToken token,
                                                 bool wait) noexcept {
+    XB_TRACE_ENTRY("XGameActivationUnregisterForEvent", token, wait, 0ULL, 0ULL);
     (void)wait;
     std::lock_guard<std::mutex> lock(g_game_evt_mu);
     for (auto it = g_game_evt_tokens.begin(); it != g_game_evt_tokens.end(); ++it) {
@@ -1445,6 +1507,7 @@ XGameUiNotificationPositionHint g_ui_notif_pos = XGameUiNotificationPositionHint
 
 STDAPI XGameUiSetUiCallbacks(const XGameUiUiCallbacks* callbacks,
                             bool useSystemUiIfAvailable) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetUiCallbacks", callbacks, useSystemUiIfAvailable, 0ULL, 0ULL);
     std::lock_guard<std::mutex> lock(g_ui_mu);
     if (!callbacks) {
         // 传 nullptr = 恢复"不接管"
@@ -1467,12 +1530,14 @@ STDAPI XGameUiSetUiCallbacks(const XGameUiUiCallbacks* callbacks,
 }
 
 STDAPI XGameUiSetNotificationPositionHint(XGameUiNotificationPositionHint position) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetNotificationPositionHint", position, 0ULL, 0ULL, 0ULL);
     g_ui_notif_pos = position;
     return S_OK;
 }
 
 STDAPI XGameUiShowErrorDialogAsync(XAsyncBlock* async, HRESULT errorCode,
                                    const char* context) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowErrorDialogAsync", async, errorCode, context, 0ULL);
     if (!async) return E_INVALIDARG;
     xbgtasix::logf("[xgamert] UI 错误框: hr=0x%08lx %s", static_cast<unsigned long>(errorCode),
                    context ? context : "");
@@ -1499,6 +1564,7 @@ STDAPI XGameUiShowErrorDialogAsync(XAsyncBlock* async, HRESULT errorCode,
 }
 
 STDAPI XGameUiShowErrorDialogResult(XAsyncBlock* async) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowErrorDialogResult", async, 0ULL, 0ULL, 0ULL);
     if (!async) return E_INVALIDARG;
     return is_async_done(async) ? async_status(async) : E_PENDING;
 }
@@ -1508,6 +1574,7 @@ STDAPI XGameUiShowMessageDialogAsync(XAsyncBlock* async, const char* titleText,
                                      const char* secondButtonText, const char* thirdButtonText,
                                      XGameUiMessageDialogButton defaultButton,
                                      XGameUiMessageDialogButton cancelButton) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowMessageDialogAsync", async, titleText, contentText, firstButtonText);
     if (!async) return E_INVALIDARG;
     xbgtasix::logf("[xgamert] UI 消息框: %s / %s [%s][%s] -> 默认按钮 %u",
                    titleText ? titleText : "", contentText ? contentText : "",
@@ -1571,6 +1638,7 @@ STDAPI XGameUiShowMessageDialogAsync(XAsyncBlock* async, const char* titleText,
 
 STDAPI XGameUiShowMessageDialogResult(XAsyncBlock* async,
                                       XGameUiMessageDialogButton* resultButton) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowMessageDialogResult", async, resultButton, 0ULL, 0ULL);
     if (!async || !resultButton) return E_INVALIDARG;
     if (!is_async_done(async)) return E_PENDING;
     std::lock_guard<std::mutex> lock(g_ui_mu);
@@ -1585,6 +1653,7 @@ STDAPI XGameUiShowTextEntryAsync(XAsyncBlock* async, const char* titleText,
                                  const char* descriptionText, const char* defaultText,
                                  XGameUiTextEntryInputScope inputScope,
                                  uint32_t maxTextLength) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowTextEntryAsync", async, titleText, descriptionText, defaultText);
     (void)titleText;
     (void)descriptionText;
     (void)inputScope;
@@ -1636,6 +1705,7 @@ STDAPI XGameUiShowTextEntryAsync(XAsyncBlock* async, const char* titleText,
 }
 
 STDAPI XGameUiShowTextEntryResultSize(XAsyncBlock* async, uint32_t* resultSize) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowTextEntryResultSize", async, resultSize, 0ULL, 0ULL);
     if (!async || !resultSize) return E_INVALIDARG;
     if (!is_async_done(async)) return E_PENDING;
     std::lock_guard<std::mutex> lock(g_ui_mu);
@@ -1647,6 +1717,7 @@ STDAPI XGameUiShowTextEntryResultSize(XAsyncBlock* async, uint32_t* resultSize) 
 
 STDAPI XGameUiShowTextEntryResult(XAsyncBlock* async, uint32_t resultSize, char* resultText,
                                   uint32_t* resultUsed) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowTextEntryResult", async, resultSize, resultText, resultUsed);
     if (!async || !resultText) return E_INVALIDARG;
     if (!is_async_done(async)) return E_PENDING;
     std::lock_guard<std::mutex> lock(g_ui_mu);
@@ -1674,6 +1745,7 @@ static HRESULT web_auth_impl(XAsyncBlock* async, const char* completionUri) {
 STDAPI XGameUiShowWebAuthenticationAsync(XAsyncBlock* async, XUserHandle requestingUser,
                                          const char* requestUri,
                                          const char* completionUri) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowWebAuthenticationAsync", async, requestingUser, requestUri, completionUri);
     (void)requestingUser;
     xbgtasix::logf("[xgamert] WebAuth 请求: %s", requestUri ? requestUri : "");
     return web_auth_impl(async, completionUri);
@@ -1683,6 +1755,7 @@ STDAPI XGameUiShowWebAuthenticationWithOptionsAsync(XAsyncBlock* async, XUserHan
                                                     const char* requestUri,
                                                     const char* completionUri,
                                                     XGameUiWebAuthenticationOptions options) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowWebAuthenticationWithOptionsAsync", async, requestingUser, requestUri, completionUri);
     (void)requestingUser;
     (void)options;
     xbgtasix::logf("[xgamert] WebAuth(带选项) 请求: %s", requestUri ? requestUri : "");
@@ -1690,6 +1763,7 @@ STDAPI XGameUiShowWebAuthenticationWithOptionsAsync(XAsyncBlock* async, XUserHan
 }
 
 STDAPI XGameUiShowWebAuthenticationResultSize(XAsyncBlock* async, size_t* bufferSize) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowWebAuthenticationResultSize", async, bufferSize, 0ULL, 0ULL);
     if (!async || !bufferSize) return E_INVALIDARG;
     if (!is_async_done(async)) return E_PENDING;
     std::lock_guard<std::mutex> lock(g_ui_mu);
@@ -1703,6 +1777,7 @@ STDAPI XGameUiShowWebAuthenticationResultSize(XAsyncBlock* async, size_t* buffer
 STDAPI XGameUiShowWebAuthenticationResult(XAsyncBlock* async, size_t bufferSize, void* buffer,
                                           XGameUiWebAuthenticationResultData** ptrToBuffer,
                                           size_t* bufferUsed) noexcept {
+    XB_TRACE_ENTRY("XGameUiShowWebAuthenticationResult", async, bufferSize, buffer, ptrToBuffer);
     if (!async || !buffer) return E_INVALIDARG;
     if (!is_async_done(async)) return E_PENDING;
     std::lock_guard<std::mutex> lock(g_ui_mu);
@@ -1738,6 +1813,7 @@ static HRESULT ui_response_ack(const char* name, XGameUiCallbackHandle handle) {
 
 STDAPI XGameUiSetMessageDialogUiResponse(XGameUiCallbackHandle callbackHandle,
                                          XGameUiMessageDialogButton response) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetMessageDialogUiResponse", callbackHandle, response, 0ULL, 0ULL);
     XAsyncBlock* pending = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_ui_mu);
@@ -1761,6 +1837,7 @@ STDAPI XGameUiSetMessageDialogUiResponse(XGameUiCallbackHandle callbackHandle,
 
 STDAPI XGameUiSetPlayerPickerUiResponse(XGameUiCallbackHandle callbackHandle, uint32_t playerCount,
                                         const uint64_t* players) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetPlayerPickerUiResponse", callbackHandle, playerCount, players, 0ULL);
     (void)playerCount;
     (void)players;
     return ui_response_ack("SetPlayerPickerUiResponse", callbackHandle);
@@ -1768,6 +1845,7 @@ STDAPI XGameUiSetPlayerPickerUiResponse(XGameUiCallbackHandle callbackHandle, ui
 
 STDAPI XGameUiSetTextEntryUiResponse(XGameUiCallbackHandle callbackHandle,
                                      const char* response) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetTextEntryUiResponse", callbackHandle, response, 0ULL, 0ULL);
     XAsyncBlock* pending = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_ui_mu);
@@ -1788,23 +1866,28 @@ STDAPI XGameUiSetTextEntryUiResponse(XGameUiCallbackHandle callbackHandle,
 }
 
 STDAPI XGameUiSetPlayerProfileCardUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetPlayerProfileCardUiResponse", callbackHandle, 0ULL, 0ULL, 0ULL);
     return ui_response_ack("SetPlayerProfileCardUiResponse", callbackHandle);
 }
 
 STDAPI XGameUiSetSendGameInviteUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetSendGameInviteUiResponse", callbackHandle, 0ULL, 0ULL, 0ULL);
     return ui_response_ack("SetSendGameInviteUiResponse", callbackHandle);
 }
 
 STDAPI XGameUiSetAchievementsUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetAchievementsUiResponse", callbackHandle, 0ULL, 0ULL, 0ULL);
     return ui_response_ack("SetAchievementsUiResponse", callbackHandle);
 }
 
 STDAPI XGameUiSetMultiplayerActivityGameInviteUiResponse(
     XGameUiCallbackHandle callbackHandle) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetMultiplayerActivityGameInviteUiResponse", callbackHandle, 0ULL, 0ULL, 0ULL);
     return ui_response_ack("SetMultiplayerActivityGameInviteUiResponse", callbackHandle);
 }
 
 STDAPI XGameUiSetErrorDialogUiResponse(XGameUiCallbackHandle callbackHandle) noexcept {
+    XB_TRACE_ENTRY("XGameUiSetErrorDialogUiResponse", callbackHandle, 0ULL, 0ULL, 0ULL);
     XAsyncBlock* pending = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_ui_mu);
@@ -1829,6 +1912,7 @@ STDAPI XGameUiSetErrorDialogUiResponse(XGameUiCallbackHandle callbackHandle) noe
 // 子代理 reviewer-genstubs 把这条列为阻塞项。
 
 STDAPI_(XSystemAnalyticsInfo) XSystemGetAnalyticsInfo() noexcept {
+    XB_TRACE_ENTRY("XSystemGetAnalyticsInfo", 0ULL, 0ULL, 0ULL, 0ULL);
     XSystemAnalyticsInfo info{};
     info.osVersion = XVersion{10, 0, 22631, 0};
     info.hostingOsVersion = XVersion{10, 0, 22631, 0};
@@ -1838,6 +1922,7 @@ STDAPI_(XSystemAnalyticsInfo) XSystemGetAnalyticsInfo() noexcept {
 }
 
 STDAPI_(XSystemRuntimeInfo) XSystemGetRuntimeInfo() noexcept {
+    XB_TRACE_ENTRY("XSystemGetRuntimeInfo", 0ULL, 0ULL, 0ULL, 0ULL);
     XSystemRuntimeInfo info{};
     info.runtimeVersion = XVersion{1, 0, 0, 0};
     info.availableVersion = XVersion{1, 0, 0, 0};
@@ -1847,6 +1932,7 @@ STDAPI_(XSystemRuntimeInfo) XSystemGetRuntimeInfo() noexcept {
 STDAPI_(XDisplayHdrModeResult) XDisplayTryEnableHdrMode(
     XDisplayHdrModePreference displayModePreference,
     XDisplayHdrModeInfo* displayHdrModeInfo) noexcept {
+    XB_TRACE_ENTRY("XDisplayTryEnableHdrMode", displayModePreference, displayHdrModeInfo, 0ULL, 0ULL);
     (void)displayModePreference;
     if (displayHdrModeInfo) *displayHdrModeInfo = XDisplayHdrModeInfo{};
     return XDisplayHdrModeResult::Disabled;   // PC 上不接管 HDR
@@ -1854,6 +1940,7 @@ STDAPI_(XDisplayHdrModeResult) XDisplayTryEnableHdrMode(
 
 STDAPI_(XGameStreamingConnectionState) XGameStreamingGetConnectionState(
     XGameStreamingClientId client) noexcept {
+    XB_TRACE_ENTRY("XGameStreamingGetConnectionState", client, 0ULL, 0ULL, 0ULL);
     (void)client;
     return XGameStreamingConnectionState::Disconnected;   // 没有串流客户端
 }
@@ -1861,12 +1948,14 @@ STDAPI_(XGameStreamingConnectionState) XGameStreamingGetConnectionState(
 // ---- 系统信息 ----
 
 STDAPI_(XSystemDeviceType) XSystemGetDeviceType() noexcept {
+    XB_TRACE_ENTRY("XSystemGetDeviceType", 0ULL, 0ULL, 0ULL, 0ULL);
     xbgtasix::logf("[xgamert] XSystemGetDeviceType() -> Pc");
     return XSystemDeviceType::Pc;
 }
 
 // 现在返回从 MicrosoftGame.Config 解析出的真值（而不是桩）
 STDAPI XGameGetXboxTitleId(uint32_t* titleId) noexcept {
+    XB_TRACE_ENTRY("XGameGetXboxTitleId", titleId, 0ULL, 0ULL, 0ULL);
     if (!titleId) return E_INVALIDARG;
     if (!g_rt.config_loaded) {
         *titleId = 0;

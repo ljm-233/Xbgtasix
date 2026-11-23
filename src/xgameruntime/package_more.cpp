@@ -34,6 +34,7 @@
 #include "XTaskQueue.h"
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 
 // 精简头文件没带这个宏；GDK 的语义就是 ERROR_NOT_FOUND（与 xgameruntime.cpp 的
 // E_NOTFOUND / package_extra.cpp:34-36 同值，0x80070490）。
@@ -181,6 +182,7 @@ STDAPI XPackageGetPackageKind(
     XPackageKind* kind
     ) noexcept
 {
+    XB_TRACE_ENTRY("XPackageGetPackageKind", packageIdentifier, kind, 0ULL, 0ULL);
     if (!kind) return E_INVALIDARG;
     // 先写一个合法值：失败路径上调用方也可能读 *kind，不能留栈垃圾
     *kind = XPackageKind::Game;
@@ -227,6 +229,7 @@ STDAPI XPackageEnumerateFeatures(
     XPackageFeatureEnumerationCallback* callback
     ) noexcept
 {
+    XB_TRACE_ENTRY("XPackageEnumerateFeatures", packageIdentifier, context, callback, 0ULL);
     if (!callback) return E_INVALIDARG;
 
     std::string dir;
@@ -349,6 +352,7 @@ STDAPI XPackageRegisterPackageInstalled(
     XTaskQueueRegistrationToken* token
     ) noexcept
 {
+    XB_TRACE_ENTRY("XPackageRegisterPackageInstalled", queue, context, callback, token);
     if (!token) return E_INVALIDARG;
     // token 是 _Out_：必须在任何失败返回之前就写掉，否则调用方（或调用方上层的
     // cleanup 路径）拿着栈垃圾/旧值去 XPackageUnregisterPackageInstalled。
@@ -380,6 +384,7 @@ STDAPI_(bool) XPackageUnregisterPackageInstalled(
     bool wait
     ) noexcept
 {
+    XB_TRACE_ENTRY("XPackageUnregisterPackageInstalled", token, wait, 0ULL, 0ULL);
     (void)wait; // 本层回调从不入队，没有"在途回调"需要等
     {
         std::lock_guard<std::mutex> lock(g_reg_mu);
@@ -416,6 +421,7 @@ STDAPI XPackageInstallChunks(
     XPackageInstallationMonitorHandle* installationMonitor
     ) noexcept
 {
+    XB_TRACE_ENTRY("XPackageInstallChunks", packageIdentifier, selectorCount, selectors, minimumUpdateIntervalMs);
     if (!installationMonitor) return E_INVALIDARG;
     *installationMonitor = nullptr; // 失败绝不留野句柄
     (void)selectors;
@@ -438,6 +444,7 @@ STDAPI_(bool) XPackageUninstallPackage(
     const char* packageIdentifier
     ) noexcept
 {
+    XB_TRACE_ENTRY("XPackageUninstallPackage", packageIdentifier, 0ULL, 0ULL, 0ULL);
     std::string dir;
     const HRESULT hr = resolve_package_dir(packageIdentifier, &dir);
     xbgtasix::logf("[xgamert] UninstallPackage(%s)：%s，不删除包目录 -> false",
@@ -454,6 +461,7 @@ STDAPI XPackageUninstallUWPInstance(
     const char* packageName
     ) noexcept
 {
+    XB_TRACE_ENTRY("XPackageUninstallUWPInstance", packageName, 0ULL, 0ULL, 0ULL);
     if (!packageName || !packageName[0]) return E_INVALIDARG;
     xbgtasix::logf("[xgamert] UninstallUWPInstance(%s)：本进程无 UWP 实例 -> E_NOTFOUND",
                    packageName);

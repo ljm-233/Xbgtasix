@@ -16,6 +16,7 @@
 #include "XUser.h"
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 
 namespace {
 
@@ -36,6 +37,7 @@ extern "C" {
 
 // 由设备 ID 找用户。PC 上只有本地用户：设备 ID 有效就返回它。
 STDAPI XUserFindForDevice(const APP_LOCAL_DEVICE_ID* deviceId, XUserHandle* handle) noexcept {
+    XB_TRACE_ENTRY("XUserFindForDevice", deviceId, handle, 0ULL, 0ULL);
     if (!handle) return E_INVALIDARG;
     *handle = nullptr;
     // 全零 ID 是 XUserNullDeviceId，按"没有这台设备"处理
@@ -55,6 +57,7 @@ static uint64_t g_assoc_token_next = 1;
 STDAPI XUserRegisterForDeviceAssociationChanged(XTaskQueueHandle queue, void* context,
                                                 XUserDeviceAssociationChangedCallback* callback,
                                                 XTaskQueueRegistrationToken* token) noexcept {
+    XB_TRACE_ENTRY("XUserRegisterForDeviceAssociationChanged", queue, context, callback, token);
     (void)queue;
     (void)context;
     (void)callback;
@@ -68,6 +71,7 @@ STDAPI XUserRegisterForDeviceAssociationChanged(XTaskQueueHandle queue, void* co
 
 STDAPI_(bool) XUserUnregisterForDeviceAssociationChanged(XTaskQueueRegistrationToken token,
                                                          bool wait) noexcept {
+    XB_TRACE_ENTRY("XUserUnregisterForDeviceAssociationChanged", token, wait, 0ULL, 0ULL);
     (void)token;
     (void)wait;
     return true;   // 与仓内其他 Unregister 一致：注销未知 token 也返回 true

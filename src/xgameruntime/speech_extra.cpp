@@ -21,6 +21,7 @@
 #include "XSpeechSynthesizer.h"
 
 #include "xbgtasix/trace.h"
+#include "trace_entry.h"   // 统一入口追踪（XB_TRACE_ENTRY）
 
 namespace {
 
@@ -125,6 +126,7 @@ ISpObjectToken* find_voice(const char* voiceId) {
 extern "C" {
 
 STDAPI XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* speechSynthesizer) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerCreate", speechSynthesizer, 0ULL, 0ULL, 0ULL);
     if (!speechSynthesizer) return E_INVALIDARG;
     *speechSynthesizer = nullptr;
     if (!ensure_com()) return E_FAIL;
@@ -148,6 +150,7 @@ STDAPI XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* speechSynthesizer) noe
 }
 
 STDAPI XSpeechSynthesizerCloseHandle(XSpeechSynthesizerHandle speechSynthesizer) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerCloseHandle", speechSynthesizer, 0ULL, 0ULL, 0ULL);
     if (!speechSynthesizer) return S_OK;   // _In_opt_
     auto* s = reinterpret_cast<Synth*>(speechSynthesizer);
     if (s->voice) s->voice->Release();
@@ -156,6 +159,7 @@ STDAPI XSpeechSynthesizerCloseHandle(XSpeechSynthesizerHandle speechSynthesizer)
 }
 
 STDAPI XSpeechSynthesizerCloseStreamHandle(XSpeechSynthesizerStreamHandle stream) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerCloseStreamHandle", stream, 0ULL, 0ULL, 0ULL);
     if (!stream) return S_OK;
     delete reinterpret_cast<Stream*>(stream);
     return S_OK;
@@ -163,6 +167,7 @@ STDAPI XSpeechSynthesizerCloseStreamHandle(XSpeechSynthesizerStreamHandle stream
 
 STDAPI XSpeechSynthesizerEnumerateInstalledVoices(
     void* context, XSpeechSynthesizerInstalledVoicesCallback* callback) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerEnumerateInstalledVoices", context, callback, 0ULL, 0ULL);
     if (!callback) return E_INVALIDARG;
     if (!ensure_com()) return E_FAIL;
 
@@ -234,6 +239,7 @@ STDAPI XSpeechSynthesizerEnumerateInstalledVoices(
 }
 
 STDAPI XSpeechSynthesizerSetDefaultVoice(XSpeechSynthesizerHandle speechSynthesizer) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerSetDefaultVoice", speechSynthesizer, 0ULL, 0ULL, 0ULL);
     if (!speechSynthesizer) return E_INVALIDARG;
     auto* s = reinterpret_cast<Synth*>(speechSynthesizer);
     if (!s->voice) return E_FAIL;
@@ -263,6 +269,7 @@ STDAPI XSpeechSynthesizerSetDefaultVoice(XSpeechSynthesizerHandle speechSynthesi
 
 STDAPI XSpeechSynthesizerSetCustomVoice(XSpeechSynthesizerHandle speechSynthesizer,
                                         const char* voiceId) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerSetCustomVoice", speechSynthesizer, voiceId, 0ULL, 0ULL);
     if (!speechSynthesizer || !voiceId) return E_INVALIDARG;
     auto* s = reinterpret_cast<Synth*>(speechSynthesizer);
     if (!s->voice) return E_FAIL;
@@ -281,6 +288,7 @@ STDAPI XSpeechSynthesizerSetCustomVoice(XSpeechSynthesizerHandle speechSynthesiz
 STDAPI XSpeechSynthesizerCreateStreamFromText(XSpeechSynthesizerHandle speechSynthesizer,
                                               const char* text,
                                               XSpeechSynthesizerStreamHandle* out) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerCreateStreamFromText", speechSynthesizer, text, out, 0ULL);
     if (!speechSynthesizer || !text || !out) return E_INVALIDARG;
     *out = nullptr;
     auto* stream = new (std::nothrow) Stream();
@@ -298,6 +306,7 @@ STDAPI XSpeechSynthesizerCreateStreamFromText(XSpeechSynthesizerHandle speechSyn
 STDAPI XSpeechSynthesizerCreateStreamFromSsml(XSpeechSynthesizerHandle speechSynthesizer,
                                               const char* ssml,
                                               XSpeechSynthesizerStreamHandle* out) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerCreateStreamFromSsml", speechSynthesizer, ssml, out, 0ULL);
     if (!speechSynthesizer || !ssml || !out) return E_INVALIDARG;
     *out = nullptr;
     auto* stream = new (std::nothrow) Stream();
@@ -313,6 +322,7 @@ STDAPI XSpeechSynthesizerCreateStreamFromSsml(XSpeechSynthesizerHandle speechSyn
 
 STDAPI XSpeechSynthesizerGetStreamDataSize(XSpeechSynthesizerStreamHandle stream,
                                            size_t* bufferSize) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerGetStreamDataSize", stream, bufferSize, 0ULL, 0ULL);
     if (!stream || !bufferSize) return E_INVALIDARG;
     *bufferSize = reinterpret_cast<Stream*>(stream)->data.size();
     if (bufferSize[0] == 0) {
@@ -324,6 +334,7 @@ STDAPI XSpeechSynthesizerGetStreamDataSize(XSpeechSynthesizerStreamHandle stream
 
 STDAPI XSpeechSynthesizerGetStreamData(XSpeechSynthesizerStreamHandle stream, size_t bufferSize,
                                        void* buffer, size_t* bufferUsed) noexcept {
+    XB_TRACE_ENTRY("XSpeechSynthesizerGetStreamData", stream, bufferSize, buffer, bufferUsed);
     if (!stream || !buffer) return E_INVALIDARG;
     const auto& data = reinterpret_cast<Stream*>(stream)->data;
     if (data.empty()) {
@@ -345,6 +356,7 @@ STDAPI XSpeechSynthesizerGetStreamData(XSpeechSynthesizerStreamHandle stream, si
 
 STDAPI XSpeechToTextSendString(const char* speakerName, const char* content,
                                XSpeechToTextType type) noexcept {
+    XB_TRACE_ENTRY("XSpeechToTextSendString", speakerName, content, type, 0ULL);
     xbgtasix::logf("[xspeech] 字幕文本（%s, type=%u）: %s", speakerName ? speakerName : "",
                    static_cast<unsigned>(type), content ? content : "");
     return S_OK;
@@ -352,6 +364,7 @@ STDAPI XSpeechToTextSendString(const char* speakerName, const char* content,
 
 STDAPI XSpeechToTextBeginHypothesisString(const char* speakerName, const char* content,
                                           XSpeechToTextType type, uint32_t* hypothesisId) noexcept {
+    XB_TRACE_ENTRY("XSpeechToTextBeginHypothesisString", speakerName, content, type, hypothesisId);
     (void)speakerName;
     (void)content;
     (void)type;
@@ -362,23 +375,27 @@ STDAPI XSpeechToTextBeginHypothesisString(const char* speakerName, const char* c
 }
 
 STDAPI XSpeechToTextUpdateHypothesisString(uint32_t hypothesisId, const char* content) noexcept {
+    XB_TRACE_ENTRY("XSpeechToTextUpdateHypothesisString", hypothesisId, content, 0ULL, 0ULL);
     (void)hypothesisId;
     (void)content;
     return S_OK;
 }
 
 STDAPI XSpeechToTextFinalizeHypothesisString(uint32_t hypothesisId, const char* content) noexcept {
+    XB_TRACE_ENTRY("XSpeechToTextFinalizeHypothesisString", hypothesisId, content, 0ULL, 0ULL);
     (void)hypothesisId;
     (void)content;
     return S_OK;
 }
 
 STDAPI XSpeechToTextCancelHypothesisString(uint32_t hypothesisId) noexcept {
+    XB_TRACE_ENTRY("XSpeechToTextCancelHypothesisString", hypothesisId, 0ULL, 0ULL, 0ULL);
     (void)hypothesisId;
     return S_OK;
 }
 
 STDAPI XSpeechToTextSetPositionHint(XSpeechToTextPositionHint position) noexcept {
+    XB_TRACE_ENTRY("XSpeechToTextSetPositionHint", position, 0ULL, 0ULL, 0ULL);
     (void)position;
     return S_OK;
 }
