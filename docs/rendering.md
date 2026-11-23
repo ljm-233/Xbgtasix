@@ -67,8 +67,12 @@ RTX 5060 上的 1,245,184 项 shader-visible CBV/SRV/UAV 堆申请失败。Intel
 
 ### 3.3 着色器与纹理平铺
 
-- `shaders.rpf` 411 MB，里面是主机预编译着色器。PC 的 D3D12 是否照收需要实测；
-  主机 DXIL 若带 RDNA2 专属指令，需要重新编译（参考实现专门有 `dxbc2dxil_xs` 这个 crate）。
+- `shaders.rpf` 411 MB，里面是主机预编译着色器。**已实测（2026-11-24）**：每个着色器都是
+  raw deflate 单独存储的 DXBC 容器；`DXIL` part 只是 `DxilProgramHeader` 桩（带 `NOBC`，
+  不发 LLVM bitcode），真代码在 `XBCH → zlib → FSSM`（原生 RDNA2）。
+  **所以桌面 D3D12 拿不到任何它能吃的字节码，转发这条路在 `CreatePipelineState` 处不可行**，
+  只能重新编译（参考实现的 `dxbc2dxil_xs` 就是这个用途）。
+  实测数据与可复现命令见 [leonida-crossref](leonida-crossref.md) 第二节。
 - `xg_xs.dll` 负责纹理 swizzle（主机平铺模式）。我们已经导出
   `XGSuggestSwizzleMode`（返回 0 = 线性）与 `XGCreateTextureComputer`（返回 E_NOTIMPL）。
   `XGCreateTextureComputer` 的返回值是主机 XG 资源布局二进制 blob，布局未公开，

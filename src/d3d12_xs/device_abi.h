@@ -241,13 +241,21 @@ inline HRESULT WINAPI frame_statistics_x(DeviceProxy*, UINT64 token, UINT type,
     return S_OK;
 }
 
-inline HRESULT WINAPI device_extension_stub(DeviceProxy*, UINT64 a, UINT64 b, UINT64 c,
-                                             UINT64 d) {
-    xbgtasix::logf("[d3d12_xs] unmodeled Xbox device extension called a=0x%llx b=0x%llx "
-                   "c=0x%llx d=0x%llx -> S_OK", static_cast<unsigned long long>(a),
-                   static_cast<unsigned long long>(b), static_cast<unsigned long long>(c),
-                   static_cast<unsigned long long>(d));
-    return S_OK;
+// 主机扩展桩：**必须带槽号**。以前只打参数、不打槽号，排查时根本没法定位是哪个方法
+// （实测日志里出现 a=0x18ede4d0000（看着像描述符 arena 地址）b=... c=0xffffffff，
+// 却不知道它属于哪个槽）。签名统一按 4 个 u64 收参数 —— 对"不知道签名"的桩这是唯一
+// 安全的做法；但**不能**用它替代已知签名的方法（返回值类型不同，见每个已建模槽位）。
+template <std::size_t N>
+HRESULT WINAPI device_extension_stub_n(DeviceProxy*, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
+                                       UINT64 d = 0) {
+    static std::atomic<int> budget{40};
+    if (budget.fetch_sub(1) > 0) {
+        xbgtasix::logf("[d3d12_xs] 未建模的主机扩展 slot=%zu a=0x%llx b=0x%llx c=0x%llx d=0x%llx"
+                       " -> E_NOTIMPL",
+                       N, static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
+                       static_cast<unsigned long long>(c), static_cast<unsigned long long>(d));
+    }
+    return E_NOTIMPL;
 }
 
 // The Xbox command-list interface keeps the ordinary D3D12 list methods at
@@ -726,6 +734,26 @@ inline void WINAPI copy_descriptors_simple(DeviceProxy* self,
         static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(dst_range));
 }
 
+// 主机槽位 19 = CreateUnorderedAccessView（五参：(this, pResource, pCounter, pDesc, Dest)）。
+// 证据来自崩溃点 game+0x1647616 前的调用序列：
+//     mov (%rcx),%rax ; mov %r8,0x20(%rsp) ; xor %r8d,%r8d ; call *0x98(%rax)
+// 即 pCounter 被显式清零、目标句柄走第 5 个参数位（栈上）。
+inline HRESULT WINAPI create_uav_x(DeviceProxy* self, ID3D12Resource* resource,
+                                   ID3D12Resource* counter,
+                                   const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc,
+                                   D3D12_CPU_DESCRIPTOR_HANDLE dest) {
+    const auto mapped = translate_cpu(dest);
+    static std::atomic<int> budget{20};
+    if (budget.fetch_sub(1) > 0) {
+        xbgtasix::logf("[d3d12_xs] 槽19 CreateUnorderedAccessView res=%p counter=%p desc=%p "
+                       "dest=%p -> %p", static_cast<void*>(resource), static_cast<void*>(counter),
+                       static_cast<const void*>(desc), reinterpret_cast<void*>(dest.ptr),
+                       reinterpret_cast<void*>(mapped.ptr));
+    }
+    static_cast<ID3D12Device*>(self->pc)->CreateUnorderedAccessView(resource, counter, desc, mapped);
+    return S_OK;
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
@@ -734,6 +762,7 @@ Slot device_slot() {
     if constexpr (N == kXboxCreateCommandQueueSlot)
         return reinterpret_cast<Slot>(&create_command_queue_x);
     if constexpr (N == 14) return reinterpret_cast<Slot>(&create_descriptor_heap_x);
+    if constexpr (N == 19) return reinterpret_cast<Slot>(&create_uav_x);
     if constexpr (N == kCustomHeapPropertiesSlot)
         return reinterpret_cast<Slot>(&custom_heap_properties);
     if constexpr (N == kQueueOrOpenHeapSlot)
@@ -747,7 +776,7 @@ Slot device_slot() {
     // 主机扩展槽（>= 44）在 PC 设备上**不存在**，按同号转发会把参数喂给别的方法
     // （实测 slot 70 直接崩在 D3D12Core）。未实现的一律走"明确失败 + 记一次"，
     // 让游戏走它自己的降级/报错路径，而不是在驱动内部炸掉。
-    if constexpr (N >= 44) return reinterpret_cast<Slot>(&device_extension_stub);
+    if constexpr (N >= 44) return reinterpret_cast<Slot>(&device_extension_stub_n<N>);
     if (slot_probe_on()) return reinterpret_cast<Slot>(&slot_probe_forward<N>);  // 仅诊断用
     return reinterpret_cast<Slot>(&forward_slot<N>);
 }
