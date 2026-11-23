@@ -201,6 +201,33 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
         rva = reinterpret_cast<unsigned long long>(addr) - reinterpret_cast<unsigned long long>(mod);
     }
     logf("[xbgtasix] FATAL 异常 0x%08lX at %s+0x%llX", code, name, rva);
+    // 同时 dump 调用栈（模块+RVA）：断言点本身信息很少，栈才能说明"谁把它逼到这里"。
+    // 尤其是崩在游戏内部时，栈上能看出最后一个返回去的是我们的哪个 DLL。
+    {
+        void* frames[24] = {0};
+        const USHORT n = RtlCaptureStackBackTrace(1, 24, frames, nullptr);
+        for (USHORT i = 0; i < n; ++i) {
+            void* fa = frames[i];
+            HMODULE fm = nullptr;
+            char fname[256] = "<unknown>";
+            unsigned long long frva = reinterpret_cast<unsigned long long>(fa);
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCWSTR>(fa), &fm) &&
+                fm) {
+                char full[MAX_PATH] = {0};
+                GetModuleFileNameA(fm, full, MAX_PATH - 1);
+                const char* b = full;
+                for (const char* q = full; *q; ++q) {
+                    if (*q == '\\' || *q == '/') b = q + 1;
+                }
+                strncpy(fname, b, sizeof(fname) - 1);
+                frva = reinterpret_cast<unsigned long long>(fa) -
+                       reinterpret_cast<unsigned long long>(fm);
+            }
+            logf("[xbgtasix]   #%-2u %s+0x%llX", i, fname, frva);
+        }
+    }
     if (code == EXCEPTION_BREAKPOINT) {
         logf("[xbgtasix] 这是断点指令：通常是游戏自己的断言失败");
     } else if (code == EXCEPTION_ACCESS_VIOLATION && info->ExceptionRecord->NumberParameters >= 2) {

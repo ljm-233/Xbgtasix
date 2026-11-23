@@ -40,6 +40,29 @@
 namespace {
 
 // 同一个 API 只详细记一次，避免每帧刷屏（与桩机制一致的手工版本）
+// 全量调用追踪：XBGTASIX_TRACE=1 时把每次进入的 API 与参数记下来。
+// 游戏崩在"某个 bool 检查返回 false"时，只有完整序列能看出是哪一步。
+bool trace_on() {
+    static int on = -1;
+    if (on < 0) {
+        char b[8] = {0};
+        on = (GetEnvironmentVariableA("XBGTASIX_TRACE", b, sizeof(b)) > 0 && b[0] == '1') ? 1 : 0;
+    }
+    return on == 1;
+}
+
+#define TRACE_CALL(name, a1, a2, a3)                                    \
+    do {                                                                \
+        if (trace_on()) {                                               \
+            static int n_ = 0;                                          \
+            if (++n_ <= 400)                                           \
+                xbgtasix::logf("[trace] %s(%p, %p, %p)", name,           \
+                               reinterpret_cast<void*>(a1),              \
+                               reinterpret_cast<void*>(a2),              \
+                               reinterpret_cast<void*>(a3));             \
+        }                                                               \
+    } while (0)
+
 bool first_time(const char* api) {
     static CRITICAL_SECTION cs = {};
     static bool inited = false;
@@ -69,65 +92,65 @@ extern "C" {
 
 // ============================ AcpHal.dll ============================
 // APU = 主机的音频/计算加速单元。PC 上不存在，分配一律失败。
-uintptr_t AcpHalCreate(void*, void*, void*) {
+uintptr_t AcpHalCreate(void*, void*, void*) { TRACE_CALL("AcpHalCreate", 0, 0, 0);
     first_time("AcpHalCreate");
     return 0;   // 创建失败
 }
-uintptr_t AcpHalAllocateShapeContexts(void*, void*) {
+uintptr_t AcpHalAllocateShapeContexts(void*, void*) { TRACE_CALL("AcpHalAllocateShapeContexts", 0, 0, 0);
     first_time("AcpHalAllocateShapeContexts");
     return 0;
 }
-uintptr_t AcpHalReleaseShapeContexts(void*, void*) {
+uintptr_t AcpHalReleaseShapeContexts(void*, void*) { TRACE_CALL("AcpHalReleaseShapeContexts", 0, 0, 0);
     return 0;   // S_OK：释放路径保持幂等
 }
-uintptr_t ApuAlloc(void*, void*, void*, void*) {
+uintptr_t ApuAlloc(void*, void*, void*, void*) { TRACE_CALL("ApuAlloc", 0, 0, 0);
     first_time("ApuAlloc");
     return 0;   // 分配不到 APU 内存
 }
-uintptr_t ApuCreateHeap(void*, void*, void*) {
+uintptr_t ApuCreateHeap(void*, void*, void*) { TRACE_CALL("ApuCreateHeap", 0, 0, 0);
     first_time("ApuCreateHeap");
     return 0;
 }
-uintptr_t ApuFree(void*, void*) { return 0; }
-uintptr_t ApuIsVirtualAddressValid(void*, void*) {
+uintptr_t ApuFree(void*, void*) { TRACE_CALL("ApuFree", 0, 0, 0); return 0; }
+uintptr_t ApuIsVirtualAddressValid(void*, void*) { TRACE_CALL("ApuIsVirtualAddressValid", 0, 0, 0);
     return 0;   // false：没有任何 APU 虚拟地址是有效的
 }
-uintptr_t ApuMapApuAddress(void*, void*, void*) {
+uintptr_t ApuMapApuAddress(void*, void*, void*) { TRACE_CALL("ApuMapApuAddress", 0, 0, 0);
     first_time("ApuMapApuAddress");
     return 0;
 }
-uintptr_t ApuMapVirtualAddress(void*, void*, void*) {
+uintptr_t ApuMapVirtualAddress(void*, void*, void*) { TRACE_CALL("ApuMapVirtualAddress", 0, 0, 0);
     first_time("ApuMapVirtualAddress");
     return 0;
 }
 
 // ============================ xapu.dll ============================
-uintptr_t XApuConnect(void*, void*, void*) {
+uintptr_t XApuConnect(void*, void*, void*) { TRACE_CALL("XApuConnect", 0, 0, 0);
     first_time("XApuConnect");
     return 0x80004001u;   // E_NOTIMPL：连不上 APU
 }
-uintptr_t XApuDisconnect(void*, void*) { return 0; }
-uintptr_t XApuEnqueueCommand(void*, void*, void*) {
+uintptr_t XApuDisconnect(void*, void*) { TRACE_CALL("XApuDisconnect", 0, 0, 0); return 0; }
+uintptr_t XApuEnqueueCommand(void*, void*, void*) { TRACE_CALL("XApuEnqueueCommand", 0, 0, 0);
     first_time("XApuEnqueueCommand");
     return 0x80004001u;
 }
-uintptr_t XApuDequeueResult(void*, void*, void*) {
+uintptr_t XApuDequeueResult(void*, void*, void*) { TRACE_CALL("XApuDequeueResult", 0, 0, 0);
     return 0x80004001u;
 }
-uintptr_t XApuGetResultCount(void*, void*) { return 0; }
+uintptr_t XApuGetResultCount(void*, void*) { TRACE_CALL("XApuGetResultCount", 0, 0, 0); return 0; }
 
 // ============================ chad.dll ============================
-uintptr_t XDspActivate(void*, void*, void*) {
+uintptr_t XDspActivate(void*, void*, void*) { TRACE_CALL("XDspActivate", 0, 0, 0);
     first_time("XDspActivate");
     return 0x80004001u;
 }
-uintptr_t XDspDeactivate(void*, void*) { return 0; }
-uintptr_t XDspConnectWithMaximumStreamLimit(void*, void*, void*, void*) {
+uintptr_t XDspDeactivate(void*, void*) { TRACE_CALL("XDspDeactivate", 0, 0, 0); return 0; }
+uintptr_t XDspConnectWithMaximumStreamLimit(void*, void*, void*, void*) { TRACE_CALL("XDspConnectWithMaximumStreamLimit", 0, 0, 0);
     first_time("XDspConnectWithMaximumStreamLimit");
     return 0x80004001u;
 }
-uintptr_t XDspDisconnect(void*, void*) { return 0; }
-uintptr_t XDspSubmitCommand(void*, void*, void*) {
+uintptr_t XDspDisconnect(void*, void*) { TRACE_CALL("XDspDisconnect", 0, 0, 0); return 0; }
+uintptr_t XDspSubmitCommand(void*, void*, void*) { TRACE_CALL("XDspSubmitCommand", 0, 0, 0);
     first_time("XDspSubmitCommand");
     return 0x80004001u;
 }
@@ -135,11 +158,11 @@ uintptr_t XDspSubmitCommand(void*, void*, void*) {
 // ============================ xg_xs.dll ============================
 // 纹理 swizzle：主机 GPU 用固定 swizzle 模式；PC 的 D3D12 自己决定平铺方式。
 // 建议返回 0（线性/无 swizzle），让游戏按"未指定"处理。
-uintptr_t XGSuggestSwizzleMode(void*, void*, void*, void*) {
+uintptr_t XGSuggestSwizzleMode(void*, void*, void*, void*) { TRACE_CALL("XGSuggestSwizzleMode", 0, 0, 0);
     first_time("XGSuggestSwizzleMode");
     return 0;
 }
-uintptr_t XGCreateTextureComputer(void*, void*, void*) {
+uintptr_t XGCreateTextureComputer(void*, void*, void*) { TRACE_CALL("XGCreateTextureComputer", 0, 0, 0);
     first_time("XGCreateTextureComputer");
     return 0x80004001u;   // 没有主机纹理计算机
 }
@@ -188,7 +211,14 @@ uintptr_t __stdcall wrap_thunk(Wrap* w, uintptr_t a1 = 0, uintptr_t a2 = 0, uint
     // DStorageCore.dll（两版槽位顺序不同）。在弄清每个槽位的真实含义之前，
     // 先只记账并返回"成功"，看游戏是否把它当可选操作。
     (void)w; (void)a1; (void)a2; (void)a3; (void)a4;
-    return 0;   // S_OK
+    // 对照实验用：XBGTASIX_FACTORY_FAIL=1 时所有槽位返回 E_NOTIMPL，
+    // 用来判断"游戏是否在意这个槽位的返回值"（崩溃点会不会变）。
+    static int fail_mode = -1;
+    if (fail_mode < 0) {
+        char b[8] = {0};
+        fail_mode = (GetEnvironmentVariableA("XBGTASIX_FACTORY_FAIL", b, sizeof(b)) > 0 && b[0] == '1') ? 1 : 0;
+    }
+    return fail_mode ? 0x80004001u : 0;
 }
 
 // QueryInterface 特化：不管要什么 IID 都把自己交出去，让游戏继续走
