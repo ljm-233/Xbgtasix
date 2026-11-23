@@ -250,9 +250,20 @@ HRESULT WINAPI device_extension_stub_n(DeviceProxy*, UINT64 a = 0, UINT64 b = 0,
                                        UINT64 d = 0) {
     static std::atomic<int> budget{40};
     if (budget.fetch_sub(1) > 0) {
-        xbgtasix::logf("[d3d12_xs] 未建模的主机扩展 slot=%zu a=0x%llx b=0x%llx c=0x%llx d=0x%llx"
-                       " -> E_NOTIMPL",
-                       N, static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
+        // 记调用方返回地址（模块内 RVA）：同一槽位在二进制里有多处调用点，
+        // 只有知道是谁调的，才能反汇编出真实签名与语义。
+        const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+        HMODULE mod = nullptr;
+        unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
+            rva = reinterpret_cast<unsigned long long>(caller) -
+                  reinterpret_cast<unsigned long long>(mod);
+        }
+        xbgtasix::logf("[d3d12_xs] 未建模的主机扩展 slot=%zu 调用方=+0x%llX "
+                       "a=0x%llx b=0x%llx c=0x%llx d=0x%llx -> E_NOTIMPL",
+                       N, rva, static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
                        static_cast<unsigned long long>(c), static_cast<unsigned long long>(d));
     }
     return E_NOTIMPL;
@@ -811,8 +822,11 @@ inline HRESULT WINAPI create_resource_from_address_x(DeviceProxy* self, void* ba
             heap->Release();
             xbgtasix::logf("[d3d12_xs] 槽133 -> placed resource hr=0x%08lx out=%p（与标题内存共享）",
                            static_cast<unsigned long>(hr), out ? *out : nullptr);
-            dev3->Release();
-            if (SUCCEEDED(hr)) return hr;
+            // 注意：dev3 只在函数末尾释放一次。这里若再 Release 会二次释放（GPT 指出的 bug）。
+            if (SUCCEEDED(hr)) {
+                dev3->Release();
+                return hr;
+            }
         } else {
             xbgtasix::logf("[d3d12_xs] 槽133 OpenExistingHeapFromAddress 失败 hr=0x%08lx"
                            "（该地址不是已提交的私有分配？）",
