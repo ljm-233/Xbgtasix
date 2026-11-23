@@ -128,6 +128,7 @@ python tools/analyze_exe.py <exe>          # 静态核对导入面（10 秒，�
 | [feasibility](docs/feasibility.md) | **可行性判定 + 性能实测**：已证 / 无法判定 / 不可行 三层 |
 | [graphics-pitfalls](docs/graphics-pitfalls.md) | **9 个"不报错只黑屏"的坑** |
 | [env-gotchas](docs/env-gotchas.md) | 7 个环境/工具链的坑（沙箱按进程放行、git TLS、mingw 头文件不一致…） |
+| [arch-linux](docs/arch-linux.md) | **Arch Linux**：交叉编译已通，运行时靠 Wine/Proton；mesh 与光追是未知数 |
 | [input](docs/input.md) | **手柄**：XInput / GameInput 都是原生，只有"设备↔用户关联"需要兼容层 |
 | [audit-2026-11](docs/audit-2026-11.md) | 五路子代理的全项目审查记录（含未修项与优先级） |
 | [xmem-evidence](docs/xmem-evidence.md) | XMem 语义，每条标 `[事实]/[推断]/[自定]` |
@@ -202,6 +203,7 @@ Xbgtasix/
 |---|---|---|
 | `python-tools` | 合成样本自检 5 个 Python 工具 | 无依赖 |
 | `docs-links` | 检查 md 相对链接 | 无依赖 |
+| `linux-cross` | `ubuntu-latest` 上交叉编译三个 shim，校验导出数 461/4/18 |
 | `windows-build` | **从 NuGet 拉官方 GDK**（`tools/fetch_gdk.py`）→ `tools/ci_build.sh` 跑**完整构建 + 全套 35 项**；拉不到时退化成"无 GDK 子集"，并在 summary 写明未覆盖部分 | GDK 走微软自己的 nuget.org 源，仓库不转发微软二进制 |
 
 ---
