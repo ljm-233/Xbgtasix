@@ -96,6 +96,29 @@ run_one() {
   echo -e "$id\t$1\t$verdict\t$rc\t${ms}ms\t${key}" >> "$report"
 }
 
+# 已知失败的 WIP 测试：**照样运行并如实打印真实结果**，只是不计入 main 的绿/红门槛。
+# 用途：别人正在改的子系统（例如设备 ABI 代理）带着会崩的回归测试，不想让 main 长期变红，
+# 但又不能假装它通过 —— 所以单独统计，并在汇总里点名"N 项已知失败"。
+known=0
+run_known_fail() {
+  local id=$1 reason=$2; shift 2
+  want "$id" || return 0
+  total=$((total + 1))
+  local t0=$(date +%s%N) out rc
+  out=$(cd "$BIN" && timeout 300 "./$@" 2>&1); rc=$?
+  local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+  local key
+  key=$(echo "$out" | grep -oE 'PASS[^"]{0,40}|FAIL[^"]{0,40}|failures=[0-9]+' | tail -1)
+  local verdict="KNOW"
+  if [ $rc -eq 0 ] && has_evidence "$out"; then
+    verdict="PASS"; pass=$((pass + 1));   # 修好了就自动转正
+  else
+    known=$((known + 1)); key="${key:-rc=$rc}（$reason）"
+  fi
+  printf "%-4s %-22s %-5s %6sms  %s\n" "$id" "$1" "$verdict" "$ms" "$key"
+  echo -e "$id\t$1\t$verdict\t$rc\t${ms}ms\t${key}" >> "$report"
+}
+
 # Python 步子：没有样本数据时按 SKIP 处理
 run_py() {
   local id=$1 script=$2; shift 2
@@ -162,6 +185,7 @@ run_one t37 t37_system_ui.exe
 run_one t38 t38_xboxui.exe --shot suite/xboxui.bmp
 run_one t39 t39_host_tool.exe
 run_one t40 t40_taskqueue3.exe
+run_known_fail t41 "WIP: 设备 ABI 代理转发槽位仍在修，见 docs/rendering.md" t41_d3d12_device_abi.exe
 run_one t15 t15_budget.exe
 
 if [ -d "$PKG" ]; then
@@ -176,8 +200,12 @@ if [ $total -eq 0 ]; then
   echo "== 汇总: 没有跑任何测试（--only 没匹配到？）" >&2
   exit 1
 fi
-echo "== 汇总: $pass PASS / $skip SKIP / $fail FAIL（共 $total）"
+echo "== 汇总: $pass PASS / $skip SKIP / $fail FAIL / $known 已知失败（共 $total）"
 echo "   报告: $report"
+if [ $known -gt 0 ]; then
+  # 已知失败不是通过：明细就在上面 KNOW 行里，这里点名以免被扫过去
+  echo "!! 注意: 有 $known 项已知失败（WIP，正在改；不计入本次红绿门槛，见上面 KNOW 行）" >&2
+fi
 if [ $skip -gt 0 ]; then
   # SKIP 不是通过：它意味着这套测试里有 N 项"这次没有验证"。
   # 以前没有这句警告，SKIP 混在绿油油的报表里没人注意。
