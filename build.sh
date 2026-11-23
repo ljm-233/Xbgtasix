@@ -206,9 +206,10 @@ else
   echo "  警告：没有 objdump，跳过导出数对账（只保留 .def 下限断言）" >&2
 fi
 
-echo "== xmem.dll（含 fstrace：静态导入的 DllMain 能最早接管文件 API）"
+echo "== xmem.dll（含 fstrace：静态导入的 DllMain 能最早接管文件 API / Sleep）"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
-    src/xmem/xmem.cpp src/fstrace/fstrace.cpp src/fstrace/drives.cpp src/trace.cpp \
+    src/xmem/xmem.cpp src/fstrace/fstrace.cpp src/fstrace/drives.cpp \
+    src/host_stall/host_stall.cpp src/trace.cpp \
     -o "$OUT/xmem.dll" -Wl,--out-implib,"$OUT/libxmem.dll.a"
 
 # 五个主机硬件抽象层 DLL：每个模块一份源文件（各自只导出自己那组符号）。
@@ -551,6 +552,11 @@ echo "== t40_taskqueue3.exe"
 echo "== t41_d3d12_device_abi.exe"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t41_d3d12_device_abi/main.cpp \
     -L"$OUT" -ld3d12_xs -ldxgi -ldxguid -o "$OUT/t41_d3d12_device_abi.exe"
+
+# 主机侧停顿 -> guest Sleep 的记账（需 xmem.dll 的 DllMain 装 IAT 钩子）
+echo "== t43_host_stall.exe"
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t43_host_stall/main.cpp \
+    -L"$OUT" -lxmem -o "$OUT/t43_host_stall.exe"
 
 # 黑盒测启动器的备份/还原决策：不链接 shim，只要求 xbgtasix.exe 已经在 $OUT 里
 echo "== t42_launcher_backup.exe"

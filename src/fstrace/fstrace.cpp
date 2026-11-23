@@ -39,6 +39,8 @@
 // 只被编进 xgameruntime.dll（build.sh 把 src/xgameruntime/*.cpp 一起编）。
 #include <windows.h>
 
+#include "xbgtasix/host_stall.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -861,6 +863,9 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD fdwReason, LPVOID) {
     // 主机盘符映射必须在任何文件访问之前完成（游戏启动期就会探测 G:/T:）
     if (fdwReason == DLL_PROCESS_ATTACH) {
         xbgtasix::install_console_drives();
+        // 主机侧停顿的 Sleep 钩子：标题的开机 hang check 会因为我们的驱动编译
+        // 误判"主线程卡死"并在 30 s 后自杀，这里必须无条件装上（不看开关）。
+        xbgtasix::host_stall::install();
     }
 
     switch (fdwReason) {

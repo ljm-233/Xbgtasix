@@ -584,6 +584,24 @@ inline HRESULT present_one_plane(CommandQueueProxy* self, UINT plane_count,
 
 inline HRESULT WINAPI queue_present_x(CommandQueueProxy* self, UINT plane_count,
                                       const void* planes, const void* params) {
+    // 先把"谁调的、原始参数"记下来，再进 present_one_plane ——
+    // 否则内部一崩，就没有任何线索了（上一次就是这么丢的）。
+    {
+        const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+        HMODULE mod = nullptr;
+        unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
+            rva = reinterpret_cast<unsigned long long>(caller) -
+                  reinterpret_cast<unsigned long long>(mod);
+        }
+        static std::atomic<int> budget{8};
+        if (budget.fetch_sub(1) > 0) {
+            xbgtasix::logf("[d3d12_xs] 队列槽30 PresentX 调用方=+0x%llX planes=%u ptr=%p params=%p",
+                           rva, plane_count, planes, params);
+        }
+    }
     const HRESULT hr = present_one_plane(self, plane_count, planes, params);
     static std::atomic<unsigned> calls{0};
     const unsigned call = calls.fetch_add(1, std::memory_order_relaxed);
@@ -967,6 +985,59 @@ inline HRESULT WINAPI create_committed_resource3_x(
     return hr;
 }
 
+// 主机槽位 25 = GetResourceAllocationInfo，但 **ABI 是反的**：
+//   RCX  = D3D12_RESOURCE_ALLOCATION_INFO* 输出缓冲   ← 不是 this！
+//   RDX  = 设备 this
+//   R8D  = visibleMask            R9D = numResourceDescs
+//   [rsp+0x20] = 资源描述指针
+// 证据：调用点 game+0x344182 是 `call *0xC8(%rax)`（0xC8/8 = 25），
+// 且调用方第一个动作就是把返回的 Alignment 和 0x1000 比较，不等则清零重查一次。
+//
+// 通用转发会把 RCX 里的输出缓冲当成设备代理 → 崩。必须显式适配。
+// 桌面签名是 (this, visibleMask, numDescs, pDescs) 并**按值返回**结构，
+// 所以这里把返回结构写回调用方的缓冲，再把缓冲地址返回（主机约定）。
+inline D3D12_RESOURCE_ALLOCATION_INFO* WINAPI get_allocation_info_x(
+    D3D12_RESOURCE_ALLOCATION_INFO* out, DeviceProxy* self, UINT visible_mask,
+    UINT num_resource_descs, const D3D12_RESOURCE_DESC* descs) {
+    if (!out) return out;
+    static std::atomic<int> budget{24};
+    const bool log = budget.fetch_sub(1) > 0;
+    if (!num_resource_descs || !descs) {
+        out->SizeInBytes = 0;
+        out->Alignment = 0;
+        return out;
+    }
+    // 资源标志转换与实际创建路径保持一致（剥掉 PC 不认的主机位）
+    D3D12_RESOURCE_DESC masked[8]{};
+    const UINT n = num_resource_descs < 8 ? num_resource_descs : 8;
+    for (UINT i = 0; i < n; ++i) {
+        masked[i] = descs[i];
+        masked[i].Flags = static_cast<D3D12_RESOURCE_FLAGS>(masked[i].Flags & 0x3F);
+    }
+    if (log) {
+        xbgtasix::logf("[d3d12_xs] 槽25 GetResourceAllocationInfo: out=%p visible=0x%x num=%u "
+                       "desc0={dim=%d w=%llu h=%u fmt=%d flags=0x%x->0x%x align=0x%llx}",
+                       static_cast<void*>(out), visible_mask, num_resource_descs,
+                       static_cast<int>(descs[0].Dimension),
+                       static_cast<unsigned long long>(descs[0].Width), descs[0].Height,
+                       static_cast<int>(descs[0].Format), static_cast<unsigned>(descs[0].Flags),
+                       static_cast<unsigned>(masked[0].Flags),
+                       static_cast<unsigned long long>(descs[0].Alignment));
+    }
+    const D3D12_RESOURCE_ALLOCATION_INFO info =
+        // 注意：必须传 masked（剥离主机标志后的），传原始 descs 会拿到
+        // SizeInBytes = 0xFFFFFFFFFFFFFFFF（桌面认为描述无效）
+        static_cast<ID3D12Device*>(self->pc)->GetResourceAllocationInfo(visible_mask, n, masked);
+    out->SizeInBytes = info.SizeInBytes;
+    out->Alignment = info.Alignment;
+    if (log) {
+        xbgtasix::logf("[d3d12_xs] 槽25 -> SizeInBytes=%llu Alignment=0x%llx",
+                       static_cast<unsigned long long>(info.SizeInBytes),
+                       static_cast<unsigned long long>(info.Alignment));
+    }
+    return out;
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
@@ -978,6 +1049,7 @@ Slot device_slot() {
     if constexpr (N == 19) return reinterpret_cast<Slot>(&create_uav_x);
     if constexpr (N == 133) return reinterpret_cast<Slot>(&create_resource_from_address_x);
     if constexpr (N == 127) return reinterpret_cast<Slot>(&create_committed_resource3_x);
+    if constexpr (N == 25) return reinterpret_cast<Slot>(&get_allocation_info_x);
     if constexpr (N == kCustomHeapPropertiesSlot)
         return reinterpret_cast<Slot>(&custom_heap_properties);
     if constexpr (N == kQueueOrOpenHeapSlot)
