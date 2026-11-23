@@ -1,6 +1,13 @@
 # 交接给 GPT：当前状态、已确认的事实、下一步
 
-写于 2026-11-24 04:40（本地）。此时最新提交 `c4a67ca`，套件
+## 最新续跑
+
+- 调试器确认 `game+0x19F4F58` 由图形初始化失败触发。XMem 现在通过 `VirtualAlloc2` 保留与替换占位区，真机已完成五段地址区间的替换和物理页映射。
+- 描述符堆代理把 CPU/GPU 句柄按 Xbox ABI 从寄存器返回，命令列表绑定时使用原生堆。修复后真机越过原来的 `D3D12Core.dll` 访问冲突。
+- RTX 5060 的描述符步长为 32 字节，游戏申请 1,245,184 项的 shader-visible CBV/SRV/UAV 堆，驱动返回 `E_INVALIDARG`。Intel 核显步长为 64 字节，802,816 项申请成功，随后游戏在 `game+0x1CF336C` 断言 CPU 句柄必须等于预留地址。两项要求都要纳入描述符句柄转换。
+- `t41` 在 WARP 和 RTX 5060 上验证了独立帧事件计时和单平面 SDR `PresentX`。真实游戏仍在描述符堆初始化，尚未调用 `PresentX`。
+
+以下是 2026-11-24 04:40（本地）的初稿。此时最新提交 `c4a67ca`，套件
 `39 PASS / 2 SKIP / 0 FAIL`，CI 刚推送、正在跑。
 
 ## 一、一句话现状
@@ -101,7 +108,7 @@ python tools/xref.py "D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK/game_scarlett_master.
 
 ### 5.2 主机 vtable ≠ PC 头文件 vtable
 
-PC（MinGW `d3d12.h`）关键槽位：`4=CreateCommandQueue`、`8=CreateCommandList`、
+PC（MinGW `d3d12.h`）关键槽位：`8=CreateCommandQueue`、`12=CreateCommandList`、
 `27=CreateCommittedResource`、`36=CreateFence`。
 
 主机（参考实现实测）：`8=CreateCommandQueue`、`13=CheckFeatureSupport`、

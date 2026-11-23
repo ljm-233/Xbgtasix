@@ -2,7 +2,10 @@
 #pragma once
 
 #include <d3d12.h>
+#include <dxgi1_4.h>
+#include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -14,6 +17,11 @@
 
 #include "xbgtasix/trace.h"
 
+#include "descriptor_heap_abi.h"   // 句柄翻译表（描述符 CPU 句柄：arena 地址 <-> PC 堆地址）
+#include "descriptor_heap_abi.h"
+#include "frame_events.h"
+#include "present_x.h"
+
 namespace xbgtasix::d3d12 {
 
 // ID3D12Device11 adds CreateSampler2 to Device10. Spell out the IID because
@@ -21,6 +29,7 @@ namespace xbgtasix::d3d12 {
 inline constexpr GUID kDevice11 = {0x5405c344, 0xd457, 0x444e,
                                     {0xb4, 0xdd, 0x23, 0x66, 0xe4, 0x5a, 0xee, 0x39}};
 inline constexpr std::size_t kDeviceSlots = 140;
+inline constexpr std::size_t kXboxCreateCommandQueueSlot = 8;
 inline constexpr std::size_t kCustomHeapPropertiesSlot = 26;
 inline constexpr std::size_t kQueueOrOpenHeapSlot = 48;
 inline constexpr std::size_t kXboxCreateCommandListSlot = 73;
@@ -60,6 +69,7 @@ struct DeviceProxy {
     IUnknown* pc;
     int version;
     std::atomic<ULONG> refs{1};
+    FrameEvents frame_events{};
 };
 static_assert(sizeof(void*) == 8 && offsetof(DeviceProxy, vtable) == 0 &&
               offsetof(DeviceProxy, pc) == 8);
@@ -104,18 +114,8 @@ inline D3D12_HEAP_PROPERTIES* WINAPI custom_heap_properties(
         self->pc, out, node_mask, heap_type);
 }
 
-// Xbox calls slot 48 with the command queue IID; on PC that slot is
-// OpenExistingHeapFromAddress. Keep the desktop form intact and translate
-// only the observed queue form: (type, priority, flags, node mask).
-inline HRESULT WINAPI queue_or_open_heap(DeviceProxy* self, const void* desc,
-                                           REFIID iid, void** out) {
-    if (iid != __uuidof(ID3D12CommandQueue)) {
-        if (self->version < 3) {
-            if (out) *out = nullptr;
-            return E_NOINTERFACE;
-        }
-        return static_cast<ID3D12Device3*>(self->pc)->OpenExistingHeapFromAddress(desc, iid, out);
-    }
+inline HRESULT create_wrapped_command_queue(DeviceProxy* self, const void* desc, void** out,
+                                            std::size_t slot) {
     auto* pc = static_cast<ID3D12Device*>(self->pc);
 
     if (!out) return E_POINTER;
@@ -142,8 +142,8 @@ inline HRESULT WINAPI queue_or_open_heap(DeviceProxy* self, const void* desc,
     if ((xbox.type != D3D12_COMMAND_LIST_TYPE_DIRECT &&
          xbox.type != D3D12_COMMAND_LIST_TYPE_COMPUTE &&
          xbox.type != D3D12_COMMAND_LIST_TYPE_COPY) || (flags & ~kDisableTimeout)) {
-        xbgtasix::logf("[d3d12_xs] slot 48 unsupported queue type=%d flags=0x%x",
-                       xbox.type, xbox.flags);
+        xbgtasix::logf("[d3d12_xs] slot %zu unsupported queue type=%d flags=0x%x",
+                       slot, xbox.type, xbox.flags);
         return E_INVALIDARG;
     }
     const D3D12_COMMAND_QUEUE_DESC translated{
@@ -154,74 +154,78 @@ inline HRESULT WINAPI queue_or_open_heap(DeviceProxy* self, const void* desc,
     if (SUCCEEDED(hr) && native_queue) {
         *out = wrap_command_queue(static_cast<ID3D12CommandQueue*>(native_queue));
     }
-    xbgtasix::logf("[d3d12_xs] slot 48 -> CreateCommandQueue type=%d priority=%d "
-                   "flags=0x%x->0x%x nodeMask=0x%x hr=0x%08lx proxy=%s", xbox.type,
+    xbgtasix::logf("[d3d12_xs] slot %zu -> CreateCommandQueue type=%d priority=%d "
+                   "flags=0x%x->0x%x nodeMask=0x%x hr=0x%08lx proxy=%s", slot, xbox.type,
                    xbox.priority, xbox.flags, flags, xbox.node_mask,
                    static_cast<unsigned long>(hr), *out ? "yes" : "no");
     return (*out || FAILED(hr)) ? hr : E_OUTOFMEMORY;
 }
 
-// Xbox frame pacing occupies device slots 78?81. These calls are not present
-// in the desktop device vtable; keeping them in a small process-local clock is
-// enough to preserve the ABI and to keep the title's startup thread moving.
-struct FrameState {
-    std::mutex mutex;
-    UINT interval_us = 0;
-    bool active = false;
-    std::array<bool, 3> scheduled{};
-    UINT64 next_token = 1;
-};
-
-inline FrameState& frame_state() {
-    static FrameState state;
-    return state;
+// Slot 8 has the same CreateCommandQueue signature on both platforms. The
+// title's direct queue needs the proxy for Xbox queue extensions such as PresentX.
+inline HRESULT WINAPI create_command_queue_x(DeviceProxy* self, const void* desc,
+                                              REFIID iid, void** out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (iid != __uuidof(ID3D12CommandQueue) && iid != __uuidof(IUnknown) &&
+        iid != __uuidof(ID3D12Object) && iid != __uuidof(ID3D12DeviceChild) &&
+        iid != __uuidof(ID3D12Pageable)) return E_NOINTERFACE;
+    return create_wrapped_command_queue(self, desc, out, kXboxCreateCommandQueueSlot);
 }
 
-inline HRESULT WINAPI set_frame_interval_x(DeviceProxy*, void*, UINT interval_us,
+// Xbox calls slot 48 with the command queue IID. Preserve the desktop slot's
+// OpenExistingHeapFromAddress behavior for its existing callers.
+inline HRESULT WINAPI queue_or_open_heap(DeviceProxy* self, const void* desc,
+                                           REFIID iid, void** out) {
+    if (iid == __uuidof(ID3D12CommandQueue))
+        return create_wrapped_command_queue(self, desc, out, kQueueOrOpenHeapSlot);
+    if (self->version < 3) {
+        if (out) *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    return static_cast<ID3D12Device3*>(self->pc)->OpenExistingHeapFromAddress(desc, iid, out);
+}
+
+inline HRESULT WINAPI create_descriptor_heap_x(DeviceProxy* self,
+    const D3D12_DESCRIPTOR_HEAP_DESC* desc, REFIID iid, void** out) {
+    const HRESULT hr = create_descriptor_heap_proxy(static_cast<ID3D12Device*>(self->pc),
+        reinterpret_cast<IUnknown*>(self), desc, iid, out);
+    if (desc) {
+        xbgtasix::logf("[d3d12_xs] device slot 14 CreateDescriptorHeap type=%u descriptors=%u "
+                       "flags=0x%x nodeMask=0x%x hr=0x%08lx", static_cast<unsigned>(desc->Type),
+                       desc->NumDescriptors, static_cast<unsigned>(desc->Flags), desc->NodeMask,
+                       static_cast<unsigned long>(hr));
+    }
+    return hr;
+}
+
+inline HRESULT WINAPI set_frame_interval_x(DeviceProxy* self, IUnknown* output, UINT interval_us,
                                            UINT periodicity, UINT flags) {
-    auto& state = frame_state();
-    {
-        std::lock_guard lock(state.mutex);
-        state.interval_us = interval_us;
-        state.active = interval_us != 0;
-        if (!state.active) state.scheduled.fill(false);
-    }
-    xbgtasix::logf("[d3d12_xs] device slot 78 SetFrameIntervalX interval=%u periodicity=%u flags=0x%x",
-                   interval_us, periodicity, flags);
-    return S_OK;
+    const HRESULT hr = output || flags != 0 ? E_NOTIMPL : S_OK;
+    if (SUCCEEDED(hr)) self->frame_events.set_interval(interval_us);
+    xbgtasix::logf("[d3d12_xs] device slot 78 SetFrameIntervalX interval=%u periodicity=%u "
+                   "output=%p flags=0x%x hr=0x%08lx",
+                   interval_us, periodicity, output, flags, static_cast<unsigned long>(hr));
+    return hr;
 }
 
-inline HRESULT WINAPI schedule_frame_event_x(DeviceProxy*, UINT type, UINT offset_us,
+inline HRESULT WINAPI schedule_frame_event_x(DeviceProxy* self, UINT type, UINT offset_us,
                                               const void* block, UINT flags) {
-    auto& state = frame_state();
-    if (type >= state.scheduled.size()) return E_INVALIDARG;
-    {
-        std::lock_guard lock(state.mutex);
-        if (flags & 1u) state.scheduled[type] = false;
-        else {
-            state.active = true;
-            state.scheduled[type] = true;
-        }
-    }
-    xbgtasix::logf("[d3d12_xs] device slot 79 ScheduleFrameEventX type=%u offset=%u block=%p flags=0x%x",
-                   type, offset_us, block, flags);
-    return S_OK;
+    const HRESULT hr = block || flags != 0 ? E_NOTIMPL : self->frame_events.schedule(type, offset_us);
+    xbgtasix::logf("[d3d12_xs] device slot 79 ScheduleFrameEventX type=%u offset=%u block=%p "
+                   "flags=0x%x hr=0x%08lx", type, offset_us, block, flags,
+                   static_cast<unsigned long>(hr));
+    return hr;
 }
 
-inline HRESULT WINAPI wait_frame_event_x(DeviceProxy*, UINT type, UINT timeout_ms,
+inline HRESULT WINAPI wait_frame_event_x(DeviceProxy* self, UINT type, UINT timeout_ms,
                                           const void* block, UINT flags, UINT64* token) {
-    auto& state = frame_state();
-    if (type >= state.scheduled.size()) return E_INVALIDARG;
-    UINT64 issued = 0;
-    {
-        std::lock_guard lock(state.mutex);
-        if (token && *token != 0) issued = *token;
-        if (issued == 0) issued = state.next_token++;
-        if (token) *token = issued;
-    }
-    xbgtasix::logf("[d3d12_xs] device slot 80 WaitFrameEventX type=%u timeout=%u block=%p flags=0x%x token=0x%llx",
-                   type, timeout_ms, block, flags, static_cast<unsigned long long>(issued));
-    return S_OK;
+    const HRESULT hr = block || flags != 0 ? E_NOTIMPL : self->frame_events.wait(type, timeout_ms, token);
+    const UINT64 issued = SUCCEEDED(hr) ? *token : 0;
+    xbgtasix::logf("[d3d12_xs] device slot 80 WaitFrameEventX type=%u timeout=%u block=%p "
+                   "flags=0x%x token=0x%llx hr=0x%08lx", type, timeout_ms, block, flags,
+                   static_cast<unsigned long long>(issued), static_cast<unsigned long>(hr));
+    return hr;
 }
 
 inline HRESULT WINAPI frame_statistics_x(DeviceProxy*, UINT64 token, UINT type,
@@ -337,6 +341,15 @@ inline HRESULT WINAPI list_reset(CommandListProxy* self, ID3D12CommandAllocator*
     return self->pc->Reset(allocator, initial_pso);
 }
 
+inline void WINAPI list_set_descriptor_heaps(CommandListProxy* self, UINT count,
+                                              ID3D12DescriptorHeap* const* heaps) {
+    // D3D12 can bind at most one heap of each shader-visible heap type.
+    std::array<ID3D12DescriptorHeap*, 2> native{};
+    if (count > native.size() || (count != 0 && !heaps)) return;
+    for (UINT i = 0; i < count; ++i) native[i] = unwrap_descriptor_heap(heaps[i]);
+    self->pc->SetDescriptorHeaps(count, native.data());
+}
+
 inline void WINAPI list_slot_131(CommandListProxy*, UINT reg, UINT value, UINT flags,
                                  UINT64 address) {
     xbgtasix::logf("[d3d12_xs] Xbox command list slot 131 reg=0x%x value=0x%x flags=0x%x "
@@ -357,6 +370,7 @@ inline Slot command_list_slot(std::size_t n) {
     if (n == 2) return reinterpret_cast<Slot>(&list_release);
     if (n == 9) return reinterpret_cast<Slot>(&list_close);
     if (n == 10) return reinterpret_cast<Slot>(&list_reset);
+    if (n == 28) return reinterpret_cast<Slot>(&list_set_descriptor_heaps);
     if (n == 131) return reinterpret_cast<Slot>(&list_slot_131);
     if (n == 132) return reinterpret_cast<Slot>(&list_slot_132);
     return nullptr;
@@ -403,18 +417,26 @@ inline HRESULT WINAPI queue_query_interface(CommandQueueProxy* self, REFIID iid,
 inline void WINAPI queue_execute(CommandQueueProxy* self, UINT count,
                                  ID3D12CommandList* const* lists);
 
-template <std::size_t N>
-__attribute__((naked)) void WINAPI forward_queue_this() {
-    __asm__ volatile("movq 8(%%rcx), %%rcx\n\t"
-                     "movq (%%rcx), %%r11\n\t"
-                     "jmp *%c0(%%r11)" :: "i"(N * 8));
-}
-
 struct CommandQueueProxy {
     const Slot* vtable;
     ID3D12CommandQueue* pc;
     std::atomic<ULONG> refs{1};
+    std::mutex present_mutex{};
+    std::unique_ptr<PresentState> presentation{};
 };
+static_assert(offsetof(CommandQueueProxy, vtable) == 0);
+
+template <std::size_t N>
+uintptr_t WINAPI forward_queue_slot(CommandQueueProxy* self, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                     uintptr_t a3 = 0, uintptr_t a4 = 0, uintptr_t a5 = 0,
+                                     uintptr_t a6 = 0, uintptr_t a7 = 0, uintptr_t a8 = 0,
+                                     uintptr_t a9 = 0) {
+    using Fn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                             uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+    const Slot* pc_vtable;
+    std::memcpy(&pc_vtable, self->pc, sizeof(pc_vtable));
+    return reinterpret_cast<Fn>(pc_vtable[N])(self->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+}
 
 inline ULONG WINAPI queue_add_ref(CommandQueueProxy* self) {
     return self->refs.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -466,17 +488,65 @@ inline void WINAPI queue_execute(CommandQueueProxy* self, UINT count,
     self->pc->ExecuteCommandLists(count, native_lists);
 }
 
+inline HRESULT present_one_plane(CommandQueueProxy* self, UINT plane_count,
+                                 const void* planes, const void* params) {
+    if (params || plane_count > 1) return E_NOTIMPL;
+    std::lock_guard lock(self->present_mutex);
+    if (plane_count == 0) {
+        self->presentation.reset();
+        return S_OK;
+    }
+    if (!planes) return E_INVALIDARG;
+    PresentPlaneHeader plane{};
+    std::memcpy(&plane, planes, sizeof(plane));
+    if (plane.resource_count > 1) return E_NOTIMPL;
+    if (plane.resource_count == 0 || !plane.resources || !*plane.resources) return E_INVALIDARG;
+    if (self->pc->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return E_NOTIMPL;
+
+    auto* source = *plane.resources;
+    const auto desc = source->GetDesc();
+    if (!supported_present_texture(desc)) return E_NOTIMPL;
+    PresentCom<ID3D12Device> queue_device;
+    HRESULT hr = self->pc->GetDevice(IID_PPV_ARGS(queue_device.out()));
+    if (FAILED(hr)) return hr;
+    PresentCom<ID3D12Device> source_device;
+    hr = source->GetDevice(IID_PPV_ARGS(source_device.out()));
+    if (FAILED(hr)) return hr;
+    if (source_device.get() != queue_device.get()) return E_INVALIDARG;
+
+    if (!self->presentation) {
+        std::unique_ptr<PresentState> candidate(new (std::nothrow) PresentState);
+        if (!candidate) return E_OUTOFMEMORY;
+        hr = candidate->initialize(self->pc, queue_device.get(), desc);
+        if (FAILED(hr)) return hr;
+        self->presentation = std::move(candidate);
+    }
+    return self->presentation->present(self->pc, source, desc);
+}
+
+inline HRESULT WINAPI queue_present_x(CommandQueueProxy* self, UINT plane_count,
+                                      const void* planes, const void* params) {
+    const HRESULT hr = present_one_plane(self, plane_count, planes, params);
+    static std::atomic<unsigned> calls{0};
+    const unsigned call = calls.fetch_add(1, std::memory_order_relaxed);
+    if (call < 8)
+        xbgtasix::logf("[d3d12_xs] queue slot 30 PresentX planes=%u params=%p hr=0x%08lx",
+                       plane_count, params, static_cast<unsigned long>(hr));
+    return hr;
+}
+
 inline Slot command_queue_slot(std::size_t n) {
     if (n == 0) return reinterpret_cast<Slot>(&queue_query_interface);
     if (n == 1) return reinterpret_cast<Slot>(&queue_add_ref);
     if (n == 2) return reinterpret_cast<Slot>(&queue_release);
     if (n == 10) return reinterpret_cast<Slot>(&queue_execute);
+    if (n == 30) return reinterpret_cast<Slot>(&queue_present_x);
     return nullptr;
 }
 
 template <std::size_t... N>
 std::array<Slot, sizeof...(N)> make_command_queue_vtable(std::index_sequence<N...>) {
-    std::array<Slot, sizeof...(N)> v{forward_queue_this<N>...};
+    std::array<Slot, sizeof...(N)> v{reinterpret_cast<Slot>(&forward_queue_slot<N>)...};
     ((v[N] = command_queue_slot(N) ? command_queue_slot(N) : v[N]), ...);
     return v;
 }
@@ -568,12 +638,13 @@ inline bool slot_probe_on() {
 }
 
 inline void log_slot_once(std::size_t n) {
-    static std::atomic<unsigned> seen[4] = {};
+    static std::atomic<UINT64> seen[4] = {};
     const std::size_t w = n / 64;
     const std::size_t bit = n % 64;
     if (w >= 4) return;
-    const unsigned old = seen[w].fetch_or(1u << bit);
-    if ((old & (1u << bit)) == 0) xbgtasix::logf("[d3d12_xs] 槽位探针 slot=%zu", n);
+    const UINT64 mask = UINT64{1} << bit;
+    if ((seen[w].fetch_or(mask, std::memory_order_relaxed) & mask) == 0)
+        xbgtasix::logf("[d3d12_xs] 槽位探针 slot=%zu", n);
 }
 
 template <std::size_t N>
@@ -589,11 +660,62 @@ uintptr_t WINAPI slot_probe_forward(void* self, uintptr_t a1 = 0, uintptr_t a2 =
     return reinterpret_cast<Fn>(pc_vtable[N])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
 }
 
+// 建视图 / 拷贝描述符：把游戏传进来的 arena 句柄翻译成 PC 堆里的真实地址。
+// 实测：不翻译的话游戏一建视图就崩在 D3D12Core（AV）。
+inline void WINAPI create_cbv(DeviceProxy* self, const D3D12_CONSTANT_BUFFER_VIEW_DESC* d,
+                              D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    auto* pc = static_cast<ID3D12Device*>(self->pc);
+    pc->CreateConstantBufferView(d, translate_cpu(h));
+}
+inline void WINAPI create_srv(DeviceProxy* self, ID3D12Resource* r,
+                              const D3D12_SHADER_RESOURCE_VIEW_DESC* d,
+                              D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    static_cast<ID3D12Device*>(self->pc)->CreateShaderResourceView(r, d, translate_cpu(h));
+}
+inline void WINAPI create_uav(DeviceProxy* self, ID3D12Resource* r,
+                              const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,
+                              D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    static_cast<ID3D12Device*>(self->pc)->CreateUnorderedAccessView(r, nullptr, d,
+                                                                  translate_cpu(h));
+}
+inline void WINAPI create_rtv(DeviceProxy* self, ID3D12Resource* r,
+                              const D3D12_RENDER_TARGET_VIEW_DESC* d,
+                              D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    static_cast<ID3D12Device*>(self->pc)->CreateRenderTargetView(r, d, translate_cpu(h));
+}
+inline void WINAPI create_dsv(DeviceProxy* self, ID3D12Resource* r,
+                              const D3D12_DEPTH_STENCIL_VIEW_DESC* d,
+                              D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    static_cast<ID3D12Device*>(self->pc)->CreateDepthStencilView(r, d, translate_cpu(h));
+}
+inline void WINAPI create_sampler(DeviceProxy* self, const D3D12_SAMPLER_DESC* d,
+                                  D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    static_cast<ID3D12Device*>(self->pc)->CreateSampler(d, translate_cpu(h));
+}
+inline void WINAPI copy_descriptors_simple(DeviceProxy* self,
+                                           D3D12_CPU_DESCRIPTOR_HANDLE dst, UINT dst_range,
+                                           D3D12_CPU_DESCRIPTOR_HANDLE src, UINT src_range,
+                                           UINT count) {
+    static_cast<ID3D12Device*>(self->pc)->CopyDescriptorsSimple(
+        count, translate_cpu(dst), translate_cpu(src),
+        static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(dst_range));
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
     if constexpr (N == 1) return reinterpret_cast<Slot>(&add_ref);
     if constexpr (N == 2) return reinterpret_cast<Slot>(&release);
+    if constexpr (N == kXboxCreateCommandQueueSlot)
+        return reinterpret_cast<Slot>(&create_command_queue_x);
+    if constexpr (N == 14) return reinterpret_cast<Slot>(&create_descriptor_heap_x);
+    if constexpr (N == 13) return reinterpret_cast<Slot>(&create_cbv);
+    if constexpr (N == 14) return reinterpret_cast<Slot>(&create_srv);
+    if constexpr (N == 15) return reinterpret_cast<Slot>(&create_uav);
+    if constexpr (N == 16) return reinterpret_cast<Slot>(&create_rtv);
+    if constexpr (N == 17) return reinterpret_cast<Slot>(&create_dsv);
+    if constexpr (N == 18) return reinterpret_cast<Slot>(&create_sampler);
+    if constexpr (N == 20) return reinterpret_cast<Slot>(&copy_descriptors_simple);
     if constexpr (N == kCustomHeapPropertiesSlot)
         return reinterpret_cast<Slot>(&custom_heap_properties);
     if constexpr (N == kQueueOrOpenHeapSlot)

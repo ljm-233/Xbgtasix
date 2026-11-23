@@ -14,26 +14,20 @@ Xbox Series 的呈现模型和 PC 完全不同：
 | 帧缓冲 | `D3D12ConfigureVirtualMemoryX` 配置出来的显示内存 | 交换链后台缓冲 |
 | 帧节奏 | `SetFrameIntervalX` / `ScheduleFrameEventX` / `WaitFrameEventX` | `Present(syncInterval)` + 帧延迟 |
 
-所以**窗口必须由兼容层创建**。游戏代码里没有"创建窗口"这个概念，它只会说
-"我要 present 这一帧"。
+Xbox 的 `PresentX` 参数中没有 HWND。兼容层在首次呈现时为 DXGI 创建窗口。
 
 ## 2. 我们的链路现状
 
 ```
 游戏: D3D12ConfigureVirtualMemoryX()      → 已拦，返回 S_OK（并记录主机内存配置）
 游戏: D3D12XboxCreateDevice()             → 已拦，转发到桌面 D3D12CreateDevice
-游戏: 设备/队列方法调用                    → **主机槽位在 PC 对象上不存在 → 崩在 D3D12Core**
-游戏: queue->PresentX(...)                → 未实现（窗口/交换链还没有接到这里）
+游戏: 设备/队列方法调用                    → 已创建 Direct 队列、完成显存地址池映射
+游戏: 描述符堆初始化                       → 当前真实启动阻塞点
+独立测试: queue->PresentX(...)            → 单平面 SDR 纹理复制到 DXGI flip 交换链
 ```
 
-实测崩溃证据（`XBGTASIX_VEH=1`）：
-
-```
-FATAL 异常 0xC0000005 at D3D12Core.dll+0x2A0EE
-  #6 game_scarlett_master.exe+0x2478713   ← 调用方是游戏自己
-```
-
-说明设备确实建出来了，崩在"用设备"这一步。
+RTX 5060 上的 1,245,184 项 shader-visible CBV/SRV/UAV 堆申请失败。Intel 核显的
+802,816 项申请成功，随后游戏在 `game+0x1CF336C` 检查 CPU 句柄是否等于预留地址。
 
 ## 3. 必须补的三块
 
@@ -44,8 +38,8 @@ FATAL 异常 0xC0000005 at D3D12Core.dll+0x2A0EE
 
 | 接口 | 主机专属方法 |
 |---|---|
-| 设备 | `WaitFrameEventX`、`ScheduleFrameEventX`、`SuspendX`、`ResumeX`、内存配置类 |
-| 队列 | `PresentX`、`SetFrameIntervalX`（帧节奏） |
+| 设备 | `SetFrameIntervalX`、`ScheduleFrameEventX`、`WaitFrameEventX`、内存配置类 |
+| 队列 | `PresentX`、`SuspendX`、`ResumeX` |
 | 命令列表 | 主机专有的寄存器写/状态设置槽位（实测游戏会调到 slot 131/132） |
 
 做法：把 PC 对象包一层，主机 vtable 的槽位逐个映射——PC 有对等方法的直接转发，
@@ -88,14 +82,13 @@ FATAL 异常 0xC0000005 at D3D12Core.dll+0x2A0EE
 | `D3D12ConfigureVirtualMemoryX` | ✅ 已拦（返回 S_OK，PC 由驱动管显存） |
 | 设备/队列/命令列表 vtable 代理 | 🚧 **进行中**（`src/d3d12_xs/device_abi.h`） |
 | Root signature 标志转换 | ❌ 未做 |
-| `PresentX` + 窗口/交换链 | ❌ 未做 |
+| 帧事件 | 设备 slot 78–80 以桌面单调时钟模拟。显示同步、流水线延迟和暂停恢复待补 |
+| `PresentX` + 窗口/交换链 | 队列 slot 30 支持单平面、单纹理 SDR 呈现。真实游戏尚未调用 |
 | 着色器格式验证 | ❌ 未做 |
 | 纹理 swizzle | ⚠️ `XGSuggestSwizzleMode` 返回线性；`XGCreateTextureComputer` 诚实失败 |
 
-`tests/t41_d3d12_device_abi` 是这套代理的回归测试，**目前崩溃**
-（`D3D12Core` 内 AV，代理转发槽位仍有错位），因此在套件里按
-"已知失败（KNOW）"统计：照样运行、如实打印，但不计入红绿门槛。
-修好后会自动转成 PASS。
+`tests/t41_d3d12_device_abi` 覆盖 Direct 队列、描述符句柄 ABI、帧事件，以及
+连续两次 `PresentX` 和窗口销毁。本机通过 WARP 和 RTX 5060 两条路径验证。
 
 ## 5. 为什么这条路成立
 
@@ -104,7 +97,7 @@ FATAL 异常 0xC0000005 at D3D12Core.dll+0x2A0EE
 2. 设备**确实建出来了**：崩溃发生在设备方法调用，而不是设备创建。
 3. "建窗口 + 建 D3D12 交换链 + 呈现"这个能力本仓库**已经验证过**：
    系统侧 UI（`t37_system_ui` / `t38_xboxui`）就是在进程内建 Win32 窗口 + flip 交换链
-   并做像素级断言。缺的只是把游戏的 `PresentX` 接过去。
+   并做像素级断言。`t41` 验证了 `PresentX` 入口和 DXGI 呈现。
 
 ## 6. 复跑
 

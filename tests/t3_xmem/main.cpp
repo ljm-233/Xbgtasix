@@ -47,6 +47,11 @@ struct XMemWorkingSetStatistics {
 extern "C" {
 void* __cdecl XMemAlloc(uint64_t attributes, size_t size);
 void __cdecl XMemFree(void* ptr);
+void* __cdecl XMemVirtualAlloc(void* address, size_t size, uint32_t type,
+                              uint64_t attributes, uint32_t protect);
+int __cdecl XMemAllocatePhysicalPages(uint64_t flags, size_t* count, uint64_t* pages);
+int __cdecl XMemFreePhysicalPages(size_t count, uint64_t* pages);
+void* __cdecl XMemMapPhysicalPages(void* address, size_t count, uint64_t* pages);
 int __cdecl XMemVirtualQuery(void* process, const void* address, XMemBasicInformation* out);
 bool __cdecl XMemGetWorkingSetStatistics(XMemWorkingSetStatistics* stats);
 }
@@ -274,6 +279,42 @@ void test_query_after_free() {
                  static_cast<unsigned long>(info.state));
 }
 
+void test_placeholder() {
+    if (!GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "VirtualAlloc2")) {
+        xbgtasix::logf("[t3] skip placeholder checks on Windows without VirtualAlloc2");
+        return;
+    }
+    constexpr size_t page = 0x10000;
+    constexpr DWORD xbox_64k_pages = 0x20400000;
+    auto* base = static_cast<unsigned char*>(XMemVirtualAlloc(
+        nullptr, 2 * page, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, 7, PAGE_NOACCESS));
+    ok(base != nullptr, "placeholder: reserve two pages");
+    if (!base) return;
+
+    const bool split = VirtualFree(base, page, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+    ok(split, "placeholder: split with the native VirtualFree");
+    if (split) {
+        void* replaced = XMemVirtualAlloc(base, page,
+            xbox_64k_pages | MEM_RESERVE | MEM_REPLACE_PLACEHOLDER, 0x27, 0x1004);
+        ok(replaced == base, "placeholder: replace exactly the requested page");
+        if (replaced == base) {
+            uint64_t physical_page = 0;
+            size_t count = 1;
+            const bool allocated = XMemAllocatePhysicalPages(0, &count, &physical_page) && count == 1;
+            ok(allocated, "placeholder: allocate backing page");
+            if (allocated) {
+                std::memset(reinterpret_cast<void*>(physical_page), 0x5A, page);
+                void* mapped = XMemMapPhysicalPages(base, count, &physical_page);
+                ok(mapped == base && base[0] == 0x5A && base[page - 1] == 0x5A,
+                   "placeholder: map page data at the original address");
+                XMemFreePhysicalPages(count, &physical_page);
+            }
+        }
+        ok(VirtualFree(base + page, 0, MEM_RELEASE), "placeholder: release the other page");
+    }
+    ok(VirtualFree(base, 0, MEM_RELEASE), "placeholder: release the first range");
+}
+
 double now_ms() {
     LARGE_INTEGER f, c;
     QueryPerformanceFrequency(&f);
@@ -300,6 +341,7 @@ int main(int argc, char** argv) {
     test_threads(8, 2000);
     test_region_granularity();
     test_query_after_free();
+    test_placeholder();
 
     const Stats end = stats();
     ok(end.TotalBytes == 0 && end.AllocationCount == 0, "end: no leak");

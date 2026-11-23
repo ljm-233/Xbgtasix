@@ -263,6 +263,16 @@ namespace {
 constexpr size_t kPhysPage = 0x10000;
 std::mutex g_phys_mu;
 std::vector<void*> g_phys_blocks;   // 已分配的物理页块（按块首地址记录）
+
+// 描述符 arena：游戏用 MEM_RESERVE_PLACEHOLDER 预留一大段 VA，
+// 随后要求 D3D12 的描述符 CPU 内存就落在这一段里（主机"标题内存描述符堆"语义）。
+// 实测（Intel 日志 2391-2392 行）：预留 0.19 GB @ 0x196d7200000，
+// 紧接着在该地址 commit 0.02 GB、映射 320 页，然后建 802,816 项的堆，
+// 并断言 GetCPUDescriptorHandleForHeapStart() == 0x196d7200000。
+std::mutex g_arena_mu;
+void* g_descriptor_arena_base = nullptr;
+size_t g_descriptor_arena_size = 0;
+size_t g_descriptor_arena_used = 0;
 std::vector<void*> g_phys_pages;   // 每页一项（按分配顺序），便于 map 时找到源数据
 
 }  // namespace
@@ -362,6 +372,7 @@ __declspec(dllexport) void __cdecl XMemFreeDefault(void* p) { XB_XMEM_TRACE("XMe
 //     XMEM_LARGE_PAGES = 0x20000000  -> 2 MB 大页，要求 2 MB 对齐
 //   低位按 Win32 语义解释（& (MEM_COMMIT|MEM_RESERVE|MEM_RESET|MEM_TOP_DOWN|
 //   MEM_WRITE_WATCH|MEM_RESET_UNDO)），为 0 时默认 保留+提交。
+//   MEM_RESERVE_PLACEHOLDER / MEM_REPLACE_PLACEHOLDER 由 VirtualAlloc2 处理。
 //   protect 只取低 8 位，PAGE_GUARD 单独保留。
 //
 // 我们此前用的是 4 参数版本：游戏传的 attributes(u64) 落进了第 4 个形参位，
@@ -422,14 +433,32 @@ void* reserve_aligned(size_t size, size_t align, uint32_t wt, uint32_t wp) {
     return nullptr;
 }
 
+void* allocate_placeholder(void* address, size_t size, DWORD type, DWORD protect) {
+    using Alloc = void* (WINAPI*)(HANDLE, void*, SIZE_T, ULONG, ULONG,
+                                  MEM_EXTENDED_PARAMETER*, ULONG);
+    static const auto alloc = [] {
+        const auto symbol = GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "VirtualAlloc2");
+        Alloc fn = nullptr;
+        static_assert(sizeof(fn) == sizeof(symbol));
+        std::memcpy(&fn, &symbol, sizeof(fn));
+        return fn;
+    }();
+    if (!alloc) {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return nullptr;
+    }
+    return alloc(GetCurrentProcess(), address, size, type, protect, nullptr, 0);
+}
+
 }  // namespace
 
 __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* address, size_t size,
-                                                    uint32_t alloc_type, uint64_t attributes,
+                                                    uint32_t alloc_type, uint64_t /*attributes*/,
                                                     uint32_t protect) {
     XB_XMEM_TRACE("XMemVirtualAlloc", size, alloc_type);
     const size_t gran = page_granularity(alloc_type);
-    const uint32_t wt = win_alloc_type(alloc_type);
+    const uint32_t placeholder = alloc_type & (MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER);
+    const uint32_t wt = win_alloc_type(alloc_type) | placeholder;
     const uint32_t wp = win_protect(protect);
 
     size_t base = reinterpret_cast<size_t>(address);
@@ -440,7 +469,7 @@ __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* address, size_t size,
     }
 
     // 已经在我们保留过的区域里做提交：直接提交这一段
-    if (base && (wt & MEM_COMMIT)) {
+    if (!placeholder && base && (wt & MEM_COMMIT)) {
         void* got = VirtualAlloc(reinterpret_cast<void*>(base), len, wt, wp);
         if (got) {
             static int n = 0;
@@ -453,7 +482,24 @@ __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* address, size_t size,
     }
 
     void* p = nullptr;
-    if (wt & MEM_RESERVE) {
+    if (placeholder) {
+        // The title splits these reservations with VirtualFree(MEM_PRESERVE_PLACEHOLDER).
+        // Replacing a split range requires the exact address in that reservation.
+        p = allocate_placeholder(address, round_up(size, gran), wt, wp);
+        if (p) {
+            std::lock_guard<std::mutex> lock(g_arena_mu);
+            const size_t len_now = round_up(size, gran);
+            // 取**最大**的占位区：游戏先预留几块小的，真正的描述符 arena 是那块 0.19 GB 的。
+            // 先前的版本取了第一块（10 MB），导致"arena 不够：需要 32000000，剩余 10485760"。
+            if (len_now > g_descriptor_arena_size) {
+                g_descriptor_arena_base = p;
+                g_descriptor_arena_size = len_now;
+                g_descriptor_arena_used = 0;
+                xbgtasix::logf("[xmem] 描述符 arena 候选：%p 大小 %.1f MB", p,
+                               len_now / 1048576.0);
+            }
+        }
+    } else if (wt & MEM_RESERVE) {
         const size_t align = (base == 0 && gran > XMEM_PAGE_SIZE) ? gran : 0;
         p = reserve_aligned(len, align, wt, wp);
     } else {
@@ -468,8 +514,8 @@ __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* address, size_t size,
         return nullptr;
     }
 
-    // 只保留未提交的区域登记起来：真被访问时按 64 KB 页补提交
-    if ((wt & MEM_COMMIT) == 0) {
+    // A placeholder becomes eligible for lazy commit after replacement.
+    if ((wt & (MEM_COMMIT | MEM_RESERVE_PLACEHOLDER)) == 0) {
         std::lock_guard<std::mutex> lock(g_res_mu);
         g_reserved.push_back(Region{static_cast<uint8_t*>(p), len});
         if (!g_veh_installed.exchange(true)) {
@@ -477,8 +523,8 @@ __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* address, size_t size,
         }
     }
 
-    static int logged = 0;
-    if (logged++ < 24) {
+    static std::atomic<unsigned> logged{0};
+    if (placeholder || logged.fetch_add(1, std::memory_order_relaxed) < 24) {
         xbgtasix::logf("[xmem] XMemVirtualAlloc(addr=%p size=%.2f GB type=0x%x->0x%x prot=0x%x->0x%x "
                        "gran=%zu) -> %p",
                        address, size / (1024.0 * 1024 * 1024), alloc_type, wt, protect, wp, gran, p);
@@ -566,8 +612,21 @@ __declspec(dllexport) void* __cdecl XMemMapPhysicalPages(void* va, size_t num_pa
         return nullptr;
     }
     if (num_pages == 0) return va;
+    if (num_pages > SIZE_MAX / kPhysPage) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
     auto* dst = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(va) &
                                            ~(static_cast<uintptr_t>(kPhysPage) - 1));
+    // Mapping backs a reserved range with accessible memory. Commit before
+    // copying so a write to each new page does not have to fault first.
+    MEMORY_BASIC_INFORMATION region{};
+    if (page_array && VirtualQuery(dst, &region, sizeof(region)) && region.State == MEM_RESERVE &&
+        !VirtualAlloc(dst, num_pages * kPhysPage, MEM_COMMIT, PAGE_READWRITE)) {
+        xbgtasix::logf("[xmem] XMemMapPhysicalPages commit failed addr=%p pages=%zu err=%lu",
+                       dst, num_pages, GetLastError());
+        return nullptr;
+    }
     for (size_t i = 0; i < num_pages; ++i) {
         if (!page_array) continue;
         const uint64_t pfn = page_array[i];
@@ -604,6 +663,26 @@ __declspec(dllexport) bool __cdecl XMemTransferMemory(void* dst, const void* src
     if (!dst || !src || !size) return false;
     std::memcpy(dst, src, size);   // 主机上是 DMA，PC 上用内存拷贝等效
     return true;
+}
+
+
+// 给 d3d12_xs 用：从描述符 arena 里切一块（若没有 arena 就返回 nullptr）。
+// 返回的地址必须落在游戏预留的 VA 内，否则游戏会断言（见文件上方说明）。
+__declspec(dllexport) void* __cdecl XMemReserveDescriptorArena(size_t bytes, size_t align) {
+    std::lock_guard<std::mutex> lock(g_arena_mu);
+    if (!g_descriptor_arena_base || bytes == 0) return nullptr;
+    const size_t a = align ? align : 0x10000;
+    size_t off = (g_descriptor_arena_used + a - 1) & ~(a - 1);
+    if (off + bytes > g_descriptor_arena_size) {
+        xbgtasix::logf("[xmem] 描述符 arena 不够：需要 %zu，剩余 %zu（arena %zu）", bytes,
+                       g_descriptor_arena_size - g_descriptor_arena_used, g_descriptor_arena_size);
+        return nullptr;
+    }
+    void* p = static_cast<uint8_t*>(g_descriptor_arena_base) + off;
+    g_descriptor_arena_used = off + bytes;
+    xbgtasix::logf("[xmem] 描述符 arena 切出 %zu 字节 @ %p（已用 %zu / %zu）", bytes, p,
+                   g_descriptor_arena_used, g_descriptor_arena_size);
+    return p;
 }
 
 }  // extern "C"
