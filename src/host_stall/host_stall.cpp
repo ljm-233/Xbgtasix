@@ -78,7 +78,7 @@ void stall_end() {
 // "本轮超过 2 s 就把计数重来"的规则生效的唯一手段。
 void WINAPI sleep_thunk(DWORD ms) {
     SleepFn real = g_real_sleep;
-    if (true || !real || ms < 1000) {   // MUTATION
+    if (!real || ms < 1000) {
         if (real) {
             real(ms);
         } else {
