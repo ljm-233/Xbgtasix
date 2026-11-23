@@ -95,14 +95,19 @@ IDXGIAdapter1* pick_adapter() {
         a->Release();
     }
     factory->Release();
+    // 只在"真的选中了非软件适配器"时才缓存；枚举失败（best==nullptr）不缓存，
+    // 否则一次瞬时失败会变成永久失败（之后再也不重试，排障时极难定位）。
+    bool owned_by_cache = false;
     {
         std::lock_guard<std::mutex> lock(g_pick_mu);
-        if (!g_picked_valid) {
+        if (!g_picked_valid && best) {
             g_picked = best;          // 缓存持有这份引用
             g_picked_valid = true;
         }
+        // 比较必须在锁内：原来在锁外读 g_picked，另一个线程可能刚把它换掉（数据竞争）
+        owned_by_cache = (best && best == g_picked);
     }
-    if (best && best == g_picked) best->AddRef();   // 给本次调用方
+    if (owned_by_cache) best->AddRef();   // 给本次调用方
     if (best) {
         DXGI_ADAPTER_DESC1 d{};
         best->GetDesc1(&d);

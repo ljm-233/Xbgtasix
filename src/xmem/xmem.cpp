@@ -100,7 +100,10 @@ __declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) 
     if (size == 0) return nullptr;  // [自定]
 
     const size_t align = alignment_from(attributes);
-    if (size > SIZE_MAX - align - sizeof(Header)) {
+    // 溢出检查要覆盖"最终真正提交的字节数"：后面算 committed 时还会再加
+    // align + 64KB-1 并向上取整，只检查 size 是不够的（接近 SIZE_MAX 时会回绕成小值，
+    // VirtualAlloc 成功但返回远小于请求量的块）
+    if (size > SIZE_MAX - align - sizeof(Header) - 2 * kPageGranularity) {
         xbgtasix::logf("[xmem] XMemAlloc size overflow: %zu", size);
         return nullptr;
     }
