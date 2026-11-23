@@ -49,15 +49,24 @@ LRESULT CALLBACK ui_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_COMMAND: {
             const int id = LOWORD(wp);
-            if (st && id >= 100 && id <= 102) {
+            const int code = HIWORD(wp);
+            // 只认真正的点击。之前不判断通知码，EDIT 创建时发的 EN_CHANGE
+            // 被误当成"用户点了确定"，导致还没等人操作就把控件初始文本当结果返回。
+            if (st && id >= 100 && id <= 102 && code == BN_CLICKED) {
                 st->clicked = id - 100;
                 st->done = true;
                 return 0;
             }
-            if (st && id == 200 && st->edit) {   // 输入框回车/确定
-                char buf[512] = {0};
-                GetWindowTextA(st->edit, buf, sizeof(buf) - 1);
-                st->text = buf;
+            if (st && id == 201 && code == BN_CLICKED && st->edit) {
+                // 用宽字符读，再转 UTF-8：GetWindowTextA 在非中文系统上会把中文变成 ??
+                wchar_t wbuf[512] = {0};
+                GetWindowTextW(st->edit, wbuf, 511);
+                const int bytes = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, nullptr, 0, nullptr, nullptr);
+                if (bytes > 1) {
+                    std::string out(bytes - 1, 0);
+                    WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, out.data(), bytes, nullptr, nullptr);
+                    st->text = out;
+                }
                 st->done = true;
                 return 0;
             }
@@ -383,6 +392,10 @@ bool system_ui_show_text_entry(const char* title, const char* description, const
             SendMessageW(st.edit, EM_SETLIMITTEXT, static_cast<WPARAM>(max_len), 0);
             SetFocus(st.edit);
         }
+        // 必须有显式的确定按钮：不能靠 EDIT 的通知当确认（EN_CHANGE 会在创建时就发）
+        CreateWindowExW(0, L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 600, 100,
+                        80, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(201)),
+                        GetModuleHandleW(nullptr), nullptr);
     };
 
     xbgtasix::logf("[sysui] 输入框: 标题=\"%s\" 默认=\"%s\"", title ? title : "",
