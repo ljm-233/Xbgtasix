@@ -84,11 +84,13 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 
 只跑子集：`./tools/run_suite.sh --only t27,t31`；强制核显：`XBGTASIX_ADAPTER=0 ./tools/run_suite.sh`。
 
-拿到 exe 之后：
+拿到 exe 之后（用启动器，纯 C++ 无依赖）：
 
 ```bash
-python tools/analyze_exe.py <exe>          # 静态核对导入面（10 秒，不用跑）
-./tools/launch.sh <exe> --timeout 180      # 跑起来并按退出码分类
+build/xbgtasix.exe check  <exe>     # 静态核对导入面（10 秒，不用跑）
+build/xbgtasix.exe run    <exe>     # 跑起来并按退出码分类
+build/xbgtasix.exe verify "<包目录>" # 按 layout 清单核对完整性
+build/xbgtasix.exe doctor           # 环境自检
 ```
 
 流程见 [exe-day-checklist](docs/exe-day-checklist.md)。
@@ -124,6 +126,7 @@ python tools/analyze_exe.py <exe>          # 静态核对导入面（10 秒，�
 | [assets-inventory](docs/assets-inventory.md) | 333 载具 / 160 服装 / 57 GB TTPF 贴图 |
 | [gpu-adaptation](docs/gpu-adaptation.md) | 默认会选中核显的坑；两块 GPU 交叉验证 |
 | [gpu-memory](docs/gpu-memory.md) | 账面 7.0 GB / 实测 6.0 GB；224 GB 资产 → 必须流式加载 |
+| [launcher](docs/launcher.md) | **xbgtasix.exe**：run / check / verify / doctor 四条命令与失败分类 |
 | [how-it-runs](docs/how-it-runs.md) | **机制**：为什么不需要 PE loader、依赖怎么被满足、五个检查点 |
 | [feasibility](docs/feasibility.md) | **可行性判定 + 性能实测**：已证 / 无法判定 / 不可行 三层 |
 | [graphics-pitfalls](docs/graphics-pitfalls.md) | **9 个"不报错只黑屏"的坑** |
@@ -170,6 +173,7 @@ Xbgtasix/
   tools/launch.sh              放进 shim 环境跑起来 + 失败分类
   tools/ci_build.sh            CI 同款构建+测试（分"需 GDK / 不需 GDK"两层）
   tools/ci_watch.sh            短轮询 CI 状态（默认最多 240s，超时先干别的）
+  src/host/                    **xbgtasix.exe**：启动器（run/check/verify/doctor）+ PE 解析
   tools/run_suite.sh           一条命令跑全套 + TSV 报告
   tools/check_real_dlls.py     用真实游戏侧 DLL 验证导出面（静态 + 动态）
   tools/selftest_tools.py      Python 工具自检（CI 门槛）

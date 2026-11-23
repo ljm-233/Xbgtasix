@@ -348,6 +348,20 @@ echo "== t3_xmem.exe"
     -ldxgi -ldxguid -ld3d12 \
     -o "$OUT/t3_xmem.exe"
 
+echo "== t39 探针（给 xbgtasix.exe 的测试用）"
+"$CXX" "${FLAGS[@]}" tests/t39_host_tool/probes.cpp -L"$OUT" -lxgameruntime -o "$OUT/probe_ok.exe"
+"$CXX" "${FLAGS[@]}" -DPROBE_UNIMPL tests/t39_host_tool/probes.cpp \
+    -L"$OUT" -lxgameruntime -o "$OUT/probe_unimpl.exe"
+
+echo "== t39_host_tool.exe（启动器的测试）"
+"$CXX" "${FLAGS[@]}" tests/t39_host_tool/main.cpp src/trace.cpp -static \
+    -o "$OUT/t39_host_tool.exe"
+
+echo "== xbgtasix.exe（启动器/诊断工具）"
+"$CXX" "${FLAGS[@]}" src/host/main.cpp src/host/pe.cpp \
+    -Id3d12 -ld3d12 -ldxgi -ldxguid -static \
+    -o "$OUT/xbgtasix.exe"
+
 echo
 echo "done: $OUT/"
 # 注意：set -e 下 `ls *.cso` 在没有 shader 产出时会非零退出，把成功构建变成失败
