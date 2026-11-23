@@ -9,6 +9,16 @@ export PYTHONIOENCODING=utf-8
 # 优先 python3：有些 Windows 机器只有 python3，而 "python" 可能命中应用商店占位符
 PY=$(command -v python3 || command -v python || echo python)
 CXX=${CXX:-g++}
+# 断言工具链目标是 x86_64-w64-mingw32：落到 32 位或别的 CRT 变体时，
+# 构建"成功"也会产出不能用的产物（历史上踩过 libwinpthread 依赖那类问题）
+if command -v "$CXX" >/dev/null 2>&1; then
+  TRIPLE=$("$CXX" -dumpmachine 2>/dev/null || echo "?")
+  case "$TRIPLE" in
+    x86_64-w64-mingw32*) : ;;
+    *) echo "错误：g++ 目标三元组是 $TRIPLE，需要 x86_64-w64-mingw32*（用 CXX= 指定）" >&2; exit 1 ;;
+  esac
+  echo "工具链: $TRIPLE ($("$CXX" -dumpversion 2>/dev/null))"
+fi
 OUT=build
 # 注意：MinGW 的 g++ 不认 MSYS 风格 /d/... 路径，必须用 D:/... 或相对路径
 gdk_inc_default="$(cd .. && pwd)/gdk/include_clean"

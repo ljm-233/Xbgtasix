@@ -239,11 +239,7 @@ struct Gfx {
 
 Gfx g_gfx;                 // 单实例：系统侧 UI 同时只会有一个面板
 
-bool ensure_class() {
-    static bool tried = false;
-    static bool ok = false;
-    if (tried) return ok;
-    tried = true;
+bool ensure_class_impl() {
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = ui_proc;
@@ -253,14 +249,29 @@ bool ensure_class() {
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     const ATOM a = RegisterClassExW(&wc);
-    ok = (a != 0) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    return (a != 0) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+bool ensure_class() {
+    // std::call_once：原来用 static bool 的"tried"标记，两个线程会同时进来注册窗口类
+    static std::once_flag once;
+    static bool ok = false;
+    std::call_once(once, [] { ok = ensure_class_impl(); });
     return ok;
 }
 
 // 统一的"开窗 -> 摆控件 -> 跑消息循环 -> 收尾"流程
 bool run_panel(UiState& st, const wchar_t* title, std::function<void(HWND)> build_controls,
                uint32_t timeout_ms) {
-    (void)build_controls;
+    // g_gfx 是进程级单例，但每个 UI 请求都会起一个线程；没有互斥时
+    // A 线程 shutdown() 释放设备、B 线程仍在 present_frame -> UAF。
+    // 抢不到锁就当"已有面板在显示"，直接降级（调用方用默认值完成），不阻塞 worker 60 秒。
+    static std::mutex panel_mu;
+    std::unique_lock<std::mutex> panel_lock(panel_mu, std::try_to_lock);
+    if (!panel_lock.owns_lock()) {
+        xbgtasix::logf("[sysui] 已有面板在显示，本次降级为默认值");
+        return false;
+    }
     if (!ensure_class()) {
         xbgtasix::logf("[sysui] 无法注册窗口类 -> 降级");
         return false;

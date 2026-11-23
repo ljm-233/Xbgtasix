@@ -29,7 +29,6 @@ constexpr bool kNeedsMeshShader = true;     // 34.8% 是 NGG
 constexpr bool kNeedsRaytracing = true;     // 64 个 BVH64
 
 int g_fail = 0;
-int g_skip = 0;
 
 void verdict(bool ok, const char* what, const std::string& detail) {
     if (ok) {
