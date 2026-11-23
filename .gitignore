@@ -6,6 +6,11 @@ build/
 *.dll.a
 *.log
 
+# Windows 快捷方式 / 备份文件：都不该进仓库
+# （xbgtasix.exe.lnk 曾被 git add -A 扫进去过一次）
+*.lnk
+*.xbgtasix-backup
+
 # Python
 __pycache__/
 *.pyc
