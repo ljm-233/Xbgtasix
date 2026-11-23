@@ -88,3 +88,29 @@ git -c http.sslBackend=openssl -> "Ignoring unavailable SSL backend 'openssl'"
 自己 `os.makedirs` 同样的路径则正常。
 
 **规则**：受限环境里不要用 `mkdtemp`，自己 `makedirs` 一个带名字的目录。
+
+## 8. `%TEMP%` 不可写会让"别人的移植层"在启动阶段就失败（报错指向错误方向）
+
+现象（2026-11-24，跑 Leonida 的 `gta6rt` 加载本包的真实 EXE）：
+
+```
+xmem.dll: gta6rt_tls_host.dll is missing or has no module TLS index
+```
+
+看起来像"少了个 DLL"。实测不是：那个 DLL 就在 `gta6rt.exe` 旁边，而且是好的。
+
+| 检查 | 结果 |
+|---|---|
+| `LoadLibraryEx(旁边那个 DLL)` | ✅ 成功，`IMAGE_DIRECTORY_ENTRY_TLS` 存在，**module TLS index = 2** |
+| `CopyFileW(DLL → %TEMP%\leonida_tls_host_<pid>_1.dll)` | ❌ **err=5（拒绝访问）** |
+| 把 `TMP`/`TEMP` 指到 `D:\GTA6\leo-run\tmp` 后重试 | ✅ 复制成功，克隆加载 index=6 |
+
+原因：静态 TLS 的进程内槽位是稀缺资源，这类层通常**为每个并发模块克隆一份同名 DLL 到临时目录**，
+由 Windows 给每次加载分配独立索引。`%TEMP%` 写不进去，第 2 个及以后的模块就拿不到索引，
+报错却说是"文件缺失"。
+
+**规则**：在受限环境里跑这类工具前，先 `export TMP=... TEMP=...` 指到工作区内；
+看到"缺文件"先验证"文件是否真的缺"，别照着错误信息去补文件。
+
+顺带一条同一晚踩到的：`git clone` 走 schannel 会 `SEC_E_NO_CREDENTIALS`，
+而 `gh api .../tarball/main` 能下（见第 4 条）。
