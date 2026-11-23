@@ -625,6 +625,7 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
             int software = 0;
             // 同一颗芯片会被枚举多次（不同 LUID），用 厂商:设备:子系统 去重才等于"物理显卡数"
             std::vector<unsigned long long> hw_keys;
+            int shown = 0;   // 实际打印了几行（软件适配器不打印）
             IDXGIAdapter1* a = nullptr;
             while (f->EnumAdapters1(static_cast<UINT>(idx), &a) != DXGI_ERROR_NOT_FOUND && a) {
                 DXGI_ADAPTER_DESC1 d{};
@@ -640,9 +641,16 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
                 }
                 const bool is_sw = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
                 if (is_sw) {
+                    // 软件渲染器（Microsoft Basic Render Driver）不列出来：它不是"卡"，
+                    // 列出来只会让人以为机器上多插了一张。数量在结论行里交代。
                     ++software;
-                } else {
-                    ++hardware;
+                    a->Release();
+                    a = nullptr;
+                    ++idx;
+                    continue;
+                }
+                ++hardware;
+                {
                     const unsigned long long key =
                         (static_cast<unsigned long long>(d.VendorId) << 48) |
                         (static_cast<unsigned long long>(d.DeviceId) << 32) |
@@ -651,10 +659,10 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
                         hw_keys.push_back(key);
                     }
                 }
-                say("  GPU[%d]        %s%s（%s %04X:%04X，显存 %.1f GB，%u 个输出）", idx,
-                    to_utf8(d.Description).c_str(), is_sw ? " [软件]" : "",
+                say("  GPU[%d]        %s（%s %04X:%04X，显存 %.1f GB，%u 个输出）", shown++,
+                    to_utf8(d.Description).c_str(),
                     d.VendorId == 0x10DE ? "NVIDIA" : d.VendorId == 0x8086 ? "Intel"
-                    : d.VendorId == 0x1002 ? "AMD"   : d.VendorId == 0x1414 ? "Microsoft" : "其它",
+                    : d.VendorId == 0x1002 ? "AMD"   : "其它",
                     d.VendorId, d.DeviceId, d.DedicatedVideoMemory / 1024.0 / 1024 / 1024, outs);
                 a->Release();
                 a = nullptr;
@@ -665,10 +673,14 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
                 ++critical;
             } else {
                 // 同一颗芯片可能被枚举多次（不同 LUID），所以"适配器数"不等于"物理显卡数"
-                say("  适配器        %d 个：物理显卡 %d 张（对应 %d 个硬件适配器）+ 软件 %d 个",
-                    idx, static_cast<int>(hw_keys.size()), hardware, software);
+                say("  适配器        物理显卡 %d 张（%d 个硬件适配器）%s", static_cast<int>(hw_keys.size()),
+                    hardware,
+                    software > 0 ? "；已忽略软件渲染器" : "");
                 if (hardware > static_cast<int>(hw_keys.size())) {
                     say("                （有的卡被枚举了多次，属正常现象，不是多插了显卡）");
+                }
+                if (shown == 0) {
+                    say("  GPU           只有软件渲染器（Microsoft Basic Render Driver）");
                 }
                 if (hardware == 0) {
                     say("  [!]           没有任何硬件适配器，只有软件渲染 —— 游戏基本跑不动");
