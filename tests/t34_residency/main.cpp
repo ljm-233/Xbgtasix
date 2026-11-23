@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t34_residency — 显存驻留：MakeResident / Evict 与预算回收
 //
 // 这是"显存环节"的核心：主机上用 residency 管理"哪些资源在显存里"，

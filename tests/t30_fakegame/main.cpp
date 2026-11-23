@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t30_fakegame — 一个"假游戏"：走完真实 GDK 程序的启动序列
 //
 // 目的：在真 exe 到手之前，先用它验证**启动器**（tools/launch.sh）整条链路：

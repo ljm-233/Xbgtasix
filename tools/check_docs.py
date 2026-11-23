@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """检查 Markdown 里的相对链接是否都指向真实存在的文件。
 
 CI 用：文档一多，最容易出现"改了文件名但链接没改"。

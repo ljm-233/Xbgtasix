@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // xbgtasix.exe —— 转译层的"程序"入口
 //
 // 为什么需要它：三个 shim 是库，不是程序；tools/*.sh 要 bash、*.py 要 Python。

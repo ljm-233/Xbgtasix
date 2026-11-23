@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """用真实游戏侧 DLL 验证 shim 的导出面（不运行游戏，只做加载与符号核对）。
 
 做两件事：

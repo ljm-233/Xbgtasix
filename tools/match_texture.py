@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """按名字给模型找最可能的贴图（OBJ 不带材质信息时的兜底办法）。
 
 思路：把模型名和贴图名都切成 token，去掉"尺寸/版型"这类噪声词

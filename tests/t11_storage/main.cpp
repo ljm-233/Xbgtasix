@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t11_storage — 持久化本地存储（PLS）用真配置验证
 //
 // 验证点：

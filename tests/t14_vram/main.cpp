@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t14_vram — 显存预算：问驱动要额度，再实测能真分配多少
 //
 // 三件事：

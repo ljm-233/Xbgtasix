@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t24_save2 — 存档（XGameSave 容器式）端到端
 //
 // 目录式（t19_save / XGameSaveFiles）是"给游戏一个目录自己读写"；主机真正用的是容器式：

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t26_stream — XGameStreaming / XAppCapture / XNetworking 的"安全降级"冒烟测试
 //
 // 这三个模块在 PC 上没有对应物，所以测试重点不是"能用"，而是**能诚实地说明没有**：

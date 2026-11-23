@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t28_speech — XSpeechSynthesizer 用 SAPI 真合成
 //
 // 这个测试不看返回值就完事：它要求**真的产出一段 WAV 字节**，

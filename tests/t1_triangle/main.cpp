@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t1_triangle — L3：root signature + PSO + descriptor heap + draw + 回读校验
 //
 // 全部离屏渲染（不建 swapchain），所以无桌面会话也能跑，并且能真正验证像素：

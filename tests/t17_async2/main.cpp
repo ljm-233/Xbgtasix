@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t17_async2 — 通用异步机制（XAsyncRun / XAsyncGetResultSize / XAsyncCancel）
 //
 // 为什么重要：真实 GDK 里所有 *Async 都是同一套 XAsyncBlock 机制驱动的，
@@ -97,8 +98,16 @@ int main() {
     Sleep(10);
     XAsyncCancel(&slow);
     ok(XAsyncGetStatus(&slow, false) == E_ABORT, "取消后状态是 E_ABORT");
+
+    // 等取消回调真的跑到（慢任务在后台线程里，Cancel 只是标记）。
+    // 之前不等就断言、而且进程随即退出：后台线程还在写日志/收尾时进程结束，
+    // 表现为"偶发一条输出都没有"（套件的'必须有断言输出'门槛把它暴露出来了）。
+    for (int i = 0; i < 1000; ++i) {
+        if (g_callbacks.load() >= 2) break;
+        Sleep(2);
+    }
     xbgtasix::logf("[t17] 取消后回调计数 %d（应为 2）", g_callbacks.load());
-    ok(g_callbacks.load() >= 2, "取消也会触发回调");
+    ok(g_callbacks.load() == 2, "取消也会触发回调，且恰好一次（不重复）");
 
     ok(std::strcmp(g_payload.text, "xbgtasix async result") == 0, "结果载荷可读");
     xbgtasix::logf("[t17] done failures=%d -> %s", g_fail, g_fail ? "FAIL" : "PASS");

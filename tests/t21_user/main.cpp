@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t21_user — XUser 本地语义 + 能力门
 //
 // 覆盖 XUser 里"不需要网络也能有真语义"的部分，以及 XGameRuntimeIsFeatureAvailable。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t12_sheet — 把一堆 PNG 拼成网格缩略图（WIC 解码 + 缩放 + 编码）
 //
 // 用途：批量渲染的载具模型、导出的贴图库，都需要"一眼看全部"。

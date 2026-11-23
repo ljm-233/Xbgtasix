@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t18_package — XPackage 包挂载与虚拟路径
 //
 // 游戏读自己资源包的第一步是"我这个包在哪"：

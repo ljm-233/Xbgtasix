@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // ui_extra.cpp —— XGameUI 剩余面板（由子代理填写）
 // 约定：只在本文件实现，导出名写进 exports_ui.txt。
 //

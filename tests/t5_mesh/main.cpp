@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t5_mesh — L6：D3D12 mesh shader 管线
 //
 // 依据：docs/shader-corpus.md 统计出 21,522 条着色器里 7,498 条（34.8%）是 NGG mesh shader。

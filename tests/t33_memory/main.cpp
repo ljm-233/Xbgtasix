@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t33_memory — CPU 内存的两个真实风险：ABA 假释放、泄漏
 //
 // 主机上 XMem 是统一内存，游戏可能长时间运行；PC 上我们只有 VirtualAlloc。

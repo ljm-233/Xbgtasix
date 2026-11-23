@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t3_xmem — XMem 行为回归 + 压力测试
 //
 // 目的：xmem.h 锁在 NDA 里，签名和语义都是推定值。既然无法对照官方，

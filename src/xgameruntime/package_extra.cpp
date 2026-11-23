@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // package_extra.cpp —— XPackage 的 chunk / 安装 / 枚举
 //
 // 原则（与 xgameruntime.cpp 一致）：

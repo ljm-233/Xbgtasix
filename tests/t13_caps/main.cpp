@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t13_caps — 显卡适配：枚举适配器、报告能力等级、对照本项目需求给出 PASS/FAIL
 //
 // 解决两个真实问题：

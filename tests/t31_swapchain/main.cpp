@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t31_swapchain — 窗口交换链：主机没有 swapchain，PC 必须有
 //
 // 之前 30 个测试全是离屏渲染（render target -> readback），从没走过

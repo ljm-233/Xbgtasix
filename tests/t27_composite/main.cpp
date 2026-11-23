@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t27_composite — 复合队列（CreateComposite + GetPort）
 //
 // 复合队列本身不排队：提交给它的任务被转发到"来源端口"所在的队列，

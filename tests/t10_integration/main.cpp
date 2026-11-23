@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t10_integration — 用一个"最小 GDK 程序"的形状去验证兼容层
 //
 // 与 t9 的区别：t9 测的是单点 API；这里走一遍真实 GDK 程序的启动序列，并且

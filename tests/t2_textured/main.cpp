@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t2_textured — L4：描述符表 + CBV + SRV + 采样器 + 深度缓冲
 //
 // 验证方式（全部离屏，无桌面可跑）：

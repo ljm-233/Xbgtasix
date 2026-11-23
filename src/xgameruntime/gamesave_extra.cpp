@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // gamesave_extra.cpp —— XGameSave 的"容器式"接口（provider / container / blob）
 //
 // 已有的目录式存档（XGameSaveFiles，xgameruntime.cpp:932-999）是"给游戏一个目录，游戏自己

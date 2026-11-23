@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """从 xgameruntime.lib 里扫出 _GUID_xxx，生成真正的 GUID 数据定义，并补进 .def。
 
 名字本身就是值：_GUID_014d1cc3_bcfe_41ff_b2f0_e1ef07155828

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t38_xboxui —— Xbox 风格 shell 窗口（自绘，无第三方依赖）
 //
 // 目的：把"Xbox UI 窗口"从概念变成能看见的东西，并且**能截图**。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // t19_save — 存档（XGameSaveFiles）端到端
 //
 // 主机上存档走"云存档容器"；GDK 提供了一套目录式的简化接口，

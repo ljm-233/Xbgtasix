@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // streaming_extra.cpp —— XGameStreaming / XAppCapture / XNetworking 的"安全降级"
 //
 // 这三个模块在 PC 上都没有对应物。正确的降级不是"假装有"，而是**明确告诉调用方没有**：
