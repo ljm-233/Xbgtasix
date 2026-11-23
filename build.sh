@@ -318,6 +318,12 @@ echo "== t35_gamepad.exe"
     -ldxgi -ldxguid -ld3d12 -lole32 \
     -o "$OUT/t35_gamepad.exe"
 
+echo "== t36_ui_host.exe"
+"$CXX" "${FLAGS[@]}" tests/t36_ui_host/main.cpp src/trace.cpp \
+    -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
+    -ldxgi -ldxguid -ld3d12 \
+    -o "$OUT/t36_ui_host.exe"
+
 echo "== t3_xmem.exe"
 "$CXX" "${FLAGS[@]}" tests/t3_xmem/main.cpp src/trace.cpp \
     -L"$OUT" -lxgameruntime -lxmem -ld3d12_xs \
