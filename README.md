@@ -17,6 +17,7 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 
 项目的做法不是写 PE loader，而是**把同名 DLL 放在目标程序旁边**：
 导入解析、重定位、TLS、SEH 全部交给系统加载器，我们只负责"这些 DLL 里该有什么"。
+机制细节与失败点见 [docs/how-it-runs.md](docs/how-it-runs.md)。
 
 ```
 目标游戏 exe
@@ -123,6 +124,7 @@ python tools/analyze_exe.py <exe>          # 静态核对导入面（10 秒，�
 | [assets-inventory](docs/assets-inventory.md) | 333 载具 / 160 服装 / 57 GB TTPF 贴图 |
 | [gpu-adaptation](docs/gpu-adaptation.md) | 默认会选中核显的坑；两块 GPU 交叉验证 |
 | [gpu-memory](docs/gpu-memory.md) | 账面 7.0 GB / 实测 6.0 GB；224 GB 资产 → 必须流式加载 |
+| [how-it-runs](docs/how-it-runs.md) | **机制**：为什么不需要 PE loader、依赖怎么被满足、五个检查点 |
 | [feasibility](docs/feasibility.md) | **可行性判定 + 性能实测**：已证 / 无法判定 / 不可行 三层 |
 | [graphics-pitfalls](docs/graphics-pitfalls.md) | **9 个"不报错只黑屏"的坑** |
 | [env-gotchas](docs/env-gotchas.md) | 7 个环境/工具链的坑（沙箱按进程放行、git TLS、mingw 头文件不一致…） |
