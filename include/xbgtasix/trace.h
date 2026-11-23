@@ -20,6 +20,10 @@ UnimplMode unimpl_mode();
 void set_game_root(const char* path);
 const char* game_root();
 
+// 由 DllMain 在进程早期调用：把主机盘符（G: 持久存储 / T: 临时盘）映射到 PC 目录。
+// 实测游戏启动期会直接探测 G:\appdata0.rpf 与 T:\<guid>.dmp。
+void install_console_drives();
+
 } // namespace xbgtasix
 
 #define XB_UNIMPL(api) ::xbgtasix::unimpl(api)

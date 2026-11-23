@@ -174,9 +174,10 @@ UnimplMode unimpl_mode_cached() {
 // 用 XBGTASIX_VEH=1 打开（默认关闭：它改变异常处理路径）。
 // ---------------------------------------------------------------------------
 LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
-    static bool once = false;
-    if (once) return EXCEPTION_CONTINUE_SEARCH;
-    once = true;
+    // 只记一次会漏：第一个异常可能是可恢复的（例如 xmem 的按需提交 AV），
+    // 它把额度用掉，真正致命的那次就不打印了。改成前 N 次都记。
+    static int count = 0;
+    if (count++ >= 8) return EXCEPTION_CONTINUE_SEARCH;
     const DWORD code = info->ExceptionRecord->ExceptionCode;
     // 只报"致命类"：断言断点与访问冲突
     if (code != EXCEPTION_BREAKPOINT && code != EXCEPTION_ACCESS_VIOLATION &&

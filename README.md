@@ -10,25 +10,36 @@
 
 ---
 
+## 当前进展（2026-11-24）
+
+**真实 Xbox Series 游戏 EXE 已在 Windows 上执行到资源归档读取阶段，但还没有游戏出画面或可游玩的记录。**
+
+- **真实启动**：本地开发构建已通过早期的内存分配和 DirectStorage 工厂初始化。修正资源路径后，真实 EXE 已实际读取 `appdata0.rpf`、`common.rpf`、`levels.rpf` 等归档的开头；这不代表归档已完整加载，也不代表相关修复已合入 `main` 或通过 CI。
+- **图形验证**：独立测试已覆盖 D3D12 绘制、交换链 `Present` 和部分游戏资产渲染。这些不是由真实游戏 EXE 驱动的画面。
+- **下一个验收点**：从资源读取继续推进，确认真实 EXE 能用游戏自身的着色器创建图形管线并呈现第一帧。
+
+---
+
 ## 这个项目在解决什么
 
-Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xgameruntime.dll`、
-`xmem.dll`、`d3d12_xs.dll`。Windows 加载器找不到这些模块，程序根本起不来。
+目标是让 Xbox Series 的 x64 游戏 EXE 在 Windows 上运行。CPU 指令无需翻译，
+但它依赖桌面 Windows 不提供的 Xbox GDK 接口，包括 `xgameruntime.dll`、`xmem.dll` 和 `d3d12_xs.dll`。
 
-项目的做法不是写 PE loader，而是**把同名 DLL 放在目标程序旁边**：
-导入解析、重定位、TLS、SEH 全部交给系统加载器，我们只负责"这些 DLL 里该有什么"。
+项目不另写 PE 加载器：兼容 DLL 放在目标程序旁边，导入解析、重定位和 TLS 交给 Windows，
+由兼容层实现所需的主机接口，并把可映射的图形调用接到桌面 D3D12。
 机制细节与失败点见 [docs/how-it-runs.md](docs/how-it-runs.md)。
 
 ```
 目标游戏 exe
-   ├── xgameruntime.dll   461 个导出（268 手写 + 143 生成桩 + 50 个 GUID 数据）
-   ├── xmem.dll             4 个导出（64 KB 页语义的内存分配）
-   └── d3d12_xs.dll        18 个导出（4 个手写 + 14 个转发到系统 d3d12.dll）
+   ├── xgameruntime.dll   GDK 运行时（任务、用户、存储等）
+   ├── xmem.dll           Xbox 内存分配与页语义
+   ├── d3d12_xs.dll       Xbox D3D12 入口与桌面 D3D12 对接
+   └── 其他主机兼容模块    包括 DirectStorage 接口
 ```
 
 ---
 
-## 现状（全部有测试）
+## 兼容层与独立测试
 
 | 级别 | 能力 | 测试 |
 |---|---|---|
@@ -65,16 +76,12 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 | L31 | 窗口交换链（flip-model 两帧 Present） | `t31_swapchain` |
 | L32 | 窗口生命周期 + CPU 并行 | `t32_window` |
 
-**唯一缺口：游戏可执行文件。**
-[package-completeness](docs/package-completeness.md) 用包自带 layout 清单核对：
-104 个条目里只缺 `game_scarlett_master.exe` 一个。
-
 ---
 
 ## 快速开始
 
 ```bash
-./build.sh                 # MinGW64 + g++ + dxc，产出 3 个 shim（约 90 秒）
+./build.sh                 # MinGW-w64 + g++ + dxc：构建兼容 DLL、启动器和测试
 ./tools/run_suite.sh       # 40 步测试一条命令，约 20 秒
 ./tools/ci_build.sh        # CI 同款：无 GDK 也能验 xmem 子集
 ```
@@ -84,11 +91,11 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 
 只跑子集：`./tools/run_suite.sh --only t27,t31`；强制核显：`XBGTASIX_ADAPTER=0 ./tools/run_suite.sh`。
 
-拿到 exe 之后（用启动器，纯 C++ 无依赖）：
+对自己有权使用的本地游戏副本，先用启动器静态检查。`verify` 和 `check` 不启动游戏。
+`run` 和 `firstrun` 会运行目标程序，仅适合在隔离的测试环境中诊断，不是游玩入口。
 
 ```bash
-# 首次运行若被 Defender SmartScreen 拦下：见 docs/smartscreen.md
-build/xbgtasix.exe check    <exe>      # 静态核对导入面（10 秒，不用跑）
+build/xbgtasix.exe check    <exe>      # 静态核对导入面，不运行目标 EXE
 build/xbgtasix.exe run      <exe>      # 跑起来并按退出码分类（覆盖同名 DLL 前备份为 *.xbgtasix-backup）
 build/xbgtasix.exe verify   "<包目录>"  # 按 layout 清单核对完整性
 build/xbgtasix.exe doctor              # 环境自检
@@ -124,7 +131,7 @@ build/xbgtasix.exe firstrun "<包目录>"  # verify → doctor → check → run
 
 | 文档 | 一句话结论 |
 |---|---|
-| [package-completeness](docs/package-completeness.md) | 104 条清单只缺 1 个：exe |
+| [package-completeness](docs/package-completeness.md) | 早期样本的 104 项清单核对记录（该样本缺 EXE，不是当前启动状态） |
 | [encryption-map](docs/encryption-map.md) | `levels.rpf`（76 GB）**99% 明文**；稳定加密的只有目录表 |
 | [rpf9-findings](docs/rpf9-findings.md) | 目录表加密；载荷可雕刻，路径来自载荷内部 |
 | [shader-corpus](docs/shader-corpus.md) | 21,522 条 RDNA2 着色器：mesh 34.8%、光追 64 个、绑定槽 p99=98 |
@@ -147,8 +154,8 @@ build/xbgtasix.exe firstrun "<包目录>"  # verify → doctor → check → run
 | [xmem-evidence](docs/xmem-evidence.md) | XMem 语义，每条标 `[事实]/[推断]/[自定]` |
 | [d3d12xs-evidence](docs/d3d12xs-evidence.md) | D3D12.x 与桌面 D3D12 的差异面 |
 | [report](docs/report.md) | 叙事版技术报告 |
-| [where-is-the-exe](docs/where-is-the-exe.md) | 全包 PE 扫描结果 |
-| [exe-day-checklist](docs/exe-day-checklist.md) | exe 到手后的 6 步流程 |
+| [where-is-the-exe](docs/where-is-the-exe.md) | 早期样本的 PE 扫描记录 |
+| [exe-day-checklist](docs/exe-day-checklist.md) | EXE 的静态检查与启动诊断流程 |
 | [publish](docs/publish.md) | 发布与认证方式 |
 | [anyps5-notes](docs/anyps5-notes.md) | 同类项目 AnyPS5 的分层与教训 |
 | [gdk_api_surface](docs/gdk_api_surface.md) | 包内 16 个 DLL 的导入/导出面 |
@@ -169,8 +176,9 @@ Xbgtasix/
   build.sh                     MinGW 构建（手写 + 生成桩 + GUID 数据 + dxc 编 shader）
   include/xbgtasix/trace.h     日志 / 未实现策略（stop | log）
   src/xgameruntime/            268 个手写实现（10 个 .cpp，按模块拆分）
-  src/xmem/                    XMem* → VirtualAlloc（64 KB 页语义）
-  src/d3d12_xs/                手写 4 个 + forward.def 14 个转发 + 选卡缓存
+  src/xmem/                    XMem 内存分配、映射及页语义
+  src/d3d12_xs/                Xbox D3D12 入口、桌面转发与适配器选择
+  src/console_hw/              主机音频、存储、GPU 纹理等兼容模块
   src/generated/               143 个桩（按返回类型给默认值）+ 50 个 GUID 数据
   tests/t0…t40/                39 个测试目录（无 t7、t16），全部离屏可跑
   tools/fetch_gdk.py           从 nuget.org 拉官方 GDK 包并解出头文件/导入库
@@ -234,9 +242,9 @@ du -sh .git                                     # 7.2 MB（块占用；du -sb = 
 
 | 做不到 | 原因 |
 |---|---|
-| 启动游戏 | 包内唯一缺失就是 exe |
-| 按路径解 RPF 目录 | 目录表加密，密钥在缺失的 exe 里 |
-| 主机专有 D3D12 接口（`ID3D12DeviceX`） | IID 在 NDA 内 |
+| 完整启动、出画面与游玩 | 真实 EXE 已能读取部分资源归档的开头，但尚未验证完整启动或由游戏驱动的首帧 |
+| RPF 目录与资产研究 | 工具只读取已有数据，不提供目录表解密或密钥 |
+| Xbox 图形兼容性 | 桌面 D3D12 测试通过不代表主机专有接口或游戏预编译着色器已能在真实启动链中正常工作 |
 | `XStore` 购买/授权 | 不伪造授权（设计决定，见 [license-and-store](docs/license-and-store.md)） |
 | 需要 XBL token 的功能 | token 由微软服务按用户签发，离线不可能 |
 
