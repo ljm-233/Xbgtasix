@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// t39_host_tool —— 验证 xbgtasix.exe（启动器）的四条命令
+// t39_host_tool —— 验证 xbgtasix.exe（启动器）的命令
 //
 // 用 C++ 写测试的理由（和用户要求一致）：项目里不引入 Python 依赖。
 // 测试本身就是个 exe：起子进程、抓输出、对断言。
@@ -12,6 +12,9 @@
 //   5. run    ：未实现 API + --stop -> UNIMPL
 //   6. run    ：目标不存在 -> 退出码 2
 //   7. doctor ：输出各检查项
+//   8. restore：有备份 -> 原件改回原名；无备份 -> 删掉我们放的 DLL
+//   9. firstrun：目标不存在 -> 退出码 2
+//  10. --help：列出 restore / firstrun
 #include <windows.h>
 
 #include <cstdio>
@@ -57,6 +60,41 @@ std::string join(const std::string& a, const std::string& b) {
 
 bool contains(const std::string& hay, const char* needle) {
     return hay.find(needle) != std::string::npos;
+}
+
+// restore 的用例要造"原版 DLL / 我们放的 DLL / 备份"三种文件，内容必须能读回来核对，
+// 所以这里给几个最小的小工具（只在 build 目录里用，不碰别处）
+bool write_file(const std::string& p, const char* text) {
+    FILE* f = fopen(p.c_str(), "wb");
+    if (!f) return false;
+    const size_t n = strlen(text);
+    const bool ok = (n == 0) || (fwrite(text, 1, n, f) == n);
+    fclose(f);
+    return ok;
+}
+
+std::string read_file(const std::string& p) {
+    std::string out;
+    FILE* f = fopen(p.c_str(), "rb");
+    if (!f) return out;
+    char buf[4096];
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+    fclose(f);
+    return out;
+}
+
+// 只删本用例造的那几个名字，再做一次非递归的 RemoveDirectory：
+// 写错路径时最多"少删一个"，不会误伤 build 目录里的别的东西
+void cleanup_restore_dir(const std::string& d) {
+    const char* names[] = {"xmem.dll",
+                           "xmem.dll.xbgtasix-backup",
+                           "xgameruntime.dll",
+                           "xgameruntime.dll.xbgtasix-backup",
+                           "d3d12_xs.dll",
+                           "d3d12_xs.dll.xbgtasix-backup"};
+    for (const char* n : names) DeleteFileA(join(d, n).c_str());
+    RemoveDirectoryA(d.c_str());
 }
 
 struct RunResult {
@@ -258,6 +296,72 @@ int main() {
         for (const char* k : keys) {
             ok(contains(r.output, k), (std::string("doctor 输出了「") + k + "」").c_str());
         }
+    }
+
+    // ---- 8) restore：有备份 -> 把原件改回原名 ----
+    {
+        // 同样不用 %TEMP%：本项目进程对临时目录没有写权限（实测 err=5）
+        const std::string g = join(dir, "t39_restore_bak");
+        CreateDirectoryA(g.c_str(), nullptr);
+        write_file(join(g, "xmem.dll"), "OURS");
+        write_file(join(g, "xmem.dll.xbgtasix-backup"), "ORIGINAL-DLL");
+
+        RunResult r = run_capture(host, {"restore", g}, dir);
+        const std::string got = read_file(join(g, "xmem.dll"));
+        ok(r.code == 0, "restore 还原备份时退出码 0", "rc=" + std::to_string(r.code));
+        ok(got == "ORIGINAL-DLL", "restore 把原件改回了原名", "xmem.dll=" + got);
+        ok(!file_exists(join(g, "xmem.dll.xbgtasix-backup")), "restore 用掉了备份文件");
+        ok(contains(r.output, "已还原"), "restore 报告「已还原」");
+        if (!contains(r.output, "已还原")) {
+            xbgtasix::logf("[t39] restore 实际输出：%s", r.output.c_str());
+        }
+        cleanup_restore_dir(g);
+    }
+
+    // ---- 9) restore：只有我们放的 DLL、没有备份 -> 直接删 ----
+    {
+        const std::string g = join(dir, "t39_restore_rm");
+        CreateDirectoryA(g.c_str(), nullptr);
+        write_file(join(g, "xmem.dll"), "OURS");
+
+        RunResult r = run_capture(host, {"restore", g}, dir);
+        ok(r.code == 0, "restore 移除无备份 DLL 时退出码 0", "rc=" + std::to_string(r.code));
+        // 新语义：没有备份、内容又不像我们的 shim 时**不能删**（可能是游戏自带原版）
+        ok(file_exists(join(g, "xmem.dll")), "restore 不删内容不明的 DLL（防误删原版）");
+        ok(contains(r.output, "跳过"), "restore 报告「跳过」并说明原因");
+        ok(contains(r.output, "--force"), "restore 提示可用 --force 强制");
+        cleanup_restore_dir(g);
+    }
+
+    // ---- 9b) 无备份、但内容确实是我们的 shim -> 应当移除 ----
+    {
+        const std::string g = join(dir, "t39_restore_ours");
+        cleanup_restore_dir(g);
+        CreateDirectoryA(g.c_str(), nullptr);
+        ok(CopyFileA(join(dir, "xmem.dll").c_str(), join(g, "xmem.dll").c_str(), FALSE) != 0,
+           "准备：拷贝真实 shim 作为「我们放的那份」");
+        RunResult r = run_capture(host, {"restore", g}, dir);
+        ok(r.code == 0, "restore(内容一致) 退出码 0", "rc=" + std::to_string(r.code));
+        ok(!file_exists(join(g, "xmem.dll")), "restore 删掉了内容一致的 DLL");
+        ok(contains(r.output, "已移除"), "restore 报告「已移除」");
+        ok(contains(r.output, "确认是我们放的副本"), "restore 说明了判定依据");
+        cleanup_restore_dir(g);
+    }
+
+    // ---- 10) firstrun --dry-run 对不存在的 exe -> 硬失败，退出码 2 ----
+    {
+        RunResult r =
+            run_capture(host, {"firstrun", "Z:\\definitely_not_here.exe", "--dry-run"}, dir);
+        ok(r.code == 2, "firstrun 目标不存在时退出码 2", "rc=" + std::to_string(r.code));
+        ok(contains(r.output, "找不到"), "firstrun 给出了明确的「找不到」");
+    }
+
+    // ---- 11) --help 里必须能看见这两个新命令 ----
+    {
+        RunResult r = run_capture(host, {"--help"}, dir);
+        ok(r.code == 0, "--help 退出码 0", "rc=" + std::to_string(r.code));
+        ok(contains(r.output, "restore"), "--help 列出了 restore");
+        ok(contains(r.output, "firstrun"), "--help 列出了 firstrun");
     }
 
     xbgtasix::logf("[t39] done failures=%d probe_missing=%d -> %s", g_fail, probe_missing ? 1 : 0,

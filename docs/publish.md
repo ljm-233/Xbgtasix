@@ -36,7 +36,7 @@ git diff --name-only 0fdc671 HEAD    # 当前只有 1 个文件：src/xgamerunti
 
 ```bash
 cd D:/GTA6/Xbgtasix
-./tools/run_suite.sh             # 39 步，38 PASS / 1 SKIP 才算能发
+./tools/run_suite.sh             # 40 步，38 PASS / 2 SKIP 才算能发
 python tools/check_docs.py       # 文档相对链接
 git add -A && git commit -m "<type>(<scope>): <一句话>"
 ./tools/push.sh ljm-233/Xbgtasix   # export GITHUB_TOKEN=... 后执行，token 只经 stdin
@@ -65,10 +65,10 @@ python tools/push_via_api.py ljm-233/Xbgtasix    # 走 API 逐条重放，避免
 ## 四、推送前自查（2026-11-23 实测值）
 
 ```bash
-git ls-files | wc -l          # 142 个文件
-git ls-files -z | xargs -0 ls -la | sort -k5 -rn | head   # 最大 82 KB（docs/gdk_api_surface.md）
+git ls-files | wc -l          # 143 个文件
+git ls-files -z | xargs -0 ls -la | sort -k5 -rn | head   # 最大 81,698 字节（docs/gdk_api_surface.md，约 80 KB）
 git ls-files | grep -icE '\.(dll|exe|rpf|ttpf|pfx)$|keys' # 0
-du -sh .git                   # 5.1 MB
+du -sh .git                   # 7.2 MB（块占用；du -sb 视 3.6 MB 为实际字节）
 ```
 
 - 入库内容：源码、测试、工具、文档
@@ -104,7 +104,8 @@ git bundle create ../Xbgtasix-<日期>.bundle --all   # 单文件仓库快照
 | `python-tools` | 用合成样本自检 5 个 Python 工具 | 无（纯标准库） |
 | `docs-links` | 检查 md 里的相对链接 | 无 |
 | `linux-cross` | `ubuntu-latest` 交叉编译三个 shim，校验导出数 461 / 4 / 18 | 无 |
-| `windows-build` | 从 NuGet 拉官方 GDK → 完整构建 + 跑 39 步测试 | 需要 GDK 头/库，缺则打印说明后跳过 |
+| `windows-build` | 从 NuGet 拉官方 GDK → 完整构建 + 跑 40 步测试 | 需要 GDK 头/库；`STRICT=1`，拿不到 GDK 直接判 job 失败 |
 
-`windows-build` 设为 `continue-on-error`：GDK 头不能入库，拿不到时走"无 GDK 子集"分支，
-这属于预期行为，不应该让 CI 变红。
+`windows-build` **不再** `continue-on-error`：GDK 头/库不能入库，但"拉不到就降级成无 GDK 子集"
+会让这个 job 假装覆盖了完整构建。现在走 `STRICT=1`：找不到 GDK 就失败并打印原因
+（本地想只跑第 1 层，用不带 `STRICT` 的 `bash tools/ci_build.sh`）。

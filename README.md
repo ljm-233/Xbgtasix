@@ -1,7 +1,7 @@
 # Xbgtasix
 
 [![ci](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml/badge.svg)](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 
 面向 Xbox GDK 程序的 **Windows 兼容层**，加上配套的**资产格式研究**工具。
 自写代码、可断言的测试、带证据标注的结论文档。
@@ -75,7 +75,7 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 
 ```bash
 ./build.sh                 # MinGW64 + g++ + dxc，产出 3 个 shim（约 90 秒）
-./tools/run_suite.sh       # 39 步测试一条命令，约 20 秒
+./tools/run_suite.sh       # 40 步测试一条命令，约 20 秒
 ./tools/ci_build.sh        # CI 同款：无 GDK 也能验 xmem 子集
 ```
 
@@ -88,10 +88,12 @@ Xbox Series 上的游戏是普通 x64 PE，但它导入的是主机版 DLL：`xg
 
 ```bash
 # 首次运行若被 Defender SmartScreen 拦下：见 docs/smartscreen.md
-build/xbgtasix.exe check  <exe>     # 静态核对导入面（10 秒，不用跑）
-build/xbgtasix.exe run    <exe>     # 跑起来并按退出码分类
-build/xbgtasix.exe verify "<包目录>" # 按 layout 清单核对完整性
-build/xbgtasix.exe doctor           # 环境自检
+build/xbgtasix.exe check    <exe>      # 静态核对导入面（10 秒，不用跑）
+build/xbgtasix.exe run      <exe>      # 跑起来并按退出码分类（覆盖同名 DLL 前备份为 *.xbgtasix-backup）
+build/xbgtasix.exe verify   "<包目录>"  # 按 layout 清单核对完整性
+build/xbgtasix.exe doctor              # 环境自检
+build/xbgtasix.exe restore  "<包目录>"  # 撤销 run 的写入：有备份→还原，没备份→删掉我们放的
+build/xbgtasix.exe firstrun "<包目录>"  # verify → doctor → check → run 四步一次走完
 ```
 
 流程见 [exe-day-checklist](docs/exe-day-checklist.md)。
@@ -130,7 +132,8 @@ build/xbgtasix.exe doctor           # 环境自检
 | [gpu-adaptation](docs/gpu-adaptation.md) | 默认会选中核显的坑；t1/t5/t6 在核显下复测过 |
 | [gpu-memory](docs/gpu-memory.md) | 账面 7.0 GB / 实测 6.0 GB；224 GB 资产 → 必须流式加载 |
 | [smartscreen](docs/smartscreen.md) | 被 Defender 拦下时怎么办（解除锁定 / 本机自签名 / 从源码构建） |
-| [launcher](docs/launcher.md) | **xbgtasix.exe**：run / check / verify / doctor 四条命令与失败分类 |
+| [launcher](docs/launcher.md) | **xbgtasix.exe**：run / check / verify / doctor / restore / firstrun 六条命令与失败分类 |
+| [license-and-store](docs/license-and-store.md) | **XStore 为什么是桩**：78 个导出（77 桩 + 1 手写）返回什么、卡授权时看到什么、以及"不要伪造授权"的边界 |
 | [how-it-runs](docs/how-it-runs.md) | **机制**：为什么不需要 PE loader、依赖怎么被满足、五个检查点 |
 | [feasibility](docs/feasibility.md) | **可行性判定 + 性能实测**：已证 / 无法判定 / 不可行 三层 |
 | [graphics-pitfalls](docs/graphics-pitfalls.md) | **9 个"不报错只黑屏"的坑** |
@@ -168,16 +171,16 @@ Xbgtasix/
   src/xmem/                    XMem* → VirtualAlloc（64 KB 页语义）
   src/d3d12_xs/                手写 4 个 + forward.def 14 个转发 + 选卡缓存
   src/generated/               143 个桩（按返回类型给默认值）+ 50 个 GUID 数据
-  tests/t0…t39/                38 个测试目录（无 t7、t16），全部离屏可跑
+  tests/t0…t40/                39 个测试目录（无 t7、t16），全部离屏可跑
   tools/fetch_gdk.py           从 nuget.org 拉官方 GDK 包并解出头文件/导入库
   tools/gen_stubs.py           .lib → 全量导出桩（返回类型从 GDK 头推断）
   tools/gen_guids.py           _GUID_xxx → 真 GUID 数据符号
   tools/forward_shim.py        DLL → 全量导出转发 .def
-  tools/analyze_exe.py         目标 exe 导入面 vs shim 导出面（跑之前就能对表）
+  tools/analyze_exe.py         目标 exe 导入面 vs shim 导出面（纯 Python，补充；以 check 为准）
   tools/launch.sh              放进 shim 环境跑起来 + 失败分类
   tools/ci_build.sh            CI 同款构建+测试（分"需 GDK / 不需 GDK"两层）
   tools/ci_watch.sh            短轮询 CI 状态（默认最多 240s，超时先干别的）
-  src/host/                    **xbgtasix.exe**：启动器（run/check/verify/doctor）+ PE 解析
+  src/host/                    **xbgtasix.exe**：启动器（run/check/verify/doctor/restore/firstrun）+ PE 解析
   tools/run_suite.sh           一条命令跑全套 + TSV 报告
   tools/check_real_dlls.py     用真实游戏侧 DLL 验证导出面（静态 + 动态）
   tools/selftest_tools.py      Python 工具自检（CI 门槛）
@@ -186,11 +189,19 @@ Xbgtasix/
   tools/match_texture.py       模型名 ↔ 贴图名 匹配
   tools/packaging/             rpf9_probe / rpf_carve / encryption_survey / shader_stats
                                / find_pe / pe_surface / verify_package
-  docs/                        27 份结论文档
+  docs/                        28 份结论文档
   .github/workflows/ci.yml     4 个 job
 ```
 
-规模：**18,360 行**（C++ / HLSL，按 `HEAD` 已提交内容统计），94 个提交，`.git` 5.1 MB。
+规模：**20,145 行**（C++ / HLSL），103 个提交，`.git` 7.2 MB。统计口径写清楚：
+
+```bash
+git ls-files '*.cpp' '*.h' '*.hlsl' | wc -l     # 67 个受版本控制的文件
+for f in $(git ls-files '*.cpp' '*.h' '*.hlsl'); do git show HEAD:"$f"; done | wc -l   # 20,145
+#  ↑ 按 HEAD 已提交内容逐文件统计（含 src/generated/ 里 205 行生成代码）；
+#    工作区若正在改代码，直接 xargs wc -l 会更大，那不是已提交规模。
+du -sh .git                                     # 7.2 MB（块占用；du -sb = 3.6 MB 实际字节）
+```
 
 ---
 
@@ -214,7 +225,7 @@ Xbgtasix/
 | `python-tools` | 合成样本自检 5 个 Python 工具 | 无依赖 |
 | `docs-links` | 检查 md 相对链接 | 无依赖 |
 | `linux-cross` | `ubuntu-latest` 上交叉编译三个 shim，校验导出数 461/4/18 |
-| `windows-build` | **从 NuGet 拉官方 GDK**（`tools/fetch_gdk.py`）→ `tools/ci_build.sh` 跑**完整构建 + 全套 39 步**；拉不到时 **job 直接失败**（`STRICT=1`），不再悄悄退化成"无 GDK 子集" | GDK 走微软自己的 nuget.org 源，仓库不转发微软二进制 |
+| `windows-build` | **从 NuGet 拉官方 GDK**（`tools/fetch_gdk.py`）→ `tools/ci_build.sh` 跑**完整构建 + 全套 40 步**；拉不到时 **job 直接失败**（`STRICT=1`），不再悄悄退化成"无 GDK 子集" | GDK 走微软自己的 nuget.org 源，仓库不转发微软二进制 |
 
 ---
 
@@ -225,7 +236,7 @@ Xbgtasix/
 | 启动游戏 | 包内唯一缺失就是 exe |
 | 按路径解 RPF 目录 | 目录表加密，密钥在缺失的 exe 里 |
 | 主机专有 D3D12 接口（`ID3D12DeviceX`） | IID 在 NDA 内 |
-| `XStore` 购买/授权 | 不伪造授权（设计决定） |
+| `XStore` 购买/授权 | 不伪造授权（设计决定，见 [license-and-store](docs/license-and-store.md)） |
 | 需要 XBL token 的功能 | token 由微软服务按用户签发，离线不可能 |
 
 **不做**：获取/破解 exe 或密钥、分发游戏资产、绕过授权。

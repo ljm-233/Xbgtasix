@@ -11,7 +11,7 @@
 
 ```bash
 ./build.sh                 # 兼容层
-./tools/run_suite.sh       # 39 步测试
+./tools/run_suite.sh       # 40 步测试
 python tools/selftest_tools.py   # Python 工具自检
 python tools/check_docs.py       # 文档链接
 ```
@@ -20,7 +20,7 @@ python tools/check_docs.py       # 文档链接
 
 ## 加一个测试
 
-**命名**：`tests/t<N>_<名词>/`，编号接在现有最大号之后（当前到 `t39`）。
+**命名**：`tests/t<N>_<名词>/`，编号接在现有最大号之后（当前到 `t40`）。
 `t7` 与 `t16` 是历史空号，不要再占（`t16` 这一步是 Python 的 `tools/check_real_dlls.py`）。
 
 **必须遵守的两条约定**：
@@ -83,6 +83,16 @@ python tools/gen_stubs.py ../gdk/lib/xgameruntime.lib --dll xgameruntime \
 - 给**可复跑的命令**，不要只写"我试过了"
 - 相对链接必须能打开 —— `tools/check_docs.py` 会在 CI 里检查
 - 数字要写清楚口径（"读前 64 MB 采样" vs "全量扫描"）
+
+---
+
+## 许可证
+
+本仓库是 **GPL-3.0-or-later**（见 [LICENSE](LICENSE)，SPDX：`GPL-3.0-or-later`）。
+提交的代码默认按同一许可分发；引用第三方代码时必须确认其许可兼容
+（GPL-3.0 的可以借鉴/移植，无许可或与 GPL 不兼容的不行）。
+`docs/` 里提到的其他项目许可是**那些项目自己的**（例如 `ui-references.md` 里的 MIT 项目），
+不是本仓库的许可——不要把本仓库写成 MIT。
 
 ---
 

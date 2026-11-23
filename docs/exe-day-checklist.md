@@ -1,6 +1,6 @@
 # exe 到手后：启动流程
 
-前提：`./build.sh` 能过、`./tools/run_suite.sh` 是 38 PASS / 1 SKIP（共 39 步）。
+前提：`./build.sh` 能过、`./tools/run_suite.sh` 是 38 PASS / 2 SKIP（共 40 步）。
 下面每一步都有明确的"看到什么算成功、看到什么看哪里"。
 
 ## 0. 先备好环境（30 秒）
@@ -17,35 +17,62 @@ exe 应该在包目录（`layout_*.xml` 里 Chunk 1001 声明的 `game_scarlett_
 ## 1. 静态核对（10 秒，不用跑）
 
 ```bash
+build/xbgtasix.exe check "$XBGTASIX_PKG/game_scarlett_master.exe"
+# 没有 Windows 侧构建产物时（例如在别的机器上分诊），用 Python 版顶着：
 python tools/analyze_exe.py "$XBGTASIX_PKG/game_scarlett_master.exe"
 ```
 
-- **看到"缺失导入 0"** → 我们 461 个导出覆盖了它要的全部符号，可以进第 2 步
+- **看到 `PASS`** → 我们 461 个导出覆盖了它要的全部符号、其它依赖模块也都找得到，可以进第 2 步
 - **看到缺失列表** → 那些名字就是要补的桩，先用 `gen_stubs` 补，别急着跑
+- **看到 `!! 找不到` 的模块** → 那是 `MISSING_DLL` 的预兆，把包内同名 DLL 拷到 exe 同目录
 
-## 2. 第一次运行：log 模式（默认，不会因为一个未实现 API 就死）
+以 `check` 的结论为准（它能真去解析依赖模块、能判 shim 损坏）；`analyze_exe.py`
+只是"没构建产物时也能跑"的补充，详见 [launcher.md](launcher.md)。
+
+## 2. 第一次运行：log 模式（不会因为一个未实现 API 就死）
 
 ```bash
 ./tools/launch.sh "$XBGTASIX_PKG/game_scarlett_master.exe" --timeout 180
 ```
 
-启动器会做四件事：建 staging、把 3 个 shim 拷进去、设好 `XBGTASIX_*` 环境变量、
-跑起来并按退出码分类。
+`tools/launch.sh` 会做四件事：建 `build/launch/` staging、把 3 个 shim 和目标 exe 拷进去、
+设好 `XBGTASIX_*` 环境变量（`XBGTASIX_UNIMPL=log`，这是它的默认）、跑起来并按退出码分类。
+
+零依赖的等价路径是 `build/xbgtasix.exe`（要注意它**默认是 stop 模式**，撞到第一个未实现就退出 70）：
+
+```bash
+build/xbgtasix.exe run "$XBGTASIX_PKG" --dry-run     # 只看计划：写什么、备份什么、启动什么
+build/xbgtasix.exe run "$XBGTASIX_PKG" --timeout 180 # 真跑（覆盖前备份为 *.xbgtasix-backup）
+build/xbgtasix.exe restore "$XBGTASIX_PKG"           # 撤销：有备份→还原，没备份→删掉我们放的
+```
+
+**要跑就必须把 3 个 DLL 放进包**（没有第二种办法），所以 `run` 一定先备份；
+`--dry-run` 是唯一"不写文件只看计划"的开关。
 
 **判读表**：
 
 | 看到 | 含义 | 下一步 |
 |---|---|---|
 | `分类: PASS` | 正常退出 | 进第 3 步 |
-| `分类: UNIMPL` + 一堆 API 名 | 撞到未实现（仅 `--stop` 模式） | 那些名字就是待办清单 |
+| `分类: UNIMPL` + 一堆 API 名 | 撞到未实现（仅 `--stop`/默认 stop 模式） | 那些名字就是待办清单；**若只有 `XStore*` 见下方"卡在授权"** |
 | `分类: TIMEOUT` | 卡住 | 看"日志末尾"，通常卡在等一个永不完成的 async |
-| `0xC0000135` | 缺依赖 DLL | 把 package 里同名 DLL 拷进 staging |
-| `0xC0000139` | 缺导出（入口点未找到） | 回第 1 步，用 `analyze_exe` 对表 |
+| `0xC0000135` | 缺依赖 DLL | 把 package 里同名 DLL 拷到 exe 同目录 |
+| `0xC0000139` | 缺导出（入口点未找到） | 回第 1 步，用 `check` 对表 |
 | `0xC0000005` | 访问冲突 | 看最后一条日志：多半是未实现接口返回空指针后被解引用 |
 | 窗口出现但黑屏 | 渲染未出画面 | 参考 [graphics-pitfalls.md](graphics-pitfalls.md) 的 9 条 |
+| 弹"无法验证授权"/登录失败/直接退 | **卡在授权校验，不是兼容层缺口** | 见 [license-and-store.md](license-and-store.md) |
 
 日志里每条 `UNIMPLEMENTED` 后面都带**调用栈地址**——用 `addr2line` 或
 Visual Studio 的符号加载可以定位到是哪个模块调的。这就是排查的起点。
+
+### 若卡在授权（`XStore`）
+
+- 授权链路是 **78 个 `XStore*` 导出**（77 个生成桩 + 1 个手写），它们**一律不伪造授权**，
+  只打一行 `UNIMPLEMENTED` 并返回失败码——**这是设计决定，不是 bug**；
+- 判据：`check` 是 PASS、日志里 `UNIMPLEMENTED` **只有 `XStore` 名字** ⇒ 卡在授权；
+  若还混着别的 API 名，那才是兼容层缺口，先补那些；
+- **不要**去伪造 license token、让 `XStoreIsLicenseValid` 返回 true、或 patch 游戏跳过校验。
+  完整说明见 [license-and-store.md](license-and-store.md)。
 
 ## 3. 收敛未实现面
 

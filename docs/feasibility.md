@@ -98,12 +98,13 @@ Windows 默认计时器精度 = 15.6 ms → Sleep(1) 实际睡 15.6 ms
 2. **`d3d12_xs` 转发额外开销 ≈ 0** —— 说明"转发层"不会成为性能负担
 3. **启动 < 1 ms** —— 说明 shim 自身不会拖慢启动
 
-**风险不在性能，在覆盖率**：143 个桩里，`XStore` 77 个是设计上不做的，
+**风险不在性能，在覆盖率**：143 个桩里，`XStore` 77 个是设计上不做的
+（另有 1 个手写实现，同样是"不伪造授权"，见 [license-and-store.md](license-and-store.md)），
 其余 66 个是否被调用、调用了会不会卡死，**只能等 exe**。
 
 ## 四、复现
 
 ```bash
-./tools/run_suite.sh            # 38 PASS / 1 SKIP / 0 FAIL（39 步）
+./tools/run_suite.sh            # 38 PASS / 2 SKIP / 0 FAIL（40 步）
 ./build/t29_perf.exe <配置路径>  # 基准数字
 ```
