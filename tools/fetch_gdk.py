@@ -78,6 +78,52 @@ def extract(nupkg, out):
     return n_h, n_l
 
 
+def case_alias_fix(inc_dir):
+    """Linux 文件系统区分大小写，而 GDK 头里存在大小写不一致的 include。
+
+    实测：包里的文件叫 ``grdk.h``，但 ``XGameRuntime.h`` 里写的是 ``#include "GRDK.h"``。
+    Windows 上 NTFS 不区分大小写所以一直没暴露；到 Arch/Ubuntu 上直接编译失败。
+
+    做法：扫所有 .h 里的 ``#include "X.h"``，凡是名字找不到、但忽略大小写能找到的，
+    建一个符号链接（失败就复制）。这样一次修掉所有同类问题，而不是逐个打补丁。
+    """
+    import re
+    # 用**精确名字集合**判断存在性：NTFS 不区分大小写，用 os.path.exists 会误判为已存在，
+    # 结果在 Windows 上测不出问题、到了 Linux 才炸
+    present = set(os.listdir(inc_dir))
+    files = {f.lower(): f for f in present if f.lower().endswith(".h")}
+    pat = re.compile(r'#\s*include\s+"([^"]+\.h)"')
+    fixed = 0
+    for f in list(files.values()):
+        try:
+            text = open(os.path.join(inc_dir, f), encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for ref in pat.findall(text):
+            if ref in present:
+                continue
+            target = os.path.join(inc_dir, ref)
+            real = files.get(ref.lower())
+            if not real:
+                continue
+            created = False
+            try:
+                os.symlink(real, target)
+                created = True
+            except (OSError, NotImplementedError):
+                try:
+                    shutil.copyfile(os.path.join(inc_dir, real), target)
+                    created = True
+                except (OSError, shutil.SameFileError):
+                    # NTFS 上 GRDK.h 与 grdk.h 是同一个文件：不需要别名，跳过
+                    created = False
+            if created:
+                files[ref.lower()] = ref
+                present.add(ref)
+                fixed += 1
+    return fixed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default=os.environ.get("GDK_VERSION", DEFAULT_VERSION))
@@ -114,6 +160,10 @@ def main():
         total_h += h
         total_l += l
         print("  抽出 %d 个头文件、%d 个导入库" % (h, l))
+
+    fixed = case_alias_fix(os.path.join(out, "include_clean"))
+    if fixed:
+        print("大小写别名: 补了 %d 个（Linux 上必需）" % fixed)
 
     ok = ready(out)
     print("\n结果: %d 头 + %d lib -> %s" % (total_h, total_l, out))
