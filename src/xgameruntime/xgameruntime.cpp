@@ -256,21 +256,50 @@ std::shared_ptr<AsyncSync> sync_for(XAsyncBlock* a) {
     return sp;
 }
 
-// 完成通知：标记完成 + 调回调（GDK 语义：回调在 completion 端口执行）
-void complete_async(XAsyncBlock* a, HRESULT status = S_OK) {
+// 每次 *Async 入口调用：把状态重置。
+// 为什么要它：游戏会复用同一个 XAsyncBlock（成员变量反复发起异步），
+// 表里残留的 done=true 会让下一次操作被误判成"已完成"（静默逻辑错误）。
+void begin_async(XAsyncBlock* a) {
+    if (!a) return;
+    // 注意：**不能** erase 同步对象。等待者（XAsyncGetStatus(wait=true)）已经持有旧的
+    // shared_ptr，如果这里换一个新的，完成方 notify 的是新对象，等待方永远收不到通知
+    // （实测：t17/t22/t24/t26/t29 全部挂死）。正确做法是复用同一个对象、只重置状态。
+    std::shared_ptr<AsyncSync> sp;
+    {
+        // 只拿一次 g_async_mu：sync_for() 内部也会锁它，混用就是自死锁（不可重入）
+        std::lock_guard<std::mutex> lock(g_async_mu);
+        g_async[a] = AsyncState{};
+        auto& s = g_async_sync[a];
+        if (!s) s = std::make_shared<AsyncSync>();
+        sp = s;
+    }
+    {
+        std::lock_guard<std::mutex> lock(sp->m);
+        sp->done = false;
+    }
+}
+
+// 完成通知：标记完成 + 调回调（GDK 语义：回调在 completion 端口执行）。
+// 返回是否真的完成了（第一次有效）—— 幂等保护：cancel 与工作线程竞争时
+// 只能有一个赢，否则回调会跑两次（游戏会双重释放结果）。
+bool complete_async(XAsyncBlock* a, HRESULT status = S_OK) {
+    if (!a) return false;
+    auto sp = sync_for(a);   // 只取一次：取两次的话中间可能被 begin_async 换掉，唤醒丢失
     {
         std::lock_guard<std::mutex> lock(g_async_mu);
         AsyncState& st = g_async[a];
+        if (st.done) return false;   // 已经完成过，不重复回调
         st.done = true;
         st.status = status;
     }
     // 先唤醒等待者，再调回调：等待方不必等到回调结束
-    if (auto sp = sync_for(a)) {
+    {
         std::lock_guard<std::mutex> lock(sp->m);
         sp->done = true;
     }
-    if (auto sp = sync_for(a)) sp->cv.notify_all();
+    sp->cv.notify_all();
     if (a->callback) a->callback(a);
+    return true;
 }
 
 bool is_async_done(XAsyncBlock* a) {
@@ -714,11 +743,7 @@ STDAPI_(void) XAsyncCancel(XAsyncBlock* asyncBlock) noexcept {
 // 通用异步：把 work 丢到线程里跑，完成时按 GDK 语义回调
 STDAPI XAsyncRun(XAsyncBlock* asyncBlock, XAsyncWork* work) noexcept {
     if (!asyncBlock || !work) return E_INVALIDARG;
-    {
-        std::lock_guard<std::mutex> lock(g_async_mu);
-        g_async[asyncBlock] = AsyncState{};
-        g_async_sync.erase(asyncBlock);
-    }
+    begin_async(asyncBlock);   // 自己管锁；外面再包一层就是自死锁
     std::thread([asyncBlock, work] {
         const HRESULT hr = work(asyncBlock);
         complete_async(asyncBlock, SUCCEEDED(hr) ? S_OK : hr);
