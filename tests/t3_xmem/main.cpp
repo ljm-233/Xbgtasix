@@ -19,13 +19,22 @@
 #include "xbgtasix/trace.h"
 
 // 与 src/xmem/xmem.cpp 的定义逐字一致（没有公开头文件可用，只能手动对齐）
-struct XMemVirtualQueryInfo {
-    void* BaseAddress;
-    size_t RegionSize;
-    DWORD State;
-    DWORD Protect;
-    DWORD Type;
-    uint64_t CommittedBytes;
+// 真实布局（XMem 的查询结构），与小写字段名对应：
+// 我们最早按"BaseAddress/RegionSize/State/Protect/Type"猜过一版，签名也是错的
+// （少了 process 参数）。这里以移植来源为准。
+struct XMemBasicInformation {
+    void* base;
+    void* alloc_base;
+    uint32_t alloc_protect;
+    uint32_t reserved0;
+    size_t region_size;
+    uint32_t state;
+    uint32_t protect;
+    uint32_t kind;
+    uint32_t reserved1;
+    uint64_t flags;
+    uint32_t tag;
+    char tag_text[4];
 };
 
 struct XMemWorkingSetStatistics {
@@ -38,7 +47,7 @@ struct XMemWorkingSetStatistics {
 extern "C" {
 void* __cdecl XMemAlloc(uint64_t attributes, size_t size);
 void __cdecl XMemFree(void* ptr);
-bool __cdecl XMemVirtualQuery(void* ptr, XMemVirtualQueryInfo* info);
+int __cdecl XMemVirtualQuery(void* process, const void* address, XMemBasicInformation* out);
 bool __cdecl XMemGetWorkingSetStatistics(XMemWorkingSetStatistics* stats);
 }
 
@@ -191,11 +200,11 @@ void test_large() {
     const Stats during = stats();
     ok(during.TotalBytes >= before.TotalBytes + sz, "large: stats counted");
 
-    XMemVirtualQueryInfo info{};
-    ok(XMemVirtualQuery(p, &info), "large: query ok");
-    ok(info.State == MEM_COMMIT, "large: query committed");
-    ok(reinterpret_cast<uintptr_t>(p) >= reinterpret_cast<uintptr_t>(info.BaseAddress) &&
-           reinterpret_cast<uintptr_t>(p) < reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize,
+    XMemBasicInformation info{};
+    ok(XMemVirtualQuery(GetCurrentProcess(), p, &info), "large: query ok");
+    ok(info.state == MEM_COMMIT, "large: query committed");
+    ok(reinterpret_cast<uintptr_t>(p) >= reinterpret_cast<uintptr_t>(info.base) &&
+           reinterpret_cast<uintptr_t>(p) < reinterpret_cast<uintptr_t>(info.base) + info.region_size,
        "large: query covers pointer");
 
     XMemFree(p);
@@ -240,12 +249,12 @@ void test_region_granularity() {
     ok(p != nullptr, "gran: alloc");
     if (!p) return;
     ok((reinterpret_cast<uintptr_t>(p) % 65536) == 0, "gran: 64KB aligned");
-    XMemVirtualQueryInfo info{};
-    ok(XMemVirtualQuery(p, &info), "gran: query");
-    ok((info.RegionSize % 65536) == 0, "gran: RegionSize multiple of 64KB");
-    ok((reinterpret_cast<uintptr_t>(info.BaseAddress) % 65536) == 0, "gran: BaseAddress 64KB aligned");
-    xbgtasix::logf("[t3] gran: base=%p region=%zu state=0x%lx", info.BaseAddress, info.RegionSize,
-                 static_cast<unsigned long>(info.State));
+    XMemBasicInformation info{};
+    ok(XMemVirtualQuery(GetCurrentProcess(), p, &info), "gran: query");
+    ok((info.region_size % 65536) == 0, "gran: RegionSize multiple of 64KB");
+    ok((reinterpret_cast<uintptr_t>(info.base) % 65536) == 0, "gran: BaseAddress 64KB aligned");
+    xbgtasix::logf("[t3] gran: base=%p region=%zu state=0x%lx", info.base, info.region_size,
+                 static_cast<unsigned long>(info.state));
     XMemFree(p);
 }
 
@@ -255,14 +264,14 @@ void test_query_after_free() {
     ok(p != nullptr, "qaf: alloc");
     if (!p) return;
     XMemFree(p);
-    XMemVirtualQueryInfo info{};
-    const bool got = XMemVirtualQuery(p, &info);
+    XMemBasicInformation info{};
+    const bool got = XMemVirtualQuery(GetCurrentProcess(), p, &info);
     // 以前写 `!got || State == MEM_FREE || State == MEM_RESERVE` —— !got 这一支
     // 让"查不到"也算过，"释放了但还查得到"更是完全不管。现在钉死一种语义：
     // 释放后实现把内存退到隔离区（MEM_DECOMMIT），所以必须查得到且状态是 MEM_RESERVE。
-    ok(got && info.State == MEM_RESERVE, "qaf: 释放后查得到且状态为 MEM_RESERVE（隔离区已 decommit）");
+    ok(got && info.state == MEM_RESERVE, "qaf: 释放后查得到且状态为 MEM_RESERVE（隔离区已 decommit）");
     xbgtasix::logf("[t3] query-after-free: got=%d state=0x%lx", got ? 1 : 0,
-                 static_cast<unsigned long>(info.State));
+                 static_cast<unsigned long>(info.state));
 }
 
 double now_ms() {
