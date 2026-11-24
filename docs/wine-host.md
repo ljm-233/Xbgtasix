@@ -728,3 +728,71 @@ Wine 的盘符是**进程启动时**从 `dosdevices/`（和注册表）建出来
 
 也就是说：**Wine 现在追平了真 Windows 当年的进度点**（`0x247AF2D` 那堵墙，
 见 [transient-block-wall.md](transient-block-wall.md)：跳过去在物理上不成立）。
+
+---
+
+## 10. 两条通则（给后来人，别重新踩）
+
+### 10.1 这版 Wine 不投递硬件断点事件 —— 直接上 int3 探针
+
+实测：Dr2/Dr3 装执行断点，`SetThreadContext` 成功、`Dr7=0x50`（L2|L3 都对），
+**连 gate 入口 `game+0x56EB10` 都零命中**；写断点（Dr1）同样零命中。
+所以在本项目的 Wine 环境里，`Dr0..Dr3` 这条路是死的：别再花时间调寄存器。
+
+可用的替代就是 `XBGTASIX_INT3_AT=<rva>,<rva>`（`src/trace.cpp` 的 `install_int3_probes`）：
+
+1. `env` 里给两个十六进制 RVA（相对游戏 exe 的 image base）；
+2. 命中时把 `rax/rbx/rcx/rdx` 和 `rbx`/`rdi` 指向的 C 字符串（截断非可打印字符）打进
+   `[xbgtasix]` 日志；
+3. 还原原字节、把 `Rip` 拨回该指令，继续跑（**一次性**，只改内存、不碰游戏文件）。
+
+包一层的命令行工具：[`tools/probe_at.py`](../tools/probe_at.py)。
+
+### 10.2 Wine 的盘符只在进程启动时从 `$WINEPREFIX/dosdevices/` 建
+
+运行时 `DefineDosDeviceW` 三种写法（raw DOS / raw unix / 非 raw）**全部返回成功但不生效**，
+`HKCU\Software\Wine\Drives` 也不行；只有 `$WINEPREFIX/dosdevices/<letter>:` 符号链接管用，
+且必须在**起进程之前**建好。
+
+所以：`tools/run_wine.sh` 在启动前建 `g:`/`t:`（`setup_drive`），
+`src/fstrace/drives.cpp` **不是**这活的正主 —— 它只负责"映射完自检 + 失败时大声报 404"。
+别把 `run_wine.sh` 里那两行当多余的：删掉就会出现"文件明明在、`GetLastError=2`"。
+
+---
+
+## 11. 第 5 堵墙：槽 3 的返回值被当指针用（已修）
+
+盘符修好之后第一次跑，崩点从 `0x2237178` 挪到 `0x55DEA79`：
+
+```
+1455dea5a: call 0x1455de048        ; QueryApiImpl(GUID 0x145F410E0, 同, &out)
+1455dea63: mov  0x20(%rsp),%rcx    ; rcx = out（我们的哑对象）
+1455dea68: mov  (%rcx),%rax
+1455dea70: mov  0x18(%rax),%rax    ; vtable[0x18/8 = 3]
+1455dea74: call 0x1456a2070
+1455dea79: movups (%rax),%xmm0     ; ← rax = 槽 3 的返回值，我们回了 0 → AV at 0
+1455dea7c: movups %xmm0,(%rbx)     ; 往后还有 +0x10/+0x20/+0x30/+0x40 的拷贝
+```
+
+即**槽 3 的返回值是指针**，调用方直接 `movups` 拷 0x40+ 字节出来。哑对象原来一律回 `S_OK`(0)，
+于是崩在 0。
+
+修法（`src/xgameruntime/api_impl.cpp`）：给 `kRetPointerSlot = 3` 返回一块 256 字节的静态零区，
+其余槽维持 `S_OK`。日志里槽 3 的标签也从 `-> S_OK` 变成 `-> 零块指针`，一眼能分清。
+
+**结果**：`0x55DEA79` 消失，耗时 3186 ms → **6868 ms**，日志 2699 → 2577 行（崩得晚、前面刷得少），
+最终停在 **`game+0x247AF2D`** —— 就是真机那堵 64 MiB 的墙。
+
+### 11.1 现在的进度总表（全部实测，同一套 shim）
+
+| 断言/崩溃点 | 原因 | 怎么过的 | 耗时 |
+|---|---|---|---|
+| `game+0x5A91C21` | shim 缺四个内部导出 | 源码里实现（465 导出） | 482 ms |
+| `game+0x55DE020` | `QueryApiImpl` 返回空对象 | 哑对象 | 248 ms |
+| `game+0x5925915` | Wine `GameInputCreate` 返回 `E_NOTIMPL` | `SteamGameId` | 292 ms |
+| `game+0x2237178` | `appdata0.rpf` 在 `G:` 上打不开（Wine 盘符假成功） | `dosdevices` 符号链接 | 3186 ms |
+| `game+0x55DEA79` | 槽 3 返回值被当指针解引用 | 槽 3 返回零块 | 3186 ms |
+| `game+0x247AF2D` | 64 MiB 瞬时块不变量（**真机同款**） | 未解，见 transient-block-wall.md | 6868 ms |
+
+**Wine 这一路已经不是死路了**：482 ms 的死因是缺导出 + 盘符，而不是 Wine 语义不可用；
+现在停的这堵墙跟真机是同一堵。

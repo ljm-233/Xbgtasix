@@ -98,6 +98,9 @@ namespace {
 constexpr int kApiVtableSlots = 40;   // 已知 0xE8/8 = 29 是最低要求，留余量
 constexpr int kReleaseSlot = 0x10 / 8;
 constexpr int kWorkSlot = 0xE8 / 8;
+// 槽 3（off 0x18）：调用方把返回值当指针，`movups (%rax)` 拷 0x30 字节到自己的栈上。
+// 证据：game+0x55DEA79 崩在 `movups (%rax),%xmm0`，rax=0（我们返回的 S_OK）。
+constexpr int kRetPointerSlot = 3;
 
 // 对象本体给 256 字节：标题可能往里写（引用计数/上下文指针），只给 8 字节会踩坏后面的全局量。
 alignas(16) unsigned char g_api_object[256];
@@ -105,11 +108,19 @@ void* g_api_vtable[kApiVtableSlots];
 std::atomic<bool> g_api_ready{false};
 std::atomic<bool> g_slot_seen[kApiVtableSlots];
 
+// 某些槽的返回值会被调用方**当成指针解引用**（实测槽 3：调完立刻 `movups (%rax)` 拷 0x30+ 字节，
+// 我们还 0 就 AV 在 0x55DEA79）。这种槽不能返回 0，要给一块可读的零区。
+alignas(16) unsigned char g_api_ret_block[256];
+
 long long api_slot_called(int index, unsigned long long a, unsigned long long b,
                           unsigned long long c) {
     if (!g_slot_seen[index].exchange(true))
         xbgtasix::logf("[xgamert] QueryApi 对象 vtable[%d] (off 0x%X) 首次调用 a=%016llX b=%016llX "
-                       "c=%016llX -> S_OK", index, index * 8, a, b, c);
+                       "c=%016llX -> %s", index, index * 8, a, b, c,
+                       index == kRetPointerSlot ? "零块指针" : "S_OK");
+    if (index == kRetPointerSlot) {
+        return static_cast<long long>(reinterpret_cast<unsigned long long>(g_api_ret_block));
+    }
     return 0;   // S_OK：先当"成功了"，谁知道它要什么，等下一轮的日志说话
 }
 
