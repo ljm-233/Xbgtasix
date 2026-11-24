@@ -1,0 +1,358 @@
+# 在 Linux / Wine 下运行：宿主差异、482 ms 那一枪的根因、以及多系统支持做到哪一步
+
+写于 2026-11-25。所有结论都带可复跑的命令与原样输出；区分 **实测** 与 **推断**。
+
+---
+
+## 0. 一句话结论
+
+Wine 上 482 ms 就死的那个断言（`0x80000003` at `game+0x5A91C21`）**不是 Wine 的 API 行为问题**，
+是 **shim 少导出四个名字**：标题的 GDK 引导按名字 `GetProcAddress` 主机运行时的内部入口点
+`InitializeApiImpl` / `InitializeApiImplEx` / `InitializeApiImplEx2` / `UninitializeApiImpl`，
+我们一个都没有导出，于是引导函数返回 `0x89240101`，标题自己 `js` 跳到 `int3`。
+
+补上这四个导出之后，**这条断言不再出现**，主线程前进到 `game+0x55DE020`：
+
+```
+1455de012: call 0x1455de048          ; 取 API 对象（内部先做引导，再调 QueryApiImpl）
+1455de01b: mov  0x40(%rsp),%rcx      ; rcx = QueryApiImpl 写出来的对象指针
+1455de020: mov  (%rcx),%rax          ; ← rcx=0，读 vtable 空指针 → 0xC0000005
+```
+
+也就是说下一堵墙是 **`QueryApiImpl` 要返回一个真的 COM 式对象**（标题会用
+`vtable[0x10]` 当释放、`vtable[0xE8]` 当实际工作），这条还没实现。见第 5 节。
+
+---
+
+## 1. 先说环境：不补 dxvk/vkd3d-proton，连断言都到不了
+
+实测（本机，Arch + ROG 天选7 Pro）：
+
+```bash
+P="/home/link/.local/share/proton/runners/DW-Proton Latest/files"
+cd /mnt/winbot-software/GTA6/Xbgtasix
+WINEPREFIX=~/Games/gta6-x11 PATH="$P/bin:/usr/bin:/bin" DISPLAY=:0 \
+  wine build/xbgtasix.exe run 'D:\GTA6\GTA6.Xbox.v1.0.2.1-CYBERLEEK'
+```
+
+结果 **不是** 482 ms 的断言，而是更早的：
+
+```
+err:module:import_dll Library libvkd3d-shader-1.dll (which is needed by L"C:\\windows\\system32\\wined3d.dll") not found
+err:module:import_dll Library libvkd3d-1.dll (which is needed by L"C:\\windows\\system32\\wined3d.dll") not found
+err:module:import_dll Library wined3d.dll (which is needed by L"C:\\windows\\system32\\dxgi.dll") not found
+err:module:import_dll Library dxgi.dll (which is needed by L"D:\\GTA6\\GTA6.Xbox.v1.0.2.1-CYBERLEEK\\d3d12_xs.dll") not found
+err:module:loader_init Importing dlls for ... game_scarlett_master.exe failed, status c0000135
+== 结果
+退出码        0xc0000135     分类 MISSING_DLL     耗时 218 ms
+```
+
+原因：直接调 Proton 的 `wine` 二进制时，**wine 自带的 builtin `dxgi.dll` 静态依赖 `wined3d.dll`，
+`wined3d` 又依赖 `libvkd3d-*.dll`**；而这几份 DLL 在 Proton 里单独放在
+`files/lib/vkd3d/`、`files/lib/vkd3d-proton/`、`files/lib/wine/dxvk/`，
+**不在 wine 的默认 PE 搜索路径里**（Proton 自己的启动脚本才补）。
+
+注意两条走不通的路（都实测过）：
+
+| 尝试 | 结果 |
+|---|---|
+| 把它们加进 unix `PATH` | 不变，仍 `c0000135`（PE 依赖不走 PATH） |
+| 设 `WINEDLLPATH=$P/lib/vkd3d/x86_64-windows:$P/lib/wine/x86_64-windows` | 不变，仍 `c0000135`（这个变量在本次 wine 11.0 构建里没改变结果） |
+
+**走通的做法**：把 `dxgi`/`d3d12` 让给 dxvk / vkd3d-proton（Proton 的正常组合）：
+
+```bash
+export WINEDLLPATH="$P/lib/wine/dxvk/x86_64-windows:$P/lib/wine/vkd3d-proton/x86_64-windows:$P/lib/wine/x86_64-windows"
+export WINEDLLOVERRIDES="dxgi=n;d3d11=n;d3d10core=n;d3d12=n;d3d12core=n"
+```
+
+这套已经封进 [`tools/run_wine.sh`](../tools/run_wine.sh)（跑 `./tools/run_wine.sh --dll-dir build/wine-bridge` 即可）。
+
+顺带：前缀里其实**已经有** dxvk 的 `dxgi.dll`（5.3 MB, 11-24 22:41）和 vkd3d-proton 的
+`d3d12.dll`/`d3d12core.dll`，但 wine 默认优先 builtin，所以不设 override 等于没装。
+
+---
+
+## 2. 482 ms 那一枪：反汇编读出来的因果链
+
+调用栈（原样，来自 `GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbgtasix.log`）：
+
+```
+[xbgtasix] FATAL 异常 0x80000003 at game_scarlett_master.exe+0x5A91C21
+[xbgtasix] 现场寄存器 rax=0000000089240101 rbx=000000000000000a rcx=00006ffffffabbc8 ...
+[xbgtasix]   #2  game_scarlett_master.exe+0x5A91C21
+[xbgtasix]   #3  game_scarlett_master.exe+0x56A1E5A
+[xbgtasix]   #4  kernel32.dll+0x11739
+```
+
+`#4 = kernel32+0x11739` 是 `BaseThreadInitThunk`，`#3 = game+0x56A1E5A` 是 CRT 线程入口 ——
+**是主线程**（PE 的初始线程也走 `BaseThreadInitThunk`），不是竞态。
+
+### 2.1 `game+0x5A91C21` 只是一个 `FAILED(hr) → int3` 的陷阱
+
+```
+145a91bd0: push %rsi / sub $0x20,%rsp / mov %rcx,%rsi
+145a91bd8: call 0x1455dcf74
+145a91bdd: test %eax,%eax
+145a91bdf: js   0x145a91c21        ← 返回值 < 0 就跳去 int3
+...
+145a91c21: int3                    ← 断言点（0x80000003）
+145a91c22: jmp  0x145a91be1
+```
+
+`rax` 在 `int3` 时就是那个返回值：`0x89240101`（**有符号为负**）。
+所以这一行日志本身不含语义，语义在 `0x1455dcf74` 里：
+
+```
+1455dcf74: xor %edx,%edx
+1455dcf76: xor %ecx,%ecx
+1455dcf78: jmp 0x1455e2a70        ; 等价于 Init(NULL, NULL)
+```
+
+### 2.2 `0x1455e2a70` 是标题自己的 GDK 引导：`LoadLibraryExW` + 六个 `GetProcAddress`
+
+关键几段（`0x146e04e80` 是临界区，`0x146e04ea0` 是模块句柄，`0x146e04e*b0..d8` 是六个函数指针槽）：
+
+```
+1455e2aac: call 0x1455e29dc                   ; 没有句柄就去拿
+...
+1455e2ada: lea 0x11aadd7(%rip),%rdx           ; "QueryApiImpl"
+1455e2ae1: call *0x146793530                  ; GetProcAddress(句柄, 名字)
+1455e2aee: mov %rax,0x146e04eb0               ; 存进槽 1
+1455e2aff: lea 0x11aadda(%rip),%rdx           ; "InitializeApiImpl"
+1455e2b06: call *0x146793530                  ; 存进 0x146e04eb8（槽 2）
+1455e2b26: ...                                ; "InitializeApiImplEx"   -> 0x146e04ec0（槽 3）
+1455e2b4d: ...                                ; "UninitializeApiImpl"   -> 0x146e04ec8（槽 4）
+1455e2b7e: ...                                ; "XErrorReport"          -> 0x146e04ed0（槽 5）
+1455e2bb6: ...                                ; "InitializeApiImplEx2"  -> 0x146e04ed8（槽 6）
+```
+
+判定（缺一个就 `0x89240101`）：
+
+```
+1455e2be2: cmpq $0x0,0x146e04eb0   ; QueryApiImpl
+1455e2bea: je   0x1455e2d53
+1455e2bf0: cmpq $0x0,0x146e04eb8   ; InitializeApiImpl
+1455e2bf8: jne  0x1455e2c08
+1455e2bfa: test %rax,%rax          ; InitializeApiImplEx
+1455e2bfd: jne  0x1455e2c08
+1455e2bff: test %r10,%r10          ; InitializeApiImplEx2
+1455e2c02: je   0x1455e2d53
+1455e2c08: test %r8,%r8            ; XErrorReport
+1455e2c0b: je   0x1455e2d53
+1455e2c11: test %rdx,%rdx          ; UninitializeApiImpl
+1455e2c14: je   0x1455e2d53
+...
+1455e2d53: mov $0x89240101,%ebx    ; ← 就是日志里 rax 的那个值
+```
+
+同一个函数里还有两个**明文字符串**，把语境钉死了：
+
+- `0x1455e2c24` 分支用 `0x89240100` 报：`"XGameRuntimeInitialize must be called before making this call."`
+- `0x1455e2c64` 分支用 `0x8924010a` 报：`"XGameRuntime is outdated and does not support these initialization options."`
+
+也就是说：**这段就是标题对“主机 GDK 运行时够不够新”的自检**，而它认的门票是那四个内部导出。
+
+### 2.3 加载器侧的直接证据（`WINEDEBUG=+module`）
+
+补丁前，原样输出：
+
+```
+0173:warn:module:LdrGetProcedureAddress "InitializeApiImpl" (ordinal 0) not found in L"D:\\GTA6\\GTA6.Xbox.v1.0.2.1-CYBERLEEK\\xgameruntime.dll"
+0173:warn:module:LdrGetProcedureAddress "InitializeApiImplEx" (ordinal 0) not found in L"D:\\GTA6\\GTA6.Xbox.v1.0.2.1-CYBERLEEK\\xgameruntime.dll"
+0173:warn:module:LdrGetProcedureAddress "InitializeApiImplEx2" (ordinal 0) not found in L"D:\\GTA6\\GTA6.Xbox.v1.0.2.1-CYBERLEEK\\xgameruntime.dll"
+0173:warn:module:LdrGetProcedureAddress "UninitializeApiImpl" (ordinal 0) not found in L"D:\\GTA6\\GTA6.Xbox.v1.0.2.1-CYBERLEEK\\xgameruntime.dll"
+```
+
+四个名字，一条不多一条不少；`QueryApiImpl` 与 `XErrorReport` **没有** warn（我们的 shim 有这两个）。
+这与 2.2 的槽位顺序对得上：槽 1、5 拿到，槽 2/3/6 全空 → `0x89240101`。
+
+**这里可以明确否掉两个替代假设**：
+
+| 假设 | 判据 |
+|---|---|
+| 「Wine 的 `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)` 找不到 xgameruntime.dll」 | 不成立：`+module` 里 `xgameruntime.dll` 只加载了一次，来源是 **D 盘游戏目录**（静态导入），并且拿到了句柄 —— 后面才会去 `GetProcAddress` |
+| 「Wine 的 `GetProcAddress` 行为不对」 | 不成立：它老老实实把 461 个导出里的两个查到了，只对真不存在的四个报 not found |
+
+（`0x1455e29dc` 里那句 `LoadLibraryExW(L"xgameruntime.dll", 0, 0x800 或 0xA00)` 仍值得留意：
+`0x800 = LOAD_LIBRARY_SEARCH_SYSTEM32`，`0xA00 = 那个 + APPLICATION_DIR`，由
+`0x146e04ea8 == 2`（是否为打包应用）决定 —— 但目前这条路径**没有**被走到，日志可以证明。）
+
+### 2.4 真机（Windows）为什么没死在这里 —— 推断，未验证
+
+同一份 shim 在 Windows 上按同样的搜索顺序也会从游戏目录加载，所以按理该同样缺这四个名字。
+两个说得通的解释，都**没有**在本机验证过（没有 Windows 环境）：
+
+1. 当时 Windows 上那次 3400 行的跑用了**更全的导出集**（历史构建），之后被重新生成的 `.def` 缩回 461 条；
+2. Windows 的 `LoadLibraryExW`/模块去重按**解析后的全路径**做，System32 里那份微软 GDK 运行时
+   （`0x800` 只搜 System32）被当成另一个模块加载，补齐了这四个入口 —— 而 Wine 的
+   `load_dll` 先按**基名**命中已加载模块，直接把我们这份返回了。
+
+第 2 条能解释「Windows 过、Wine 不过」，但也意味着**补导出是两边都该做的事**（本项目本来就不该依赖
+系统里装没装 GDK）。这条留给有 Windows 机器的下一次实测。
+
+---
+
+## 3. 修法（两层）
+
+### 3.1 源码层（正解，需要在有 mingw-w64 的机器上重新 build.sh）
+
+- `src/xgameruntime/exports.txt` 追加四个名字（手写实现清单，不属于生成桩）；
+- 新增 `src/xgameruntime/api_impl.cpp`：四个 `extern "C"` 入口，返回 `S_OK`，
+  并各自记一行 `[xgamert] ...` 日志（带宿主与 Wine 版本），方便下次一眼看出“引导走到哪了”。
+
+### 3.2 本机可验证的一层：给现成 DLL 补导出表
+
+本机（Arch）**没有** `x86_64-w64-mingw32-g++`，也没有 `sudo` 装不了，所以**编不了**。
+为了不等环境，写了 [`tools/add_exports.py`](../tools/add_exports.py)：给现成的 PE **追加**导出名，
+原有 461 个一个字节都不动 ——
+
+做法：文件末尾加一节 `.edata2`（`0x60000040`，可读可执行），里面放 4 个 4 字节函数体
+（`33 C0 C3 90` = `xor eax,eax; ret`，返回 `S_OK`）、重建的导出目录 / 地址表 / 名字指针表 /
+序号表（旧名字的字符串按原 RVA 复用），再补一个节头（PE 头区尾部正好有 `0x14C` 字节空位），
+改 `NumberOfSections` / `SizeOfImage` / 数据目录[0]。名字表按字节序**排序**，
+因为 `GetProcAddress` 对导出名做二分查找。
+
+```bash
+python3 tools/add_exports.py build/xgameruntime.dll -o build/wine-bridge/xgameruntime.dll \
+    --add InitializeApiImpl --add InitializeApiImplEx --add InitializeApiImplEx2 --add UninitializeApiImpl
+# 写出 build/wine-bridge/xgameruntime.dll: 导出 461 -> 465（.edata2 @RVA 0x17a000，5120 字节）
+```
+
+第一次忘了把新节标成可执行，结果 `0xC0000005 访问类型=8 地址=…17A008`（取指违例）——
+这条弯路也留在工具注释里了。
+
+### 3.3 验证结果
+
+```bash
+./tools/run_wine.sh --dll-dir build/wine-bridge --timeout 60
+```
+
+| | 补丁前 | 补丁后 |
+|---|---|---|
+| 结局 | `0x80000003` at `game+0x5A91C21`（482 ms） | `0xC0000005` at `game+0x55DE020`（248 ms） |
+| `LdrGetProcedureAddress` 四条 warn | 有 | **无** |
+| `UNIMPLEMENTED` | 0 条 | 1 条（`QueryApiImpl`） |
+
+`#5 game+0x5A91CAF`、`#6 game+0x5A91BE6` 出现在新栈里 —— 正是 2.1 那段 `int3` 之后继续往下走的地址。
+**那一枪确实过去了。**
+
+---
+
+## 4. 下一堵墙：`QueryApiImpl` 得返回一个真的对象
+
+```
+1455de012: call 0x1455de048          ; 内部：必要时先做引导，然后 call [0x146e04eb0] = QueryApiImpl
+1455de01b: mov  0x40(%rsp),%rcx      ; rcx = 出参（对象指针）
+1455de020: mov  (%rcx),%rax          ; ← 崩在这里：rcx = 0
+1455de023: mov  0xe8(%rax),%rax      ; vtable[0xE8/8 = 29]
+1455de02a: call 0x1456a2070          ; 经 CFG 派发
+1455de02f: ...
+1455de037: mov  0x10(%rax),%rax      ; vtable[0x10/8 = 2]（看着像 Release）
+```
+
+而 `0x1455de048` 里调 `QueryApiImpl` 之前只做了一件事：
+
+```
+1455de069: xor  %edx,%edx
+1455de06b: lea  0x1(%rdx),%ecx       ; ecx = 1
+1455de06e: call 0x1455e2a70          ; 引导（rcx=1, rdx=0）
+1455de077: mov  0x146e04eb0,%rax     ; QueryApiImpl
+1455de07e: mov  %rbx,%r8             ; r8 = 出参
+1455de084: mov  %rsi,%rcx
+1455de087: call 0x1456a2070
+1455de08e: cmp  $0x80040154,%eax     ; 特别认 E_NOINTERFACE
+```
+
+结论（推断）：`QueryApiImpl(<id>, <id2>, void** out)` 是个 COM 式的“取实现对象”，
+标题要求的是主机 `XblApi`/API 客户端的实现对象，`vtable` 至少 30 个槽（`0xE8`）。
+我们的桩返回 `NULL`（`S_OK` 但不写出参）→ 立刻空指针。
+
+要往下走，需要：
+
+1. 判定 `QueryApiImpl` 的入参（`rcx`/`rdx` 是什么：GUID 的两半？API 编号？）；
+2. 造一个最小 COM 对象：`vtable[2]` = `Release`（返回 0），`vtable[29]` = 实际工作入口（先返回 `S_OK`）；
+3. 用“第一次调用记录 + 返回哑对象”的方式跑一轮，看标题接着要什么。
+
+**这一块本轮没有做**，先把 482 ms 的刀口撬开、把“多系统”的地基铺好。
+
+---
+
+## 5. 多系统支持：现在有什么
+
+### 5.1 “当前平台”的概念
+
+[`include/xbgtasix/platform.h`](../include/xbgtasix/platform.h)（头文件内联实现，exe 与 8 个 shim
+都能直接用，不用改各自的目标文件列表）：
+
+| 接口 | 作用 |
+|---|---|
+| `xbgtasix::host_platform()` | `Windows` / `Wine`。取值优先级：`XBGTASIX_PLATFORM=windows\|wine` → 探测 `ntdll!wine_get_version` |
+| `xbgtasix::host_is_wine()` | 布尔快捷 |
+| `xbgtasix::host_platform_name()` | `"windows"` / `"wine"`，写日志用 |
+| `xbgtasix::host_wine_version()` | `wine_get_version()` 的字符串（真 Windows 上为空） |
+| `xbgtasix::host_probe_gpus()` | Wine 下读 `Z:\sys\class\drm\cardN\device\{vendor,device,subsystem_*,boot_vga}`，拿到**真实**硬件；真 Windows 返回空 |
+
+为什么用 `wine_get_version`：这是 Wine 自己的规范标识（`ntdll` 导出），比查注册表/文件路径稳。
+为什么读 `Z:`：Wine 把 `Z:` 映射到 `/`，于是不用任何 Linux 专属 API（也就不会在 Windows 上编不过）。
+
+已接入的地方：
+
+- `xbgtasix doctor`：新增 `宿主` 一行 +（Wine 下）`真实 GPU` 若干行，并提示
+  “DXGI 报的适配器可能是 vkd3d 编的，跟下面 DXGI 的对比着看”；
+- `xbgtasix run` 的运行横幅：多一行 `宿主`，日志事后可追溯。
+
+> **这两个 C++ 改动没有编译过**（本机没有 mingw-w64，`sudo` 需要密码，装不了）。
+> 同一份信息在 Linux 侧已经用 [`tools/host_probe.py`](../tools/host_probe.py) 跑出来了（见 5.2），
+> 所以逻辑本身是验证过的，只有 C++ 那一份没进过编译器。
+
+### 5.2 `tools/host_probe.py`（本机已验证）
+
+```bash
+$ python3 tools/host_probe.py --doctor
+宿主          linux（Wine 之外）
+wine          wine-11.0 (CachyOS)
+WINEPREFIX    /home/link/Games/gta6-x11
+真实 GPU      card0: NVIDIA 10DE:2D59 (sub 1043:3B49)  GB206M [GeForce RTX 5060 Max-Q / Mobile]
+真实 GPU      card1: Intel 8086:7D67 (sub 1043:3B49)  [boot_vga]  Arrow Lake-S [Intel Graphics]
+--- wine 下 doctor 报的（DXGI/vkd3d 视角，可能是假卡）
+  dxgi.dll      有
+  GPU[0]        NVIDIA GeForce RTX 5060 Laptop GPU（AMD 1002:73DF，显存 8.0 GB，1 个输出）
+  GPU[1]        Intel(R) Graphics (ARL)（Intel 8086:7D67，显存 0.5 GB，0 个输出）
+  适配器        物理显卡 2 张（2 个硬件适配器）
+info:  DXGI: Hiding actual GPU, reporting:
+```
+
+三个可用的观察：
+
+1. 真实硬件是 **10DE:2D59（RTX 5060 Max-Q）+ 8086:7D67（ARL 核显，boot_vga）**；
+2. 只要给了 dxvk / vkd3d-proton（`tools/run_wine.sh` 那套），**doctor 报的就是真卡**，
+   `8086:7D67` 与 sysfs 完全对上；
+3. 但 `GPU[0]` 的厂商号被报成 **`1002`（AMD）**，还打了 `DXGI: Hiding actual GPU, reporting:`
+   —— 说明前缀里有东西在**改适配器描述**（dxvk-nvapi 或 vkd3d-proton 的 spoofing），
+   所以“不要信 DXGI 报的型号”这条依然成立，只是假的程度随环境不同。
+   之前看到的 `Intel(R) HD Graphics 4000（8086:0162，1.5 GB）` 属于 builtin wined3d 那条路径的
+   占位适配器；这一轮用 `WINEDLLPATH`+`WINEDLLOVERRIDES` 都复现不出来，**来源没能确认**，
+   记为未解。
+
+### 5.3 跑法（Linux）
+
+```bash
+./tools/run_wine.sh                       # doctor 之外最常用：run 整个包
+./tools/run_wine.sh --dll-dir build/wine-bridge --timeout 180
+python3 tools/host_probe.py --doctor       # 先看宿主与真实 GPU
+```
+
+`run_wine.sh` 干的事：补 dxvk / vkd3d-proton 的搜索路径与 override、把包路径转成 `Z:\...`、
+带上 `XBGTASIX_VEH=1`（异常钩子，否则 `int3` 只表现成退出码 0x80000003、日志里什么都没有）。
+
+---
+
+## 6. 还没做的
+
+1. `QueryApiImpl` 的对象（第 4 节）——下一堵墙，需要定 `vtable` 语义；
+2. `d3d12_xs` / `xmem` 里真正需要“按宿主分叉”的点还没挑出来（本轮只把地基和 doctor 接上）。
+   已知候选：`XMemVirtualAlloc` 的大块预留（Wine 的地址空间布局与 Windows 不同，24 GB×2 都成功了，
+   但**保留区语义**是否一致没有验证）、`PresentX` 家族在 vkd3d-proton 下的槽位行为；
+3. 假适配器的来源（5.2 第 3 条）；
+4. Windows 上这四个导出到底怎么过去的（2.4）——需要一台真机复跑 `WINEDEBUG` 等价物。

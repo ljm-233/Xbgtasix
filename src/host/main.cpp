@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "pe.h"
+#include "xbgtasix/platform.h"
 
 namespace {
 
@@ -620,6 +621,30 @@ int cmd_doctor(const std::wstring& dll_dir_in) {
         }
     }
 
+    // 1b) 宿主：真 Windows 还是 Wine。多系统支持的入口 ——
+    // 两边的语义差（D3D12 走 vkd3d-proton、驱动/适配器信息可能是假的、页面/内存语义、
+    // 路径映射）从这里分叉，而不是散落一堆 #ifdef _WIN32（那个分不出 Wine）。
+    const auto host = xbgtasix::host_platform();
+    {
+        const std::string wv = xbgtasix::host_wine_version();
+        say("  宿主          %s%s", xbgtasix::host_platform_name(),
+            wv.empty() ? "" : ("（wine " + wv + "）").c_str());
+        if (host == xbgtasix::HostPlatform::Wine) {
+            // 这一段存在的理由：Wine 下 DXGI 报的适配器可能是假的（vkd3d-proton 编的）。
+            // 本机实测报的是 "Intel(R) HD Graphics 4000, 8086:0162, 1.5 GB"，
+            // 真机是 RTX 5060 Laptop + Intel ARL 核显。只看 DXGI 会把人带错方向。
+            const auto gpus = xbgtasix::host_probe_gpus();
+            if (gpus.empty()) {
+                say("  真实 GPU      读不到 /sys/class/drm（Z: 没映射到 / ？）");
+            } else {
+                for (const auto& g : gpus) say("  真实 GPU      %s", g.name.c_str());
+                say("                以上读自 /sys/class/drm，与下面 DXGI 报的对比着看");
+            }
+            say("                提示：XBGTASIX_PLATFORM=windows 可以把下面的探测强制按真机走，");
+            say("                      用来对照“某处差异是不是 Wine 特有的”");
+        }
+    }
+
     // d3d12.dll / dxgi.dll 用运行时解析：doctor 是"诊断工具"，
     // 不该在缺 d3d12.dll 的机器上（Win7/8、Server Core、精简镜像）自己都起不来——
     // 那种机器恰恰最需要它来报告"D3D12 不可用"。
@@ -1159,6 +1184,17 @@ int cmd_run(const std::wstring& target_in, const RunOptions& opt) {
     say("模式          %s，超时 %ds", opt.stop_mode ? "stop（撞到未实现即停）" : "log（跑到底）",
         opt.timeout_sec);
     say("日志          %s", to_utf8(log_path).c_str());
+    // 宿主也记进运行横幅：同一份日志在 Windows 和 Wine 上读起来差别很大，
+    // 事后拿着日志排障时，第一件事就是确认它跑在哪个宿主机上。
+    {
+        const std::string wv = xbgtasix::host_wine_version();
+        say("宿主          %s%s", xbgtasix::host_platform_name(),
+            wv.empty() ? "" : ("（wine " + wv + "）").c_str());
+        if (xbgtasix::host_is_wine()) {
+            say("              D3D12 走 vkd3d-proton；适配器名/显存可能是 vkd3d 编的，"
+                "先跑一次 doctor 看真实 GPU");
+        }
+    }
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);

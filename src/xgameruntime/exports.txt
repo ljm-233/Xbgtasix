@@ -88,3 +88,9 @@ XDisplayTryEnableHdrMode
 XGameStreamingGetConnectionState
 XTaskQueueGetPort
 XTaskQueueCreateComposite
+; 标题的 GDK 引导按名字解析的内部入口点（不在公开头文件里）。
+; 缺它们 → 引导返回 0x89240101，标题在 game+0x5A91C21 int3。见 docs/wine-host.md。
+InitializeApiImpl
+InitializeApiImplEx
+InitializeApiImplEx2
+UninitializeApiImpl

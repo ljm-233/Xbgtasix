@@ -122,6 +122,36 @@ build/xbgtasix.exe firstrun "<包目录>"  # verify → doctor → check → run
 
 ---
 
+## 在 Linux / Wine 下运行
+
+项目原来只跑在 Windows 上；现在有了一条经 Wine 的 Linux 路径。**目前支持到“跑起来、越过引导、停在下一堵墙”，
+不是可玩状态**。细节、反汇编与原始日志见 [docs/wine-host.md](docs/wine-host.md)。
+
+```bash
+python3 tools/host_probe.py --doctor     # 宿主是不是 Wine + 真实 GPU（读 /sys/class/drm）
+./tools/run_wine.sh                      # 跑包：补 dxvk/vkd3d-proton 路径，带上异常钩子
+./tools/run_wine.sh --dll-dir build/wine-bridge --timeout 180
+```
+
+已知差异与当前状态：
+
+| 项 | 真 Windows | Linux + Wine（本机实测） |
+|---|---|---|
+| 图形栈 | 桌面 D3D12 | **必须**走 dxvk + vkd3d-proton（`run_wine.sh` 已配）；用 wine builtin 的 `dxgi`/`wined3d` 会在导入阶段就 `0xC0000135` |
+| 适配器信息 | 真卡 | 详情随环境变：给对栈时报真卡但不保证厂商号（实测把 NVIDIA 报成 `1002`），走 builtin 路径时会报占位卡 —— **别只信 DXGI**，用 `host_probe.py` / `doctor` 的 `真实 GPU` 行 |
+| 进度 | 到资源归档读取 / `game+0x247AF2D`（64 MiB 断言） | 到 `game+0x55DE020`（`QueryApiImpl` 返回空对象被解引用） |
+| 主机检测 | — | `XBGTASIX_PLATFORM=windows\|wine` 可手动钉死；不设则探测 `ntdll!wine_get_version` |
+
+怎么跑起来的关键一步（本次实测的根因）：标题的 GDK 引导要按名字从 `xgameruntime.dll` 解析
+`InitializeApiImpl` / `InitializeApiImplEx` / `InitializeApiImplEx2` / `UninitializeApiImpl` 四个内部入口点。
+缺它们 → 引导返回 `0x89240101` → 标题在 `game+0x5A91C21` `int3`（就是 Wine 上“482 ms 就死”那一枪）。
+手工实现见 [src/xgameruntime/api_impl.cpp](src/xgameruntime/api_impl.cpp)；
+本机没有 mingw-w64，用 [tools/add_exports.py](tools/add_exports.py) 给现成 DLL 追加导出完成了验证（461 → 465）。
+
+> 交叉编译（在有 mingw-w64 的机器上）用 `./tools/build_linux_cross.sh`；产物仍是 Windows PE，由 Wine 加载。
+
+---
+
 ## 性能（本机实测）
 
 | 项目 | 实测 |
