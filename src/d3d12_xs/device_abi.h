@@ -1976,11 +1976,62 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
         return static_cast<std::uintptr_t>(E_INVALIDARG);
     }
 
+    // 可选：把 shader 字节码落盘（XBGTASIX_DUMP_SHADERS=<目录>）。
+    // 两个驱动（Intel igc / NVIDIA）都在编译这批 DXBC 时崩溃，需要把产物拿出来离线分析
+    // 它的 DXBC 分块结构（是否含主机专有的 XDAT/FSSM 块、程序块类型是什么）。
+    {
+        char dir[MAX_PATH] = {0};
+        if (GetEnvironmentVariableA("XBGTASIX_DUMP_SHADERS", dir, sizeof(dir)) > 0 && dir[0]) {
+            CreateDirectoryA(dir, nullptr);
+            char path[MAX_PATH] = {0};
+            std::snprintf(path, sizeof(path), "%s\\cs_%02d_len%llu.bin", dir, seq,
+                          desc ? static_cast<unsigned long long>(desc->CS.BytecodeLength) : 0ULL);
+            HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f != INVALID_HANDLE_VALUE) {
+                DWORD wrote = 0;
+                WriteFile(f, desc->CS.pShaderBytecode,
+                          static_cast<DWORD>(desc->CS.BytecodeLength), &wrote, nullptr);
+                CloseHandle(f);
+            }
+        }
+    }
+
+    // shader 的 RTS0：DXBC 容器里除程序块外还有 RTS0（它编译时用的 root signature）。
+    // 如果它声明的是主机语义（memory-based ABI 等），桌面驱动会按错误 ABI 编译 ->
+    // 实测 Intel/NVIDIA 两个驱动都在这里崩。所以在创建前对**字节码副本**做同样的剥离。
+    std::vector<unsigned char> sanitized;
+    const void* bytecode = desc ? desc->CS.pShaderBytecode : nullptr;
+    {
+        const std::size_t len = desc ? static_cast<std::size_t>(desc->CS.BytecodeLength) : 0;
+        // 默认关闭：实测剥离 shader 的 RTS0 会让进度退步（3376 -> 2860 行），
+        // 说明程序块与 RTS0 的一致性被破坏。保留为显式实验开关。
+        char sr[8] = {0};
+        const bool want_strip =
+            GetEnvironmentVariableA("XBGTASIX_STRIP_SHADER_RTS0", sr, sizeof(sr)) > 0 && sr[0] == '1';
+        if (want_strip && bytecode && len >= 32 && len <= (64u << 20) &&
+            std::memcmp(bytecode, "DXBC", 4) == 0) {
+            sanitized.assign(static_cast<const unsigned char*>(bytecode),
+                             static_cast<const unsigned char*>(bytecode) + len);
+            std::uint32_t bits = 0;
+            std::size_t at = 0;
+            if (xbgtasix::rootsig::strip_blob_for_pc(sanitized.data(), sanitized.size(), &bits, &at)) {
+                bytecode = sanitized.data();
+                static std::atomic<int> nsh{0};
+                if (nsh.fetch_add(1, std::memory_order_relaxed) < 8) {
+                    xbgtasix::logf("[d3d12_xs] 槽62 shader 的 RTS0 也剥了主机位 0x%x（位置 +%zu）",
+                                   bits, at);
+                }
+            }
+        }
+    }
+
     ID3D12PipelineState* pso = nullptr;
     HRESULT hr = E_INVALIDARG;
     if (desc && riid) {
         // 主机 desc 的 pRootSignature 是我们的代理对象：转交给桌面时需要原生对象。
         D3D12_COMPUTE_PIPELINE_STATE_DESC pc = *desc;
+        if (bytecode && bytecode != desc->CS.pShaderBytecode) pc.CS.pShaderBytecode = bytecode;
         hr = catch_deep("槽62 CreateComputePipelineState", [&] {
             return static_cast<ID3D12Device*>(self->pc)->CreateComputePipelineState(
                 &pc, *riid, reinterpret_cast<void**>(&pso));
