@@ -1889,7 +1889,27 @@ uintptr_t WINAPI forward_slot_strip_root(DeviceProxy* proxy, uintptr_t a1 = 0, u
                              uintptr_t, uintptr_t, uintptr_t, uintptr_t);
     const auto vt = *reinterpret_cast<void***>(static_cast<ID3D12Device*>(proxy->pc));
     const std::size_t pc_index = N;
-    return reinterpret_cast<Fn>(vt[pc_index])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+    static std::atomic<int> budget{32};
+    const uintptr_t ret = catch_deep("槽16/12 转发", [&]() -> uintptr_t {
+        return reinterpret_cast<Fn>(vt[pc_index])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+    });
+    if (budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+        unsigned long long caller = 0;
+        HMODULE mod = nullptr;
+        const auto* ra = static_cast<const unsigned char*>(__builtin_return_address(0));
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(ra), &mod) && mod) {
+            caller = reinterpret_cast<unsigned long long>(ra) -
+                     reinterpret_cast<unsigned long long>(mod);
+        }
+        xbgtasix::logf("[d3d12_xs] 槽%zu 转发(vt[%zu]) a1=0x%llx a2=0x%llx a3=0x%llx "
+                       "调用方=+0x%llX -> hr=0x%08lx",
+                       N, pc_index, static_cast<unsigned long long>(a1),
+                       static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
+                       caller, static_cast<unsigned long>(ret & 0xFFFFFFFFULL));
+    }
+    return ret;
 }
 
 // 主机槽 62 = compute PSO 创建。实测参数（12 参 dump）：

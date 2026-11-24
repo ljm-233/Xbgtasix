@@ -997,3 +997,53 @@ vtable[132] = 0x7FF90559CAD0 -> d3d12_xs.dll+0x4CAD0   （我们的通用桩）
 1. 在 shim 侧**记录所有返回负 HRESULT 的槽**（带槽号与调用方 RVA），
    与"最后一次负返回"对齐 —— 直接指出是哪个槽导致 `0x140FA09F0` 失败
 2. 再反汇编 `0x140FA09F0` 看它内部调的是哪个设备槽
+
+## 27. ★★★ 2026-11-24：致命原因 = **DXGI_ERROR_DEVICE_REMOVED**（GPU 设备被移除）
+
+给"槽 16 转发"加了返回值日志后，直接看到了失败点：
+
+```
+槽16 转发(vt[16]) a1=0x1 a2=<blob> a3=0xa4 调用方=+0xC38B  -> hr=0x00000000
+槽16 转发(vt[16]) a1=0x1 a2=<blob> a3=0x74 调用方=+0xFA0B3B -> hr=0x887a0005   ★
+```
+
+`0x887a0005` = **`DXGI_ERROR_DEVICE_REMOVED`**。
+
+同时确证了**槽 16 = `CreateRootSignature`**（参数 `(nodeMask=1, pBlob, blobSize, IID, out)`，
+与桌面签名逐项对应），我们绑的"消费端剥离"在参数映射上是正确的。
+
+### 因果链
+
+```
+Intel 的着色器编译器 igc-default64.dll 崩（前面几轮反复看到）
+    -> 驱动把设备标记为 REMOVED
+    -> 之后所有 D3D12 调用（含 CreateRootSignature）返回 0x887a0005
+    -> 游戏把负 HRESULT 交给致命上报器 -> SetUnhandledExceptionFilter -> int3
+```
+
+**所以 0x2474606 的 int3 是"设备已经没了"的下游后果，不是独立缺陷。**
+之前一直把它当"可以 patch 的断言"是错的方向 —— patch 它只会掩盖问题。
+
+### 两台机器的现状
+
+| 适配器 | 进度 | 结局 |
+|---|---|---|
+| Intel（igc 崩） | 3376 行 | DEVICE_REMOVED -> 自杀陷阱 |
+| RTX 5060 | 2719 行 | `0xC0000409` fail-fast / C++ 异常 |
+
+### 这说明什么
+
+到这一步，**我们的层已经把该给的都给了**：53 个 PSO 创建成功、根签名剥离、
+描述符堆、资源、UAV 全部 OK。剩下的阻塞来自**驱动/GPU 侧**：
+- Intel：编译器对这批 DXBC 崩（驱动 bug）
+- NVIDIA：更早触发 fail-fast（原因待查）
+
+### 下一步（方向性）
+
+1. **确认 RTX 上的 fail-fast 点**（0xC0000409 不走 SEH，需要别的观测手段），
+   如果它是游戏侧安全检查，那 NVIDIA 这条线可能更接近成功
+2. **记录触发 Intel igc 崩溃的具体 shader**（长度/校验和），按特征跳过该 PSO
+   以绕开驱动 bug —— 代价是画面缺一块，但能让流程继续
+3. 重新评估**着色器转换层**的必要性：DXBC 能被接受，但驱动在编译/执行时崩，
+   说明"格式对"不等于"语义对"（主机 ABI 相关的 root flags 我们剥了，
+   但 shader 里可能依赖主机特有的布局）
