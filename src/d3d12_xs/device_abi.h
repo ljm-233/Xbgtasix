@@ -2088,6 +2088,21 @@ inline HRESULT WINAPI slot86_probe(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0
     return S_OK;
 }
 
+// 主机槽 132：调用点 game+0x24745E4 `call *0x420(%rax)`，
+// 形态 (设备代理, edx=3)，返回值未被检查；紧随其后的是
+// XMemFree -> SetUnhandledExceptionFilter -> int3 的"决定终止"路径。
+// 先按"记录参数 + S_OK"试探（与槽 74 同样的处理）。
+inline HRESULT WINAPI slot132_ok(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
+                                 UINT64 d = 0) {
+    (void)self; (void)c; (void)d;
+    static std::atomic<int> n{0};
+    if (n.fetch_add(1, std::memory_order_relaxed) < 8) {
+        xbgtasix::logf("[d3d12_xs] 槽132 调用 a=0x%llx b=0x%llx -> S_OK（试探）",
+                       static_cast<unsigned long long>(a), static_cast<unsigned long long>(b));
+    }
+    return S_OK;
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
@@ -2124,6 +2139,7 @@ Slot device_slot() {
     // （实测 slot 70 直接崩在 D3D12Core）。未实现的一律走"明确失败 + 记一次"，
     // 让游戏走它自己的降级/报错路径，而不是在驱动内部炸掉。
     if constexpr (N == 74) return reinterpret_cast<Slot>(&slot74_ok);
+    if constexpr (N == 132) return reinterpret_cast<Slot>(&slot132_ok);
     if constexpr (N >= 44) return reinterpret_cast<Slot>(&device_extension_stub_n<N>);
     if (slot_probe_on()) return reinterpret_cast<Slot>(&slot_probe_forward<N>);  // 仅诊断用
     return reinterpret_cast<Slot>(&forward_slot<N>);

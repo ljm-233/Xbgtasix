@@ -234,6 +234,48 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
+    // 定点采集：game+0x2474606 是"SetUnhandledExceptionFilter 之后 int3"的自杀陷阱。
+    // 崩前两条调用是 (设备槽 50) 与 (全局 0x1475df048 的槽 132)。
+    // 这里把那个全局指向的对象、它的 vtable 归属、以及 vtable[132] 的归属都打出来，
+    // 用来判断"槽 132 打到了谁身上"。
+    if (code == EXCEPTION_BREAKPOINT && rva == 0x2474606) {
+        auto rd = [](unsigned long long a, unsigned long long* out) -> bool {
+            MEMORY_BASIC_INFORMATION m{};
+            if (!a || !VirtualQuery(reinterpret_cast<void*>(a), &m, sizeof(m))) return false;
+            if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+            std::memcpy(out, reinterpret_cast<const void*>(a), sizeof(*out));
+            return true;
+        };
+        const unsigned long long base = reinterpret_cast<unsigned long long>(addr) - rva;
+        unsigned long long obj = 0, vt = 0, fn132 = 0, fn50 = 0;
+        const bool ok_obj = rd(base + 0x75df048ULL, &obj);
+        const bool ok_vt = ok_obj && rd(obj, &vt);
+        const bool ok_fn = ok_vt && rd(vt + 132 * 8, &fn132);
+        logf("[xbgtasix]   陷阱采集：全局[game+0x75DF048]=0x%llX（%s） 对象 vtable=0x%llX（%s）",
+             obj, ok_obj ? "可读" : "不可读", vt, ok_vt ? "可读" : "不可读");
+        if (ok_fn) {
+            // 判定 vtable[132] 落进哪个模块
+            HMODULE m132 = nullptr;
+            char n132[128] = "<未知>";
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCWSTR>(fn132), &m132) && m132) {
+                char full[MAX_PATH] = {0};
+                GetModuleFileNameA(m132, full, MAX_PATH - 1);
+                const char* b = full;
+                for (const char* q = full; *q; ++q) if (*q == '\\' || *q == '/') b = q + 1;
+                std::snprintf(n132, sizeof(n132), "%s+0x%llX", b,
+                              fn132 - reinterpret_cast<unsigned long long>(m132));
+            }
+            logf("[xbgtasix]   vtable[132] = 0x%llX -> %s", fn132, n132);
+        }
+        unsigned long long dev_vt = 0;
+        const bool ok_dev = rd(base + 0x8759d00ULL, &dev_vt);
+        logf("[xbgtasix]   设备全局[game+0x8759D00] 的 vtable=0x%llX（%s）", dev_vt,
+             ok_dev ? "可读" : "不可读");
+        (void)fn50;
+    }
+
     if (code == EXCEPTION_BREAKPOINT && rva == 0x247AF2D) {
         const CONTEXT* c = info->ContextRecord;
         auto read_q = [](unsigned long long addr, unsigned long long* out) -> bool {
@@ -375,6 +417,48 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
         logf("[xbgtasix] ★ g 写断点命中！写指令结束于 %s+0x%llX，写后 g=0x%llX", name, rva,
              written);
         return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    // 定点采集：game+0x2474606 是"SetUnhandledExceptionFilter 之后 int3"的自杀陷阱。
+    // 崩前两条调用是 (设备槽 50) 与 (全局 0x1475df048 的槽 132)。
+    // 这里把那个全局指向的对象、它的 vtable 归属、以及 vtable[132] 的归属都打出来，
+    // 用来判断"槽 132 打到了谁身上"。
+    if (code == EXCEPTION_BREAKPOINT && rva == 0x2474606) {
+        auto rd = [](unsigned long long a, unsigned long long* out) -> bool {
+            MEMORY_BASIC_INFORMATION m{};
+            if (!a || !VirtualQuery(reinterpret_cast<void*>(a), &m, sizeof(m))) return false;
+            if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+            std::memcpy(out, reinterpret_cast<const void*>(a), sizeof(*out));
+            return true;
+        };
+        const unsigned long long base = reinterpret_cast<unsigned long long>(addr) - rva;
+        unsigned long long obj = 0, vt = 0, fn132 = 0, fn50 = 0;
+        const bool ok_obj = rd(base + 0x75df048ULL, &obj);
+        const bool ok_vt = ok_obj && rd(obj, &vt);
+        const bool ok_fn = ok_vt && rd(vt + 132 * 8, &fn132);
+        logf("[xbgtasix]   陷阱采集：全局[game+0x75DF048]=0x%llX（%s） 对象 vtable=0x%llX（%s）",
+             obj, ok_obj ? "可读" : "不可读", vt, ok_vt ? "可读" : "不可读");
+        if (ok_fn) {
+            // 判定 vtable[132] 落进哪个模块
+            HMODULE m132 = nullptr;
+            char n132[128] = "<未知>";
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCWSTR>(fn132), &m132) && m132) {
+                char full[MAX_PATH] = {0};
+                GetModuleFileNameA(m132, full, MAX_PATH - 1);
+                const char* b = full;
+                for (const char* q = full; *q; ++q) if (*q == '\\' || *q == '/') b = q + 1;
+                std::snprintf(n132, sizeof(n132), "%s+0x%llX", b,
+                              fn132 - reinterpret_cast<unsigned long long>(m132));
+            }
+            logf("[xbgtasix]   vtable[132] = 0x%llX -> %s", fn132, n132);
+        }
+        unsigned long long dev_vt = 0;
+        const bool ok_dev = rd(base + 0x8759d00ULL, &dev_vt);
+        logf("[xbgtasix]   设备全局[game+0x8759D00] 的 vtable=0x%llX（%s）", dev_vt,
+             ok_dev ? "可读" : "不可读");
+        (void)fn50;
     }
 
     if (code == EXCEPTION_BREAKPOINT && rva == 0x247AF2D) {
