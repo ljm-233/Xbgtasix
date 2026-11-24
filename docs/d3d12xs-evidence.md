@@ -144,3 +144,57 @@ DXBC  count=0    DXIL  count=0    SHDR  count=0    RDEF  count=0
 
 下一步验证方式：用 `rpf9-explorer`（第三方工具，不在本仓库内） 打开 `common.rpf` 试列目录。
 列得出来 → 只是压缩；列不出来 → 加密，资产路线也得等密钥。
+
+### 2026-11-24：走到 PresentX 之后的断言（`game+0x247AF2D`）
+
+真实 EXE 在槽 127/25/19 都返回成功之后，停在 `0x80000003`（int3）。两次运行同一地址，
+不是竞态。
+
+**现场**
+
+```
+XBGTASIX_VEH=1 XBGTASIX_LOG=build/real-veh.log ./game_scarlett_master.exe
+[xbgtasix] FATAL 异常 0x80000003 at game_scarlett_master.exe+0x247AF2D
+```
+
+复现前后最后几条 D3D12 调用是：槽 25 `GetResourceAllocationInfo`（`SizeInBytes=33423360`
+= 3840x2160x4，`Alignment=0x10000`）-> 槽 127 `CreateCommittedResource3`
+（`flags 0x300005 -> 0x5` 剥离主机位）-> 槽 19 `CreateUnorderedAccessView`。
+也就是说**两块 4K 资源已经建出来了**，断言发生在它们之后。
+
+**xref 结果**（`python tools/xref.py <exe> --addr 0x247AF2D --depth 1`）
+
+| 项 | 值 |
+|---|---|
+| 断言所在函数 | `0x247AD10..0x247AF58`（长度 `0x248`），自身**不引用任何导入** |
+| 调用者 | `0x2478440..0x2479682`（长度 `0x1242`），单调用点 `0x247942B(call)` |
+| 调用者引用的导入 | `XboxBvhBuilder.dll!??0XboxBvhBuilder@@QEAA@PEAUID3D12Device11@@_N@Z`（**构造函数，参数是 ID3D12Device11**）、`d3d12_xs.dll!D3D12XboxCreateDevice`、`CreateWindowExA`、`RegisterClassExA`、`ShowWindow`、`xmem.dll!XMemVirtualAlloc`、`VCRUNTIME140.dll!memset` |
+| 调用者里的字符串 | `sgaWindowClass` |
+
+**读法** [推断]：这一段是**"建窗口 + 构造 XboxBvhBuilder"的初始化**，断言紧跟在
+`XboxBvhBuilder` 构造之后。所以下一堵墙不在渲染循环，而在**光追加速结构的构建器**：
+它要一个 `ID3D12Device11`，用我们的设备代理构造，然后某个返回值得不到它期望的东西。
+
+**下一步的三条具体检查**
+
+1. `XboxBvhBuilder` 的构造函数是否真的成功？我们的设备代理已经能被 `QueryInterface`
+   成 `ID3D12Device11`（`t41` 断言过），但主机那份 DLL 可能还会查它自己的扩展 IID。
+   `XBGTASIX_SLOTPROBE=1` 跑一次，看构造期间进了哪些槽。
+2. 窗口类 `sgaWindowClass` 注册/创建是否成功——这一段同时在建窗口，`CreateWindowExA`
+   拿到 nullptr 也会让后面的断言炸，看上去像图形问题。
+3. 值得直接借的实测（[leonida-crossref](leonida-crossref.md) 4.5 节）：
+   `XboxBvhBuilder.dll` 的 rehydrate 路径把各 buffer 当 **CPU 指针**用、**不发设备调用**，
+   所以它本身能在 PC 上跑；参考实现用"层的 XDXR builder 顶替这个 DLL"（Leonida PR #7516），
+   并记下了 `BATCHED_DESC2`（0x50 B）与 BVH4 头的完整布局。
+
+**复跑**
+
+```bash
+cd "D:/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK"
+XBGTASIX_VEH=1 XBGTASIX_LOG="D:/GTA6/Xbgtasix/build/real-veh.log" ./game_scarlett_master.exe
+grep -a "FATAL" "D:/GTA6/Xbgtasix/build/real-veh.log"
+python ../Xbgtasix/tools/xref.py ./game_scarlett_master.exe --addr 0x247AF2D --depth 1
+```
+
+（`XBGTASIX_VEH=1` 是必须的：默认不开异常钩子时，int3 只表现为进程以 `0x80000003` 退出，
+日志里什么都没有。这次就是靠它才拿到地址。）
