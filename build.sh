@@ -558,6 +558,10 @@ echo "== t48_present.exe"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" -Isrc tests/t48_present/main.cpp src/trace.cpp \
     -ldxguid -ldxgi -ld3d12 -o "$OUT/t48_present.exe"
 
+echo "== t49_pso_warp.exe"
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t49_pso_warp/main.cpp \
+    -ld3d12 -ldxgi -ldxguid -o "$OUT/t49_pso_warp.exe"
+
 echo "== t47_pso.exe"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" -Isrc tests/t47_pso/main.cpp \
     -L"$OUT" -ld3d12_xs -ldxguid -ldxgi -ld3d12 -o "$OUT/t47_pso.exe"
