@@ -281,6 +281,15 @@ __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, 
         }
     }
     (void)device;
+    // 因果检验开关：让本函数返回失败，观察游戏是否因此改变执行路径。
+    // 用来验证"空实现 + S_OK 是否把游戏推上了错误路径"这个假设。
+    {
+        char f[16] = {0};
+        if (GetEnvironmentVariableA("XBGTASIX_VMCFG_FAIL", f, sizeof(f)) > 0 && f[0] == '1') {
+            xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX -> E_NOTIMPL（因果检验）");
+            return E_NOTIMPL;
+        }
+    }
     xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX：PC 由驱动管理显存，返回 S_OK");
     return S_OK;
 }

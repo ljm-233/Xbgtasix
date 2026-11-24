@@ -275,3 +275,45 @@ FATAL 异常 0xC0000005 at game+0x5C8FA96
    找出 `rax=0` 的来源（这是目前唯一还没被证伪的最近原因）
 2. 同时验证 `D3D12ConfigureVirtualMemoryX` 的上游假设：把它的返回值改成失败
    （`E_NOTIMPL`）跑一次，看崩溃点是否前移/改变 —— 这是最便宜的因果检验
+
+## 11. 2026-11-24 追加：因果检验 —— 该函数**必须成功**，问题在"内容"不在"返回值"
+
+用 `XBGTASIX_VMCFG_FAIL=1` 让 `D3D12ConfigureVirtualMemoryX` 返回 `E_NOTIMPL`，真机结果：
+
+```
+[d3d12_xs] D3D12ConfigureVirtualMemoryX -> E_NOTIMPL（因果检验）
+[xbgtasix] FATAL 异常 0x80000003 at game_scarlett_master.exe+0x1E1CFE9
+```
+
+反汇编 `0x1E1CFE9` 前后：
+
+```asm
+141e1cfe0  call 0x145f3fd60      ; 内部函数，实际上会走到我们的导出
+141e1cfe5  test %eax,%eax
+141e1cfe7  jns  0x141e1cfea      ; 非负（S_OK/S_FALSE）就继续
+141e1cfe9  int3                  ; 负值 -> 立刻断言
+```
+
+结论：
+
+1. **游戏硬依赖这个调用成功** —— 返回失败会立刻在下一行断言
+2. 所以"空实现 + S_OK"是**必须保留**的表象，但它掩盖了真正要做的事：
+   **把 config 里的 GPU VA 区间真正登记下来**
+3. 这也排除了"改成失败能让游戏走别的路径"的可能
+
+### 至此的完整因果链（已证）
+
+```
+D3D12ConfigureVirtualMemoryX 必须返回成功  (本轮实证：失败 -> 0x1E1CFE9 断言)
+        ↓ 但我们没登记 config 里的 GPU VA 区间
+游戏侧"GPU VA -> 记录"的表是空的
+        ↓
+瞬时块机制查不到记录，g_1475E6FF0 恒为 0
+        ↓
+game+0x247AF2D 的 "跨度 <= 2 MiB-1" 守卫恒假（begin=0, end=64MiB, g=0，算术上不可满足）
+        ↓
+即使跳过守卫，后续释放路径仍因缺少记录而在 game+0x5C8FA96 处 rax=0 崩溃
+```
+
+下一步只有一条路：**真正实现 config 的登记语义**（结构靠真机取证），
+而不是继续在守卫/瞬时块附近做规避。
