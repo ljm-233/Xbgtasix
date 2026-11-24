@@ -33,6 +33,24 @@ WINE="$PROTON_DIR/bin/wine"
 # win 路径：wine 要 Z:\... 形式
 to_win() { printf 'Z:%s' "$(printf '%s' "$1" | tr '/' '\\')"; }
 
+# ---------------------------------------------------------------------------
+# 盘符：Wine 只认 $WINEPREFIX/dosdevices 里的符号链接。
+# 实测（docs/wine-host.md 8.8）：shim 里的 DefineDosDeviceW(DDD_RAW_TARGET_PATH) 在 Wine 下
+# **返回成功但不生效** —— G:\appdata0.rpf 依旧 ERROR_FILE_NOT_FOUND(2)，而同一个文件用
+# D:\GTA6\... 全路径能开。三种写法（raw DOS / raw unix / 非 raw）都试过，都不行。
+# 于是这一步放到宿主侧做：启动**之前**把 g:/t: 建出来，新起的进程就能看见。
+#   g:  Xbox 的持久存储/内容盘（游戏在这里找 appdata0.rpf 等包内文件）
+#   t:  临时盘（崩溃转储、缓存）
+# ---------------------------------------------------------------------------
+setup_drive() {
+  local letter=$1 target=$2
+  mkdir -p "$target"
+  ln -sfn "$target" "$WINEPREFIX/dosdevices/$letter:"
+  echo "== 盘符      $letter: -> $target"
+}
+setup_drive g "$PKG"
+setup_drive t "$WINEPREFIX/drive_c/users/steamuser/AppData/Local/Xbgtasix/T"
+
 args=()
 dll_dir=""
 while [ $# -gt 0 ]; do

@@ -648,3 +648,83 @@ cmpb  $0x24,(%rdi)             ; '$' 字符特判（像环境变量/变量替换
 
 > 这一轮的账：把"猜注册表"换成了"看 gate 的入口参数"，并把 8.5/8.6 的错误结论
 > 原地标掉，不让它冒充事实往下传。**写断点没命中本身就是结论**：没人写，所以不是"该谁加"的问题。
+
+---
+
+## 9. 第 4 堵墙的真因：**Wine 里盘符映射是假成功**（已修，进度直接翻十倍）
+
+### 9.1 怎么看见的：一次性 int3 探针打出路径
+
+本机 wine **不投递硬件执行断点**（Dr2/Dr3 装上了、`Dr7=0x50`，零命中；写断点也一样），
+所以改用"一次性 int3 探针"：把游戏某条指令首字节改成 `0xCC`，命中后打寄存器、
+还原字节、把 Rip 拨回原指令继续跑（只改内存、不碰文件，与 `patch_game_assert` 同一套）。
+开关 `XBGTASIX_INT3_AT=<rva>,<rva>`。
+
+在 gate 里放两个探针（`0x56EB96` 拼完路径之后 / `0x56EC0A` 的 `'$'` 特判），原样输出：
+
+```
+[xbgtasix] 执行断点：int3 探针1 rdi -> "appdata0.rpf"（长度 12）
+[xbgtasix] 执行断点：int3 探针0 rbx -> "G:/appdata0.rpf"（长度 15）
+```
+
+**它要找的是 `G:/appdata0.rpf`。** 顺带回答了两件事：`'$'` 特判走到了，但字符串里没有 `$`，
+所以那条不是变量展开问题。
+
+### 9.2 再往下两个探针：查到了对象，但方法返回 -1
+
+```
+[xbgtasix] 探针0 @game+0x56EBA8  rax=0x1478F5E80 rbx=0x10FA80 …     ← 0x140968480(path,1) 非 NULL
+[xbgtasix] 探针1 @game+0x56EBBD  rax=0xFFFFFFFF rbx=0x10FA80 …     ← vtable[0x168/8=45] 返回 -1
+```
+
+lookup 成功、方法返回 `-1` —— 也就是"设备认了，文件打不开"。
+
+### 9.3 决定性的一行：同一个文件，G: 打不开，D: 打得开
+
+在探针里顺手用 Win32 自检同一个路径（不猜，直接问）：
+
+```
+Win32 侧自检 G:/appdata0.rpf -> attr=无 open=失败   GetLastError=2
+Win32 侧自检 G:\appdata0.rpf -> attr=无 open=失败   GetLastError=2
+Win32 侧自检 D:\GTA6\GTA6.Xbox.v1.0.2.1-CYBERLEEK\appdata0.rpf -> attr=有 open=成功
+```
+
+**`GetLastError=2` = ERROR_FILE_NOT_FOUND，但文件明明在。** 问题不是路径拼错、不是
+`$` 展开、不是包损坏 —— 是 **G: 这个盘符在 Wine 下根本没建立**。
+
+### 9.4 三种 DefineDosDevice 写法全部不生效
+
+`src/fstrace/drives.cpp` 原来用 `DefineDosDeviceW(DDD_RAW_TARGET_PATH, L"G:", L"\??\D:\…")`。
+改成"映射完立刻用 `GetFileAttributesW(L"G:\\")` 验一次"，并逐条换写法：
+
+```
+[drives] 映射 G: -> Z:\mnt\winbot-software\GTA6\GTA6.Xbox.v1.0.2.1-CYBERLEEK 调用成功但 G: 仍打不开，换写法重试
+[drives] unix 路径形式也不行（unix=/mnt/winbot-software/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK）
+[drives] !! G: 三种写法都没能生效 —— 依赖这个盘符的路径会全部 404
+```
+
+三种（raw DOS 目标 / raw unix 目标 / 非 raw）**调用都返回成功，但盘符都不存在**。
+又试了注册表 `HKCU\Software\Wine\Drives` 写 `G:` —— 也不行（`if exist G:\appdata0.rpf` → 否）。
+
+### 9.5 真正管用的是 `$WINEPREFIX/dosdevices` 里的符号链接
+
+```bash
+ln -sfn /mnt/winbot-software/GTA6/GTA6.Xbox.v1.0.2.1-CYBERLEEK "$WINEPREFIX/dosdevices/g:"
+wine cmd /c "if exist G:\appdata0.rpf (echo G_YES) else (echo G_NO)"   # -> G_YES
+```
+
+Wine 的盘符是**进程启动时**从 `dosdevices/`（和注册表）建出来的，所以必须在起进程**之前**建好。
+这一步放进了 `tools/run_wine.sh`（`setup_drive g "$PKG"` / `setup_drive t …`），
+并在 `drives.cpp` 里保留"映射后自检 + 失败时大声说"，免得下次又静默 404。
+
+### 9.6 结果：`game+0x2237178` 过去了，进度翻十倍
+
+| | 修盘符前 | 修盘符后 |
+|---|---|---|
+| 耗时 | 318 ms | **3186 ms** |
+| 日志 | 141 行 | **2699 行** |
+| `vtable[45]` 返回 | `0xFFFFFFFF` | **`0x80`** |
+| 停在哪 | `game+0x2237178`（空 vector 断言） | **`game+0x247AF2D`（就是真机上那堵 64 MiB）**，之后 `0xC0000005` at `game+0x55DEA79` |
+
+也就是说：**Wine 现在追平了真 Windows 当年的进度点**（`0x247AF2D` 那堵墙，
+见 [transient-block-wall.md](transient-block-wall.md)：跳过去在物理上不成立）。

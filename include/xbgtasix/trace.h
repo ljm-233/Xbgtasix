@@ -21,6 +21,14 @@ UnimplMode unimpl_mode();
 // 谁写、写多少都会打一行 [xbgtasix]。第 4 堵墙（game+0x2237178）就是被它=0 卡住的。
 void install_ctx_write_watchpoint();
 
+// XBGTASIX_TRACE_AT=<rva>,<rva>：在游戏的两个 RVA 上下执行断点（Dr2/Dr3），命中时把
+// rbx / rdi 当 C 字符串打出来。用来"看路径"，而不是靠反汇编猜路径。
+void install_trace_breakpoints();
+
+// XBGTASIX_INT3_AT=<rva>,<rva>：一次性 int3 探针（硬件执行断点在本机 wine 下不投递事件）。
+// 命中时把 rbx / rdi 当 C 字符串打进日志，然后还原字节继续跑。
+void install_int3_probes();
+
 void set_game_root(const char* path);
 const char* game_root();
 

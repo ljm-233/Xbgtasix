@@ -139,7 +139,8 @@ python3 tools/host_probe.py --doctor     # 宿主是不是 Wine + 真实 GPU（�
 |---|---|---|
 | 图形栈 | 桌面 D3D12 | **必须**走 dxvk + vkd3d-proton（`run_wine.sh` 已配）；用 wine builtin 的 `dxgi`/`wined3d` 会在导入阶段就 `0xC0000135` |
 | 适配器信息 | 真卡 | 详情随环境变：给对栈时报真卡但不保证厂商号（实测把 NVIDIA 报成 `1002`），走 builtin 路径时会报占位卡 —— **别只信 DXGI**，用 `host_probe.py` / `doctor` 的 `真实 GPU` 行 |
-| 进度 | 到资源归档读取 / `game+0x247AF2D`（64 MiB 断言） | 到 `game+0x2237178`（空的诊断 vector 断言）；路上依次越过 `game+0x5A91C21`（缺四个内部导出）、`game+0x55DE020`（`QueryApiImpl` 空对象）、`game+0x5925915`（Wine 的 `GameInputCreate` 返回 `E_NOTIMPL`，靠 `SteamGameId` 越过）。第 4 堵墙已用硬件写断点定位到"按 `appdata0.rpf` 查东西的 gate 返回 false"，见 `docs/wine-host.md` 第 8 节 |
+| 进度 | 到资源归档读取 / `game+0x247AF2D`（64 MiB 断言） | 同样到 `game+0x247AF2D`（3186 ms / 2699 行）—— 修掉 Wine 盘符假成功之后追平了真机口 |
+| 盘符 | 平台挂载 | **Wine 的盘符只能来自 `$WINEPREFIX/dosdevices` 符号链接**；`DefineDosDeviceW` 在 Wine 下返回成功却不生效（三种写法都试过）。`tools/run_wine.sh` 会在启动前建 `g:`/`t:` | 到 `game+0x2237178`（空的诊断 vector 断言）；路上依次越过 `game+0x5A91C21`（缺四个内部导出）、`game+0x55DE020`（`QueryApiImpl` 空对象）、`game+0x5925915`（Wine 的 `GameInputCreate` 返回 `E_NOTIMPL`，靠 `SteamGameId` 越过）、`game+0x2237178`（`appdata0.rpf` 在 `G:` 上打不开 —— Wine 盘符假成功），见 `docs/wine-host.md` 第 8、9 节 |
 | 主机检测 | — | `XBGTASIX_PLATFORM=windows\|wine` 可手动钉死；不设则探测 `ntdll!wine_get_version` |
 
 怎么跑起来的关键一步（本次实测的根因）：标题的 GDK 引导要按名字从 `xgameruntime.dll` 解析

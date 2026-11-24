@@ -64,6 +64,8 @@ STDAPI InitializeApiImplEx2(unsigned long long a, unsigned long long b, unsigned
     // 标题在这一步之后才会去读 ctx+0xC04（第 4 堵墙）。趁现在把写断点装上 ——
     // 这时 ctx（TLS +0x7F0）已经存在，早于它太早（DllMain 时期还是空的）。
     xbgtasix::install_ctx_write_watchpoint();
+    xbgtasix::install_trace_breakpoints();
+    xbgtasix::install_int3_probes();
     return S_OK;
 }
 
@@ -188,6 +190,8 @@ extern "C" {
 // 真实语义未知；这里只做"给一个能安全解引用的对象"。
 STDAPI QueryApiImpl(unsigned long long api_id, unsigned long long version, void** out) {
     xbgtasix::install_ctx_write_watchpoint();   // 幂等：装过就只返回
+    xbgtasix::install_trace_breakpoints();
+    xbgtasix::install_int3_probes();
     xbgtasix::logf("[xgamert] QueryApiImpl(id=%016llX ver=%016llX) -> 哑对象（槽 %d 干活、%d 释放）",
                    api_id, version, kWorkSlot, kReleaseSlot);
     if (!out) return E_POINTER;

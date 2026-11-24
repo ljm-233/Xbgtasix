@@ -175,6 +175,10 @@ UnimplMode unimpl_mode_cached() {
 // ---------------------------------------------------------------------------
 // 前向声明：ctx 写断点（定义在文件后段）也要在异常钩子里用 —— 命中后要重建 ctx 读值。
 void* ctx_from_teb();
+void log_cstring_at(const char* what, const void* p);
+extern unsigned long long g_int3_addr[2];
+extern unsigned char g_int3_orig[2];
+extern bool g_int3_done[2];
 
 LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     // 只记一次会漏：第一个异常可能是可恢复的（例如 xmem 的按需提交 AV），
@@ -228,6 +232,16 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
             info->ContextRecord ? static_cast<unsigned long long>(info->ContextRecord->Dr6) : 0;
         const bool hit_ctx = (dr6 & 0x2) != 0;
         const bool hit_g = (dr6 & 0x1) != 0;
+        if (dr6 & 0x4) {   // Dr2：拼完路径之后，rbx = 缓冲区
+            log_cstring_at("dv+0x56EB96 rbx", reinterpret_cast<const void*>(
+                                                 info->ContextRecord->Rbx));
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (dr6 & 0x8) {   // Dr3：'$' 特判那里，rdi = 字符串
+            log_cstring_at("dv+0x56EC0A rdi", reinterpret_cast<const void*>(
+                                                 info->ContextRecord->Rdi));
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         if (hit_ctx) {
             // ctx 是线程本地的：重建一次，别缓存（换线程就换了对象）
             void* c = ctx_from_teb();
@@ -272,6 +286,56 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     //   - ctx 及其 0xC00..0xC0C 四个字段（gate 的入口条件在这里）
     //   - 断言对象 rsi 的 {cap,count,data}（确认它是不是真的空）
     //   - gate 的两个字符串参数（.data 里 0x74539F6 / .rdata 里 0x678D1BB）
+    // 一次性 int3 探针：命中就打出字符串、还原字节、把 Rip 拨回原指令，继续跑。
+    if (code == EXCEPTION_BREAKPOINT) {
+        for (int i = 0; i < 2; ++i) {
+            if (!g_int3_addr[i] || g_int3_done[i]) continue;
+            if (reinterpret_cast<unsigned long long>(addr) != g_int3_addr[i]) continue;
+            const CONTEXT* r = info->ContextRecord;
+            logf("[xbgtasix] 探针%d @game+0x%llX  rax=0x%llX rbx=0x%llX rcx=0x%llX rdx=0x%llX",
+                 i, reinterpret_cast<unsigned long long>(addr) -
+                        reinterpret_cast<unsigned long long>(GetModuleHandleW(nullptr)),
+                 static_cast<unsigned long long>(r->Rax),
+                 static_cast<unsigned long long>(r->Rbx),
+                 static_cast<unsigned long long>(r->Rcx),
+                 static_cast<unsigned long long>(r->Rdx));
+            if (i == 0) {
+                log_cstring_at("int3 探针0 rbx", reinterpret_cast<const void*>(r->Rbx));
+                // 顺手从 Win32 这一侧验一下同一个路径到底能不能开 —— 用来区分
+                // "文件真找不到"（路径/映射问题）与 "游戏自己的设备层不认"（语义问题）。
+                {
+                    const char* cand[3] = {"G:/appdata0.rpf", "G:\\appdata0.rpf",
+                                           "D:\\GTA6\\GTA6.Xbox.v1.0.2.1-CYBERLEEK\\appdata0.rpf"};
+                    for (int k = 0; k < 3; ++k) {
+                        const DWORD attr = GetFileAttributesA(cand[k]);
+                        HANDLE h = CreateFileA(cand[k], GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                        const DWORD err = (h == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
+                        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+                        logf("[xbgtasix]   Win32 侧自检 %s -> attr=%s open=%s%s", cand[k],
+                             attr == INVALID_FILE_ATTRIBUTES ? "无" : "有",
+                             h == INVALID_HANDLE_VALUE ? "失败" : "成功",
+                             err ? "" : "");
+                        if (err) logf("[xbgtasix]     GetLastError=%lu", err);
+                    }
+                }
+            } else {
+                log_cstring_at("int3 探针1 rdi", reinterpret_cast<const void*>(r->Rdi));
+            }
+            g_int3_done[i] = true;
+            auto* target = reinterpret_cast<unsigned char*>(g_int3_addr[i]);
+            DWORD oldp = 0;
+            if (VirtualProtect(target, 1, PAGE_EXECUTE_READWRITE, &oldp)) {
+                *target = g_int3_orig[i];
+                DWORD tmp = 0;
+                VirtualProtect(target, 1, oldp, &tmp);
+                FlushInstructionCache(GetCurrentProcess(), target, 1);
+            }
+            info->ContextRecord->Rip = g_int3_addr[i];   // 回到原指令重新执行
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+
     if (code == EXCEPTION_BREAKPOINT && rva == 0x2237178) {
         void* c = ctx_from_teb();
         if (c) {
@@ -798,6 +862,157 @@ void install_ctx_write_watchpoint() {
          reinterpret_cast<unsigned long long>(ctx), target,
          static_cast<unsigned long long>(c.Dr7),
          *reinterpret_cast<volatile int*>(reinterpret_cast<unsigned char*>(ctx) + 0xC04));
+}
+
+// ---------------------------------------------------------------------------
+// 执行断点（Dr2/Dr3）：把"某个 RVA 被走到时的寄存器/缓冲区"打出来。
+//
+// 起因：第 4 堵墙那条 gate 里，唯一看不见的就是"它到底在找哪个路径" ——
+// 拼路径的调用是 `call 0x14128BB70(dst, 0x100, …)`，之后 `rbx` 一直是这块栈缓冲。
+// 于是在**调用之后那条指令**上下执行断点，命中时把 rbx 当 C 字符串打出来，
+// 比反汇编去猜快得多，也不用改游戏的一个字节（硬件断点）。
+//
+// 开关：XBGTASIX_TRACE_AT=<rva 十六进制>,<rva>   （最多两个，对应 Dr2/Dr3）
+//   Dr2 命中（Dr6 bit2）→ 打 rbx 指向的字符串
+//   Dr3 命中（Dr6 bit3）→ 打 rdi 指向的字符串
+// 用法实例（第 4 堵墙）：
+//   XBGTASIX_TRACE_AT=56EB96,56EC0A
+//   56EB96 = 0x14056EB91 `call 0x14128BB70` 的**下一条**（拼完路径之后）
+//   56EC0A = `cmpb $0x24,(%rdi)`（'$' 特判那一条，看它走没走到）
+// ---------------------------------------------------------------------------
+void log_cstring_at(const char* what, const void* p) {
+    if (!p) {
+        logf("[xbgtasix] 执行断点：%s 是空指针", what);
+        return;
+    }
+    char out[256];
+    int n = 0;
+    const auto* b = static_cast<const unsigned char*>(p);
+    for (; n < static_cast<int>(sizeof(out)) - 1 && n < 512; ++n) {
+        const unsigned char ch = b[n];
+        if (ch == 0) break;
+        out[n] = (ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : '?';
+    }
+    out[n] = 0;
+    if (n == 0) {
+        logf("[xbgtasix] 执行断点：%s -> 空字符串（前 8 字节 %02X %02X %02X %02X %02X %02X %02X %02X）",
+             what, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        return;
+    }
+    logf("[xbgtasix] 执行断点：%s -> \"%s\"（长度 %d）", what, out, n);
+}
+
+void install_trace_breakpoints() {
+    char env[64] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_TRACE_AT", env, sizeof(env)) == 0) return;
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (!exe) return;
+    const auto base = reinterpret_cast<unsigned long long>(exe);
+    unsigned long long rvas[2] = {0, 0};
+    int idx = 0;
+    const char* p = env;
+    char tok[24] = {0};
+    int tn = 0;
+    for (;; ++p) {
+        const char c = *p;
+        if (c == ',' || c == ';' || c == 0) {
+            if (tn > 0 && idx < 2) {
+                tok[tn] = 0;
+                rvas[idx++] = std::strtoull(tok, nullptr, 16);
+            }
+            tn = 0;
+            if (c == 0) break;
+            continue;
+        }
+        if (tn + 1 < static_cast<int>(sizeof(tok))) tok[tn++] = c;
+    }
+    if (!rvas[0] && !rvas[1]) return;
+
+    CONTEXT c{};
+    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    HANDLE th = GetCurrentThread();
+    if (!GetThreadContext(th, &c)) {
+        logf("[xbgtasix] 执行断点：取线程上下文失败 err=%lu", GetLastError());
+        return;
+    }
+    unsigned long long seen[4] = {c.Dr0, c.Dr1, c.Dr2, c.Dr3};
+    unsigned long long want[2] = {rvas[0] ? base + rvas[0] : 0, rvas[1] ? base + rvas[1] : 0};
+    bool same = true;
+    if (want[0]) {
+        if (c.Dr2 == want[0] && (c.Dr7 & 0x10)) { /* 已装 */ } else same = false;
+    }
+    if (want[1]) {
+        if (c.Dr3 == want[1] && (c.Dr7 & 0x40)) { /* 已装 */ } else same = false;
+    }
+    (void)seen;
+    if (same) return;
+    if (want[0]) { c.Dr2 = want[0]; c.Dr7 |= 0x10; }   // L2=bit4, RW/LEN=00 → 1 字节执行断点
+    if (want[1]) { c.Dr3 = want[1]; c.Dr7 |= 0x40; }   // L3=bit6
+    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!SetThreadContext(th, &c)) {
+        logf("[xbgtasix] 执行断点：设置失败 err=%lu", GetLastError());
+        return;
+    }
+    logf("[xbgtasix] 已装执行断点：Dr2=game+0x%llX Dr3=game+0x%llX Dr7=0x%llX", rvas[0], rvas[1],
+         static_cast<unsigned long long>(c.Dr7));
+}
+
+// ---------------------------------------------------------------------------
+// 一次性 int3 探针（因为本机 wine 不投递硬件执行断点的 #DB，实测 Dr2/Dr3 装上了却零命中）：
+// 把游戏某条指令的首字节改成 0xCC，命中时打出 rbx/rdi 指向的字符串，**然后还原该字节**、
+// 把 Rip 拨回指令开头继续跑。只抓第一次，够看清"它在找什么"就行。
+// 只改内存，不碰游戏文件（与 patch_game_assert 同一套做法）。
+//
+// 开关：XBGTASIX_INT3_AT=<rva>,<rva>
+//   第一个命中打 rbx，第二个命中打 rdi（与执行断点的约定一致，方便同一条命令换着用）。
+// ---------------------------------------------------------------------------
+unsigned long long g_int3_addr[2] = {0, 0};
+unsigned char g_int3_orig[2] = {0, 0};
+bool g_int3_done[2] = {false, false};
+
+void install_int3_probes() {
+    char env[64] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_INT3_AT", env, sizeof(env)) == 0) return;
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (!exe) return;
+    const auto base = reinterpret_cast<unsigned long long>(exe);
+    unsigned long long rvas[2] = {0, 0};
+    int idx = 0;
+    const char* p = env;
+    char tok[24] = {0};
+    int tn = 0;
+    for (;; ++p) {
+        const char c = *p;
+        if (c == ',' || c == ';' || c == 0) {
+            if (tn > 0 && idx < 2) { tok[tn] = 0; rvas[idx++] = std::strtoull(tok, nullptr, 16); }
+            tn = 0;
+            if (c == 0) break;
+            continue;
+        }
+        if (tn + 1 < static_cast<int>(sizeof(tok))) tok[tn++] = c;
+    }
+    int armed = 0;
+    for (int i = 0; i < 2; ++i) {
+        if (!rvas[i]) continue;
+        if (g_int3_addr[i]) continue;                 // 已装
+        auto* target = reinterpret_cast<unsigned char*>(base + rvas[i]);
+        DWORD oldp = 0;
+        if (!VirtualProtect(target, 1, PAGE_EXECUTE_READWRITE, &oldp)) {
+            logf("[xbgtasix] int3 探针：game+0x%llX VirtualProtect 失败 err=%lu", rvas[i],
+                 GetLastError());
+            continue;
+        }
+        g_int3_orig[i] = *target;
+        *target = 0xCC;
+        DWORD tmp = 0;
+        VirtualProtect(target, 1, oldp, &tmp);
+        FlushInstructionCache(GetCurrentProcess(), target, 1);
+        g_int3_addr[i] = base + rvas[i];
+        ++armed;
+        logf("[xbgtasix] 已装 int3 探针 %d：game+0x%llX（原字节 0x%02X）", i, rvas[i],
+             g_int3_orig[i]);
+    }
+    if (armed) logf("[xbgtasix] int3 探针汇总：新装 %d 个", armed);
 }
 
 void maybe_install_veh() {
