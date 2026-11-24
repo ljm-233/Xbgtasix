@@ -110,7 +110,10 @@
 
 `t38_xboxui` 渲染出的第一版界面（自绘，无第三方 UI 库）：
 
-![Xbox 风格 shell](../docs/images/xboxui.png)
+> **效果图不入库**：`t38_xboxui` 会把自绘的 shell 窗口渲染成一帧并落盘到
+> `build/suite/xboxui.bmp`（`tools/run_suite.sh` 里已经这么调了）。
+> 需要看图时本地跑一次套件即可，仓库里不保留二进制图片 —— 这是合规护栏
+> （[asset-policy.md](asset-policy.md)）的要求，例外表因此保持为空。
 
 包含：顶部品牌条 + 绿色分隔线、左侧四项导航（选中态高亮）、右侧三张卡片、
 底部操作提示。全部由「色块 + GDI 文字图集」两种图元组成。
