@@ -61,6 +61,15 @@ IDXGIAdapter1* g_picked = nullptr;
 bool g_picked_valid = false;
 
 IDXGIAdapter1* pick_adapter() {
+    // 强制 WARP（软件渲染）：实测硬件驱动（Intel igc / NVIDIA）编译游戏送的 DXIL 会崩，
+    // 而 WARP 能编译 48/53（见 tests/t49_pso_warp）。用它把流程再往前推一段。
+    {
+        char warp[8] = {0};
+        if (GetEnvironmentVariableA("XBGTASIX_FORCE_WARP", warp, sizeof(warp)) > 0 && warp[0] == '1') {
+            xbgtasix::logf("[d3d12_xs] 强制 WARP（XBGTASIX_FORCE_WARP=1）—— 软件渲染");
+            return nullptr;   // nullptr 交给 D3D12CreateDevice 即选 WARP
+        }
+    }
     char mode[32] = {0};
     GetEnvironmentVariableA("XBGTASIX_ADAPTER", mode, sizeof(mode));
     if (_stricmp(mode, "default") == 0) return nullptr;
