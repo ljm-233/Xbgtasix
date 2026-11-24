@@ -613,3 +613,48 @@ epilogue 的真实约定（反汇编 `0x247AF2E` 起）：
 2. 实现 slot 62：拿 `a` 当 desc、按桌面 `CreateComputePipelineState` 创建，
    把结果写回 out；slot 60 同理用 `CreateGraphicsPipelineState`
 3. 跑真机，看是否推进到命令列表录制 / PresentX
+
+## 19. ★★ 2026-11-24 进展：槽 62 真实实现，我们的三层能力在同一跑里被真实调用
+
+### 槽 62 已从桩升级为真实现
+
+用 12 参 dump 拿到完整签名后实现（`create_compute_pso_x`）：
+
+```
+槽62 compute PSO #1：desc=0x... shader=0x... len=5136 -> hr=0x00000000 pso=0x2637c6724a0
+```
+
+**5136 字节的 DXBC compute shader 被桌面驱动直接接受，PSO 创建成功。**
+
+### 关键发现：返回约定影响推进距离
+
+| `XBGTASIX_PSO62_RET` | 结果 |
+|---|---|
+| `ptr`（RAX 返回对象，默认） | 日志 2486 行，随后抛 C++ 异常 `0xE06D7363` |
+| `hr`（返回 S_OK） | **日志 2509 行**，崩溃后移到 `XboxBvhBuilder.dll+0xC4F3` |
+
+即：这条 ABI **不是**"RAX 返回对象"，而是标准 HRESULT + 其它方式取对象。
+（与槽 25 的 sret 反向 ABI 不同，不能一概而论。）
+
+### 同一跑里，我们此前实现的三层能力全部真机生效
+
+```
+D3D12SerializeVersionedRootSignature v=1.1: 原始 flags=0x03000000
+    剥主机位=0x03000000 -> 剥后=0x00000000 写回=成功(+64) hr=0x00000000
+消费端根签名剥离：blob=0x... size=140 主机位=0x3000000 位置=+64
+槽62 compute PSO #1: ... hr=0x00000000
+```
+
+即：**主机位剥离 -> 桌面序列化 -> 写回 -> 消费端再剥 -> PSO 创建成功**，
+这条链第一次在真机上完整跑通（此前只有单元测试覆盖）。
+
+### 当前新阻塞：`XboxBvhBuilder.dll+0xC4F3`（访问冲突）
+
+这是**标题自带**的 DLL（census 判定为 `Title`，7 个符号）。它是主机原生二进制，
+在我们环境里执行时崩在内部。下一步要查：
+1. 它调用了哪些导入（可能是我们只做了桩的 xgameruntime 导出）
+2. 崩点的寄存器/内存形态（`XBGTASIX_VEH=1` 已有现场）
+
+### 状态
+
+全套：52 PASS / 1 SKIP / 0 FAIL / 1 已知失败（t47 的桩契约断言待随槽 62 升级而更新）。

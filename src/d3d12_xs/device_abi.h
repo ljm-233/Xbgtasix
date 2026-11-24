@@ -891,12 +891,15 @@ inline void host_pso_try_create_graphics(DeviceProxy* self, UINT64 desc_addr) {
 template <std::size_t N>
 HRESULT WINAPI host_pso_slot_stub(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
                                   UINT64 d = 0, UINT64 e = 0, UINT64 f = 0, UINT64 g = 0,
-                                  UINT64 h = 0) {
+                                  UINT64 h = 0, UINT64 i = 0, UINT64 j = 0, UINT64 k = 0,
+                                  UINT64 l = 0) {
     static_assert(is_host_pso_slot(N), "host_pso_slot_stub 只用于 55/60/61/62/66/67");
     static std::atomic<int> detailed{24};  // 每个槽前 24 次调用打完整 dump
     static std::atomic<UINT64> calls{0};
     const UINT64 call_index = calls.fetch_add(1, std::memory_order_relaxed) + 1;
-    const UINT64 args[8] = {a, b, c, d, e, f, g, h};
+    // 扩到 12 个：Xbox 的 PSO 创建通常还有 flags/nodeMask/ppPSO 等尾部参数，
+    // 8 个不够定位 out 指针（实测首个 slot=62 调用前 8 个里没有可写的栈指针）。
+    const UINT64 args[12] = {a, b, c, d, e, f, g, h, i, j, k, l};
     (void)self;
 
     if (detailed.fetch_sub(1, std::memory_order_relaxed) > 0) {
@@ -924,8 +927,8 @@ HRESULT WINAPI host_pso_slot_stub(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0,
                        static_cast<unsigned long long>(f),
                        static_cast<unsigned long long>(g),
                        static_cast<unsigned long long>(h));
-        for (int i = 0; i < 8; ++i) {
-            const UINT64 addr = args[i];
+        for (int arg = 0; arg < 12; ++arg) {
+            const UINT64 addr = args[arg];
             if (addr < 0x10000) continue;  // 小整数/空指针：不是可指向的地址
             MEMORY_BASIC_INFORMATION m{};
             const std::size_t span = host_readable_span(addr, 64, &m);
@@ -968,8 +971,8 @@ HRESULT WINAPI host_pso_slot_stub(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0,
         // 60/62：对每个参数做"按桌面 desc 布局读是否合法"的自检。
         // 通过 = 最可能的 desc 参数；不合格 = 直接给出第一个非法字段的偏移与值。
         if constexpr (N == kHostGraphicsPsoSlot || N == kHostComputePsoSlot) {
-            for (int i = 0; i < 8; ++i) {
-                const UINT64 addr = args[i];
+            for (int arg = 0; arg < 12; ++arg) {
+                const UINT64 addr = args[arg];
                 if (addr < 0x10000) continue;
                 const PsoShapeResult shape =
                     N == kHostGraphicsPsoSlot
@@ -1863,6 +1866,71 @@ uintptr_t WINAPI forward_slot_strip_root(DeviceProxy* proxy, uintptr_t a1 = 0, u
     return reinterpret_cast<Fn>(vt[pc_index])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
 }
 
+// 主机槽 62 = compute PSO 创建。实测参数（12 参 dump）：
+//   a = D3D12_COMPUTE_PIPELINE_STATE_DESC*（+0x00 pRootSignature / +0x08 DXBC 字节码 /
+//       +0x10 长度 0x1410=5136），d = IID 形态指针，f = 0xffffffff00000002。
+// 观察到的这条 ABI 与槽 25 一样是"输出不经标准 out 参数"的风格，因此先试两种返回：
+//   XBGTASIX_PSO62_RET=ptr（默认）-> 成功时把 PSO 指针放 RAX
+//   XBGTASIX_PSO62_RET=hr         -> 成功时返回 S_OK
+// 两种都会把 PSO 缓存起来，日志里能看出游戏到底吃哪一种。
+inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0,
+                                                  UINT64 c = 0, UINT64 d = 0, UINT64 e = 0,
+                                                  UINT64 f = 0, UINT64 g = 0, UINT64 h = 0,
+                                                  UINT64 i = 0, UINT64 j = 0, UINT64 k = 0,
+                                                  UINT64 l = 0) {
+    (void)b; (void)c; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l;
+    auto* desc = reinterpret_cast<const D3D12_COMPUTE_PIPELINE_STATE_DESC*>(a);
+    auto* riid = reinterpret_cast<const IID*>(d);
+    static std::atomic<int> calls{0};
+    const int n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    // pso62 防御：只有 desc/riid/字节码都"看起来可读"时才去碰驱动。
+    // 没有这层校验时，任何拿垃圾指针调用本槽的代码（包括测试）都会把驱动带崩。
+    auto readable = [](const void* p, SIZE_T n) -> bool {
+        if (!p || !n) return false;
+        MEMORY_BASIC_INFORMATION m{};
+        if (!VirtualQuery(p, &m, sizeof(m))) return false;
+        if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+        const auto start = reinterpret_cast<const char*>(p);
+        const auto end = start + n;
+        const auto region_end = static_cast<const char*>(m.BaseAddress) + m.RegionSize;
+        return end <= region_end;
+    };
+    const bool desc_ok =
+        readable(desc, sizeof(D3D12_COMPUTE_PIPELINE_STATE_DESC)) &&
+        readable(desc->CS.pShaderBytecode, static_cast<SIZE_T>(desc->CS.BytecodeLength)) &&
+        desc->CS.BytecodeLength > 0 && desc->CS.BytecodeLength < (64u << 20) &&
+        (desc->pRootSignature == nullptr || readable(desc->pRootSignature, 8));
+    if (!desc_ok) {
+        if (n <= 12)
+            xbgtasix::logf("[d3d12_xs] 槽62 拒绝：desc/字节码不可读（desc=%p len=%llu）",
+                           static_cast<const void*>(desc),
+                           desc ? static_cast<unsigned long long>(desc->CS.BytecodeLength) : 0ULL);
+        return static_cast<std::uintptr_t>(E_INVALIDARG);
+    }
+
+    ID3D12PipelineState* pso = nullptr;
+    HRESULT hr = E_INVALIDARG;
+    if (desc && riid) {
+        // 主机 desc 的 pRootSignature 是我们的代理对象：转交给桌面时需要原生对象。
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pc = *desc;
+        hr = static_cast<ID3D12Device*>(self->pc)->CreateComputePipelineState(
+            &pc, *riid, reinterpret_cast<void**>(&pso));
+    }
+    if (n <= 12) {
+        xbgtasix::logf("[d3d12_xs] 槽62 compute PSO #%d：desc=%p shader=%p len=%llu -> hr=0x%08lx pso=%p",
+                       n, static_cast<const void*>(desc),
+                       desc ? desc->CS.pShaderBytecode : nullptr,
+                       desc ? static_cast<unsigned long long>(desc->CS.BytecodeLength) : 0ULL,
+                       static_cast<unsigned long>(hr), static_cast<void*>(pso));
+    }
+    char mode[16] = {0};
+    GetEnvironmentVariableA("XBGTASIX_PSO62_RET", mode, sizeof(mode));
+    if (mode[0] == 'h') return SUCCEEDED(hr) ? static_cast<std::uintptr_t>(S_OK)
+                                             : static_cast<std::uintptr_t>(hr);
+    return reinterpret_cast<std::uintptr_t>(pso);   // 默认：RAX 返回对象
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
@@ -1890,7 +1958,11 @@ Slot device_slot() {
     // 主机 PSO 相关槽：55/60/61/62/66/67 走带完整参数 dump 的专用桩（仍是 E_NOTIMPL，
     // 但打出槽号、调用方 RVA、8 个参数、可读指针的前 64 B 与桌面 desc 形状自检）。
     if constexpr (is_host_pso_slot(N))
-        return reinterpret_cast<Slot>(&host_pso_slot_stub<N>);
+        if constexpr (N == 62) {
+            return reinterpret_cast<Slot>(&create_compute_pso_x);
+        } else {
+            return reinterpret_cast<Slot>(&host_pso_slot_stub<N>);
+        }
     // 主机扩展槽（>= 44）在 PC 设备上**不存在**，按同号转发会把参数喂给别的方法
     // （实测 slot 70 直接崩在 D3D12Core）。未实现的一律走"明确失败 + 记一次"，
     // 让游戏走它自己的降级/报错路径，而不是在驱动内部炸掉。
