@@ -19,8 +19,10 @@
 #include "xbgtasix/host_stall.h"
 #include "xbgtasix/trace.h"
 
-#include "descriptor_heap_abi.h"   // 句柄翻译表（描述符 CPU 句柄：arena 地址 <-> PC 堆地址）
 #include "descriptor_heap_abi.h"
+#include "root_sig.h"   // 消费端根签名剥离（blob 里的主机位）   // 句柄翻译表（描述符 CPU 句柄：arena 地址 <-> PC 堆地址）
+#include "descriptor_heap_abi.h"
+#include "root_sig.h"   // 消费端根签名剥离（blob 里的主机位）
 #include "frame_events.h"
 #include "present_x.h"
 
@@ -1804,6 +1806,44 @@ inline UINT WINAPI get_descriptor_increment_x(DeviceProxy* self, D3D12_DESCRIPTO
     return kHostIncrement;
 }
 
+// 消费端根签名剥离：序列化时我们把主机位写回了 blob（主机侧反序列化器需要），
+// 但桌面 CreateRootSignature 不收带主机位的 blob（实测 0x80004005 E_FAIL）。
+// 这里在调用桌面之前把 RTS0 段的主机位清掉。
+// 安全性：blob 不是合法 DXBC / 没有 RTS0 / 本来就没有主机位时，**一个字节都不改**，
+// 只是原样透传 —— 所以即使这个槽不是 CreateRootSignature 也不会破坏调用。
+template <std::size_t N>
+uintptr_t WINAPI forward_slot_strip_root(DeviceProxy* proxy, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                         uintptr_t a3 = 0, uintptr_t a4 = 0, uintptr_t a5 = 0,
+                                         uintptr_t a6 = 0, uintptr_t a7 = 0, uintptr_t a8 = 0,
+                                         uintptr_t a9 = 0) {
+    // 根签名创建的参数形状：(nodeMask, pBlob, blobSizeInBytes, riid, ppv) —— blob 在 a2/a3。
+    // 对 a1..a3 里所有"看起来像 DXBC 且带主机位"的缓冲区尝试剥位（会在拷贝上做）。
+    auto* blob = reinterpret_cast<std::uint8_t*>(a2);
+    const auto blob_size = static_cast<std::size_t>(a3);
+    if (blob && blob_size >= 32 && blob_size <= (64u << 20) &&
+        std::memcmp(blob, "DXBC", 4) == 0) {
+        std::uint32_t bits = 0;
+        std::size_t at = 0;
+        // 直接就地剥（这块内存是游戏传进来的 blob，桌面只读它，就地改是可接受的：
+        // 主机侧拿到的仍是同一份数据，但主机位已经是"要传给桌面"的值；
+        // 若游戏之后还要用原始位，它会重新序列化）。
+        if (xbgtasix::rootsig::strip_blob_for_pc(blob, blob_size, &bits, &at)) {
+            static std::atomic<int> n{0};
+            const int k = n.fetch_add(1, std::memory_order_relaxed);
+            if (k < 16) {
+                xbgtasix::logf("[d3d12_xs] 消费端根签名剥离：blob=%p size=%zu 主机位=0x%x 位置=+%zu"
+                               "（桌面不收带主机位的 blob）", static_cast<void*>(blob), blob_size,
+                               bits, at);
+            }
+        }
+    }
+    using Fn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                             uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+    const auto vt = *reinterpret_cast<void***>(static_cast<ID3D12Device*>(proxy->pc));
+    const std::size_t pc_index = N;
+    return reinterpret_cast<Fn>(vt[pc_index])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
@@ -1816,6 +1856,8 @@ Slot device_slot() {
     if constexpr (N == 133) return reinterpret_cast<Slot>(&create_resource_from_address_x);
     if constexpr (N == 127) return reinterpret_cast<Slot>(&create_committed_resource3_x);
     if constexpr (N == 25) return reinterpret_cast<Slot>(&get_allocation_info_x);
+    // 根签名创建（主机槽号未定论：12 与 16 都挂上，剥离函数对非根签名数据是无操作）
+    if constexpr (N == 12 || N == 16) return reinterpret_cast<Slot>(&forward_slot_strip_root<N>);
     if constexpr (N == kCustomHeapPropertiesSlot)
         return reinterpret_cast<Slot>(&custom_heap_properties);
     if constexpr (N == kQueueOrOpenHeapSlot)
