@@ -202,6 +202,35 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
         rva = reinterpret_cast<unsigned long long>(addr) - reinterpret_cast<unsigned long long>(mod);
     }
     logf("[xbgtasix] FATAL 异常 0x%08lX at %s+0x%llX", code, name, rva);
+
+    // 定点采集：game+0x247AF2D 是"跨度 <= 2 MiB-1"不变量断言。
+    // 断言式：([rsp+0x78] - [rsp+0x70]) + qword[game+0x75E6FF0] <= 0x1FFFFF
+    // 这里把三个操作数、减法结果与最终和全部打出来，并显式判断无符号回绕。
+    if (code == EXCEPTION_BREAKPOINT && rva == 0x247AF2D) {
+        const CONTEXT* c = info->ContextRecord;
+        auto read_q = [](unsigned long long addr, unsigned long long* out) -> bool {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (!addr) return false;
+            if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0) return false;
+            if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+            std::memcpy(out, reinterpret_cast<const void*>(addr), sizeof(*out));
+            return true;
+        };
+        unsigned long long begin = 0, end = 0, g = 0;
+        const bool ok_b = read_q(c->Rsp + 0x70, &begin);
+        const bool ok_e = read_q(c->Rsp + 0x78, &end);
+        const bool ok_g = read_q(c->Rip - 0x247AF2D + 0x75E6FF0, &g);   // 同模块基址 + 全局 RVA
+        const unsigned long long diff = end - begin;              // 无符号减法
+        const bool wrapped = end < begin;
+        const unsigned long long sum = diff + g;
+        logf("[xbgtasix]   断言操作数: begin=[rsp+0x70]=0x%llX(%s) end=[rsp+0x78]=0x%llX(%s) "
+             "g=0x%llX(%s)",
+             begin, ok_b ? "可读" : "不可读", end, ok_e ? "可读" : "不可读", g,
+             ok_g ? "可读" : "不可读");
+        logf("[xbgtasix]   减法 end-begin = 0x%llX %s；加 g 后 = 0x%llX；阈值 0x1FFFFF -> %s",
+             diff, wrapped ? "（发生无符号回绕！）" : "（无回绕）", sum,
+             sum > 0x1FFFFFULL ? "超出（触发断言）" : "未超出");
+    }
     // 现场寄存器 + 关键指针指向的内存：断言检查的是"某对象某字段非 0"，
     // 光有栈看不出那个对象是什么，把 rsi/rdi/rax 与 rsi 前 48 字节打出来。
     {

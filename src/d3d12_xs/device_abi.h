@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -271,8 +272,32 @@ HRESULT WINAPI device_extension_stub_n(DeviceProxy*, UINT64 a = 0, UINT64 b = 0,
                        "a=0x%llx b=0x%llx c=0x%llx d=0x%llx -> E_NOTIMPL",
                        N, rva, static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
                        static_cast<unsigned long long>(c), static_cast<unsigned long long>(d));
+        // 光有指针值认不出方法。主机把"结构体 in/out"塞进参数里（实测 slot 70 的两个
+        // 参数相隔 0x40），把前 32 B 打出来，才有机会从字段反推它是哪一个方法。
+        // 逐个 VirtualQuery，未提交就跳过 —— 绝不为一条日志去读野指针。
+        auto dump32 = [&](const char* tag, UINT64 addr) {
+            if (addr < 0x10000) return;
+            MEMORY_BASIC_INFORMATION m{};
+            if (VirtualQuery(reinterpret_cast<const void*>(addr), &m, sizeof(m)) == 0) return;
+            if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return;
+            const auto* p = reinterpret_cast<const unsigned char*>(addr);
+            char hex[3 * 32 + 1] = {0};
+            for (int i = 0; i < 32; ++i) {
+                snprintf(hex + i * 3, 4, "%02x ", static_cast<unsigned>(p[i]));
+            }
+            xbgtasix::logf("[d3d12_xs]   slot=%zu %s@%p: %s", N, tag,
+                           reinterpret_cast<const void*>(addr), hex);
+        };
+        dump32("a", a);
+        dump32("b", b);
     }
-    return E_NOTIMPL;
+    // 诊断开关（默认关）：把未建模槽一律当成功，用来回答"这个槽在不在崩溃路径上"。
+    // 只用于实验，**不是**修复手段——项目规则是"明确失败"，不是伪造成功。
+    static const bool unimpl_as_ok = [] {
+        const char* v = std::getenv("XBGTASIX_UNIMPL_S_OK");
+        return v && *v == '1';
+    }();
+    return unimpl_as_ok ? S_OK : E_NOTIMPL;
 }
 
 // The Xbox command-list interface keeps the ordinary D3D12 list methods at
