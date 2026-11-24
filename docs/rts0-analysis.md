@@ -9,6 +9,11 @@
 > 其中最硬的一条对照是 cs_48 与 cs_49：两者的 RTS0 字节完全相同，一个编过、一个编不过。
 > 所以第 28 节"问题在 RTS0 的主机 ABI 位"这个假设，作为**逐个 shader 的判别量**不成立。
 > 真正还没被看的是每个 shader 都带的 `XDAT` 块（`XDAT@24 ver=5`）与 DXIL 程序块本身。
+>
+> **2026-11-25 追加（见 §10）**：那 5 个的名单仍未到手 —— E1 的代码已改好（每 shader 一台新设备 +
+> 显式 WARP），但本机没有 mingw / Windows，跑不了；顺带查出**上一版 t49 其实没启用 WARP**
+> （`D3D12CreateDevice(nullptr)` = 默认硬件适配器：日志里 `d3d10warp.dll` 出现 0 次、
+> `igd12um64xeh.dll` 75 次），所以 §29 的「WARP 48/53」应读作「Intel 驱动 48/53」。
 
 ---
 
@@ -25,6 +30,9 @@
 | `git log -S "被拒" --all` / `git stash list` / `git branch -a` | 只有 642856d 命中；没有其它分支、没有 stash、没有未跟踪的输出文件 |
 
 结论：**t49 的逐条输出只在当时的终端里，没有落盘，仓库里也没有。名单不存在。**
+
+（**2026-11-25 更新**：E1 要求的改法已落地在 `tests/t49_pso_warp/main.cpp`，待 Windows 侧执行即可产出名单；
+本节结尾的 `cs_49..cs_53` 断言因此**标记为未证**，见 §10.4。）
 
 ### 但可以给一个强推断：**cs_49 / cs_50 / cs_51 / cs_52 / cs_53**（推断，不是记录）
 
@@ -126,7 +134,8 @@ cs_01 的 RTS0 段体（96 字节，十六进制）：
 | rs 数 | 17，**去掉 flags 后只有 16 个不同体**（`rs_14` 与 `rs_17` 完全相同，同一根签名建了两次） |
 | shader 的 RTS0 flags | **53/53 = `0x03000000`** |
 | rs 的 RTS0 flags | **17/17 = `0x00000000`** |
-| 参数类型分布（全语料 281 个参数） | UAV 164、SRV 27、32bitConst 24、**DescriptorTable 0**、CBV 0 |
+| 参数类型分布（53 个 shader 自带的签名，共 250 个参数） | UAV 164、SRV 27、32bitConst 59、**DescriptorTable 0**、CBV 0、Sampler 0 |
+| 参数类型分布（17 个 rs，共 87 个参数） | UAV 64、SRV 5、32bitConst 18、**table 0** |
 | 静态采样器 | **0**（所有 17 个根签名） |
 | `ShaderVisibility` | 全部 `ALL`（0） |
 | `RegisterSpace` | 全部 0 |
@@ -299,3 +308,75 @@ python3 tools/dxbc_rts0.py pairs  /tmp/vm/shaders                      # 228 组
 | 5 个失败没有名单 | §1 的六处检索全部落空 |
 
 未改动：`/tmp/vm/shaders/`（只读扫描）、victory 的任何目录、任何游戏进程或 wine。
+
+---
+
+## 10. 2026-11-25 追加：E1 已改好，但顺带查出一件更要紧的事 —— **上一版 t49 根本没用 WARP**
+
+### 10.1 代码已按 E1 要求改完
+
+`tests/t49_pso_warp/main.cpp` 现在：
+
+1. **显式枚举 WARP 适配器**（`IDXGIFactory4::EnumWarpAdapter`，退化路径按
+   `DXGI_ADAPTER_FLAG_SOFTWARE` 找），并把选中的适配器描述/LUID 打出来；
+   拿不到就 SKIP，**不再**默默退回 `D3D12CreateDevice(nullptr)`。
+2. **每个 shader 一台全新设备**（17 个根签名在每台设备上重建，blob 只读一次盘）。
+3. 逐条输出，可 grep：
+   ```
+   [t49] RESULT cs_49_len38248.bin  len=38248  hr=0x887A0005 fail  removed=0x887A0005
+   [t49] FAIL   cs_49_len38248.bin  len=38248  hr=0x887A0005 removed=0x887A0005
+   [t49] 汇总：编译成功 N / 被拒 M / 共 53（DEVICE_REMOVED K 次）
+   ```
+   另外打 `GetDeviceRemovedReason()`，把"设备被移除"和"普通拒绝（如 E_INVALIDARG）"分开。
+
+构建脚本不用改：`build.sh:562` 已经带 `-ld3d12 -ldxgi -ldxguid`。
+语法已用 wine 的 `d3d12.h / dxgi1_6.h` + 一个 `ComPtr` 桩做过 `-fsyntax-only -Wall -Wextra` 检查（干净），
+但**本机没有 mingw，生成不了 exe，也没跑过**。
+
+### 10.2 为什么跑不了（不是偷懒）
+
+- 本机是 Arch（`Linux Archlinux 7.3.5-zen1-1-zen`），**没有** `x86_64-w64-mingw32-g++`；
+  `build.sh` 要求 `/d/mingw64`（git-bash on Windows）。
+- 本任务明确禁用 wine 且 GPU 被另一个子代理占着，WARP 之外的路径也不该动。
+
+⇒ 名单这一步必须到 Windows 侧执行（双系统 / 有 mingw 的那台）：
+
+```bash
+# Windows + git-bash，仓库根目录
+./build.sh                       # 或只编 t49：见 build.sh:561
+XBGTASIX_DUMP_SHADERS=build/dumps ./build/t49_pso_warp.exe | tee build/t49-list.log
+grep -c "\[t49\] FAIL" build/t49-list.log
+```
+
+### 10.3 真正要紧的发现：`D3D12CreateDevice(nullptr, …)` 选的**不是** WARP
+
+上一版 t49（以及 `XBGTASIX_FORCE_WARP=1` 的做法）都靠"传 nullptr 让系统选 WARP"。
+`D3D12CreateDevice` 的 `pAdapter = nullptr` 意思是**默认（硬件）适配器**；要 WARP 必须
+`EnumWarpAdapter`。日志侧的证据是硬的：
+
+```
+build/warp1.log（XBGTASIX_FORCE_WARP=1 那次）
+  igd12um64xeh.dll   出现 75 次        ← Intel 用户态驱动
+  d3d10warp.dll      出现  0 次        ← WARP 的用户态驱动，一次都没加载
+  崩溃栈帧 #4..#14 全部落在 igd12um64xeh.dll 内
+所有 161 个日志里 grep d3d10warp：0 个文件命中
+```
+
+由此三处叙述要改：
+
+| 原文 | 实际 |
+|---|---|
+| §29 "**WARP** 编译成功 48/53" | 是 **Intel 驱动**在一个独立进程里编过 48/53（不是软件驱动） |
+| §30 "连 **WARP**（软件驱动）也返回 DEVICE_REMOVED" | 那次设备仍然是 Intel 的（栈在 igd12um64xeh 里），WARP 从未被真正启用 |
+| §30 标题"WARP 也丢设备" | 应改为"换成默认适配器重跑同样丢设备" |
+
+**注意这不削弱 §30 的结论，反而把它钉得更死**：同一个 Intel 驱动在独立进程里能编过 48/53，
+在游戏进程里 12 个 PSO 之后就把设备丢了 ⇒ 失败与"这批 shader 编不编得过"无关，
+"我们（或经我们）执行的某个操作让设备失效"是唯一站得住的解释。
+§30 的四条单变量对照（`*e` 写回 / 16 GiB 预留 / 描述符 arena / 槽 133）仍然是下一刀。
+
+### 10.4 名单现状
+
+`cs_49..cs_53` 这个后缀推断**未证**（不是已证也不是已否）——它依赖"失败是一段连续后缀"这个前提，
+而前提本身现在也带着疑点：上一版用的是硬件驱动，失败形态可能比 §29 记的更复杂。
+跑完 §10.2 就能一次定两件事：真名单，以及后缀前提成不成立。
