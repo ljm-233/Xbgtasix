@@ -67,15 +67,19 @@ namespace detail {
 
 // 把槽 16（CreateRootSignature）收到的 blob 落盘，供 t49_pso_warp 用**游戏自己的**
 // 根签名去试编译 shader —— 空根签名必然 E_INVALIDARG，考不出 DXIL 是否合法。
-inline void dump_root_sig(const void* blob, std::size_t size) {
+// flags_before_strip：**剥位之前**的 RTS0 段头 flags。
+// 落盘内容永远是"即将交给桌面的那一份"（已剥位，桌面才收），
+// 原始主机位只留在文件名里 —— 这样"到底剥掉了什么"一眼可见，
+// 也不会因为喂给 t49 的 blob 带主机位而被桌面拒绝。
+inline void dump_root_sig(const void* blob, std::size_t size, std::uint32_t flags_before_strip) {
     char dir[MAX_PATH] = {0};
     if (GetEnvironmentVariableA("XBGTASIX_DUMP_SHADERS", dir, sizeof(dir)) == 0 || !dir[0]) return;
     if (!blob || size < 32 || size > (1u << 20)) return;
     CreateDirectoryA(dir, nullptr);
     static std::atomic<int> n{0};
     char path[MAX_PATH] = {0};
-    std::snprintf(path, sizeof(path), "%s\\rs_%02d_len%zu.bin", dir,
-                  n.fetch_add(1, std::memory_order_relaxed) + 1, size);
+    std::snprintf(path, sizeof(path), "%s\\rs_%02d_len%zu_flags%08X.bin", dir,
+                  n.fetch_add(1, std::memory_order_relaxed) + 1, size, flags_before_strip);
     HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
                            nullptr);
     if (f == INVALID_HANDLE_VALUE) return;
@@ -1893,17 +1897,35 @@ uintptr_t WINAPI forward_slot_strip_root(DeviceProxy* proxy, uintptr_t a1 = 0, u
         std::memcmp(blob, "DXBC", 4) == 0) {
         std::uint32_t bits = 0;
         std::size_t at = 0;
+        // 落盘用的"剥之前"标志：剥完之后段体里就是 PC 值了，原始主机位只在这里留痕。
+        std::uint32_t flags_before = 0;
+        {
+            xbgtasix::rootsig::Rts0View view{};
+            if (xbgtasix::rootsig::find_rts0(blob, blob_size, view) &&
+                view.body_off + xbgtasix::rootsig::kRts0FlagsOffset + 4 <= blob_size) {
+                std::memcpy(&flags_before, blob + view.body_off +
+                            xbgtasix::rootsig::kRts0FlagsOffset, 4);
+            }
+        }
         // 直接就地剥（这块内存是游戏传进来的 blob，桌面只读它，就地改是可接受的：
         // 主机侧拿到的仍是同一份数据，但主机位已经是"要传给桌面"的值；
         // 若游戏之后还要用原始位，它会重新序列化）。
-        if (xbgtasix::rootsig::strip_blob_for_pc(blob, blob_size, &bits, &at)) {
-            dump_root_sig(blob, blob_size);
-            static std::atomic<int> n{0};
-            const int k = n.fetch_add(1, std::memory_order_relaxed);
-            if (k < 16) {
-                xbgtasix::logf("[d3d12_xs] 消费端根签名剥离：blob=%p size=%zu 主机位=0x%x 位置=+%zu"
-                               "（桌面不收带主机位的 blob）", static_cast<void*>(blob), blob_size,
-                               bits, at);
+        const bool stripped = xbgtasix::rootsig::strip_blob_for_pc(blob, blob_size, &bits, &at);
+        // ★ 2026-11-25：dump 从"剥离成功分支"里挪出来。
+        // 原来只在剥离成功时落盘，于是另一个标题（标志位是 0xC00，旧掩码认不出）
+        // 既没有产物也没有日志 —— 静默失效根本看不见。现在不管剥没剥成都落盘。
+        dump_root_sig(blob, blob_size, flags_before);
+        static std::atomic<int> n{0};
+        const int k = n.fetch_add(1, std::memory_order_relaxed);
+        if (k < 16) {
+            if (stripped) {
+                xbgtasix::logf("[d3d12_xs] 消费端根签名剥离：blob=%p size=%zu flags=0x%08X "
+                               "主机位=0x%x 位置=+%zu（桌面不收带主机位的 blob）",
+                               static_cast<void*>(blob), blob_size, flags_before, bits, at);
+            } else {
+                xbgtasix::logf("[d3d12_xs] 消费端根签名未剥：blob=%p size=%zu flags=0x%08X"
+                               "（没有可剥的主机位：要么本来就是 PC 值，要么掩码不认这个标题）",
+                               static_cast<void*>(blob), blob_size, flags_before);
             }
         }
     }

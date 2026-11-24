@@ -428,7 +428,7 @@ E2 开工前先把结构钉住（`python3 tools/dxbc_rts0.py xdat <目录>`，�
 
 ```
 compute-052a2316a03b9ba1.console.dxil（7768 字节，ver=3）
-  0x12 → 16 字节     0x0D → 7650 字节（**这就是 bitcode 本体**）     0x07 → 28 字节
+  0x12 → 16 字节     0x0D → 7650 字节（**程序数据本体，但不是明文 bitcode，见 §15**）     0x07 → 28 字节
 pixel-02c6cf86ca283ce1: 0x12:16  0x0D:529   0x07:28
 vertex-0602c2384acbb3b2: 0x12:16  0x0D:615   0x07:28
 mesh-00a5896a6ac7b7c7:  0x12:16  0x0D:1895  0x07:28
@@ -538,3 +538,113 @@ inline constexpr std::uint32_t xbox_bits(std::uint32_t f) { return f & ~kPcKnown
 
 （这条只是建议，`src/` 没动。改之前要先在 GTA6 上回归：`0x03000000` / `0x80000000` 都会被归入主机位，
 行为等价；但要确认没有把某个桌面真用的位剥掉。）
+
+---
+
+## 14. 2026-11-25：掩码改规则式（已在 GTA6 上回归）+ `dump_root_sig` 移出剥离分支
+
+### 14.1 回归结果：旧掩码与新规则在 GTA6 上 **70/70 等价**
+
+把 70 个 blob（53 个 shader 内嵌 RTS0 + 17 个 `rs_*.bin`）的 flags 逐个跑两套算法：
+
+| | 旧：`kXboxRootFlags = 0x03000000|0x80000000` | 新：`kPcKnownFlags = 0x7F` |
+|---|---|---|
+| `cs_*`（53 个，flags `0x03000000`） | pc=`0x00000000`，主机位=`0x03000000` | pc=`0x00000000`，主机位=`0x03000000` |
+| `rs_*`（17 个，flags `0x00000000`） | pc=`0x00000000`，主机位=`0` | 同 |
+
+- **等价 70 / 不同 0**
+- 语料里出现过的 D3D12 标准位（`0x1..0x40`）：**一个都没有** ⇒ 新规则没有"该留的被剥掉"的风险
+- `0x03000000` 与 `0x80000000` 都整体落进主机位（不在 `0x7F` 里），与预期一致
+
+### 14.2 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `src/d3d12_xs/root_sig.h` | `kXboxRootFlags`（写死 `0x83000000`）→ `kPcKnownFlags = 0x7F`；`pc_flags = f & kPcKnownFlags`、`xbox_bits = f & ~kPcKnownFlags`。旧常量留作 `kXboxRootFlagsLegacy` 对照。注释里写清代价：微软日后若加 >0x7F 的新标准位会被误剥，届时补上那一位并重跑本文件头注的回归 |
+| `src/d3d12_xs/device_abi.h` | `dump_root_sig()` 从"剥离成功分支"里挪出来：**不管剥没剥成，只要 `XBGTASIX_DUMP_SHADERS` 开着就落盘**；新增第三个参数 `flags_before_strip`，原始主机位写进文件名 `rs_%02d_len%zu_flags%08X.bin`（落盘内容仍是喂给桌面的那份，已剥位，t49 直接可用）；未剥的情况补一条日志"消费端根签名未剥 …（要么本来就是 PC 值，要么掩码不认这个标题）" |
+
+**为什么文件名带 flags**：剥离之后段体里就是 PC 值，原始主机位在产物上空了。上一轮那个静默失效
+（另一标题 `0xC00` 掩码不认 ⇒ 不剥 + 不 dump + 无日志）就是因为没有任何地方留痕。
+
+### 14.3 编译验证（本机没有 mingw，用 wine 头 + 桩做语法检查）
+
+```
+wineg++ -fsyntax-only -std=c++17 -Wall -I/tmp/wrlstub -Isrc -Iinclude \
+        -D_snprintf=snprintf /tmp/tu.cpp     # tu.cpp = #include "d3d12_xs/device_abi.h"
+```
+- 与 `HEAD` 对比：**改动前后诊断条数一致（12 条 warning，均为此前既有）**，无新增
+- 唯一 error 是 `_snprintf` —— wine 的 stdio.h 没有它（mingw 有），属检查环境差异，用 `-D` 绕过后零 error
+- 仍未生成 exe、未运行（本机无 mingw / 无 Windows）
+
+---
+
+## 15. 2026-11-25：E2 第一遍 —— 53 份 DXIL 反汇编成功，ABI 分歧在**程序块里看得见**
+
+新工具 `tools/dxil_scan.py`（纯本地，不需要 DXC/Windows）：
+
+```
+DXBC → DXIL 段 → XDAT[0x07] → DXIL 子头(24B) → 裸 bitcode → llvm-dis
+```
+
+本机 `llvm-dis`（LLVM 23）能读 DXC 出的旧位码，**53/53 反汇编成功**。
+
+### 15.1 硬结论
+
+| 项 | 结果 |
+|---|---|
+| `target triple` | **`dxil-ms-xb2`**（53/53）—— "xb2" 就是 Xbox Series X\|S，模块自己写着的 |
+| `%dx.types.Handle` 的定义 | **`type { ptr }`**（53/53）—— 句柄是**裸 64 位指针**，这就是 memory-based ABI 的机械证据（桌面 DXIL 是 `{ i32, i32, i32, i32 }` 的四元组） |
+| 对 float 做原子（`call float @dx.op.atomic*`） | **0 个** |
+| 原子操作的返回类型 | 只有 `i32`，8 个 shader 用了 `atomicBinOp`（cs_02/03/34/35/38/39/40/43） |
+| raw（untyped）缓冲访问 | **51/53**（只有 cs_06、cs_45 不用） |
+| typed texture/buffer 访问 | **0/53** |
+
+### 15.2 对我们那条"PSV0 声明 R32_FLOAT 却做整数原子"的判读
+
+那条维度**在 GTA6 语料上不存在** —— 不是"没检出"，是**表达不出来**：这批 shader 全走
+`rawBufferLoad/Store`（untyped，字节寻址），加一个 `{ ptr }` 句柄直指内存，**没有 typed UAV
+声明，也就没有"声明的格式"可对不上**。所以：
+
+- 你们抓到的 `OpAtomicOr %float` / `OpImageTexelPoint %_ptr_Image_float` 是**另一套机制**（typed UAV），
+  和 GTA6 这批不是同一条路；拿 GTA6 语料验证不了它，也不该拿它当 GTA6 的解释
+- 反过来说，GTA6 侧的分歧点现在很明确了：**`dxil-ms-xb2` + `{ ptr }` 句柄**。
+  DXIL 语法合法（validator 过、WARP 能编 48/53），N 卡的崩溃更可能是它没走过
+  "句柄即指针"这条编译路径
+
+### 15.3 顺手的指纹（给 E1 名单出来后做对照用）
+
+`cs_48`（后缀推断里的最后一个成功）vs `cs_49`（推断的第一个失败），程序块差别巨大，但都不是原子：
+
+```
+cs_48  lines= 97  createHandle=4  rawLoad=5   rawStore=3   cbuffer=2
+       op 指纹: rawBufferLoad.i32 ×5, rawBufferStore.i32 ×3, threadId.i32 ×2, cbufferLoadLegacy.i32 ×2
+cs_49  lines=3900  createHandle=5  rawLoad=3   rawStore=10  cbuffer=4
+       op 指纹: tertiary.i32 ×129, tertiary.f32 ×49, rawBufferLoad.i64 ×48, binary.f32 ×41, legacyF16ToF32 ×22
+```
+
+`cs_49` 里 `rawBufferLoad.i64 ×48` + `tertiary.*` 密集，和其余样本的画风明显不同；
+等 E1 的真名单出来，这份指纹可以直接按"失败组 / 成功组"做统计对比。
+
+---
+
+## 16. 2026-11-25：v3 的 `0x0D` 不是明文 bitcode —— 中间还有 `XBCH` + zlib + `FSSM`
+
+（修正 §11.3 / §12 里"v3 的 `0x0D` 是 bitcode 本体"的措辞。）
+
+```
+0x0D payload（compute-5d113aa6830760b6，7650 字节）
+  58 42 43 48 = 'XBCH'
+  03000000           版本 3
+  4e090000 00000000  压缩后长度 0x94E = 2382
+  531a0000 00000000  解压后长度 0x1A53 = 6739
+  78 9c ...          ← zlib 流
+解压后：46 53 53 4d = 'FSSM'，后面是条目表 + 0xDEADBEEF 填充
+  FSSM 内部：没有 BC C0 DE、没有 'DXIL'、没有 PSV0/STAT 任何标签
+```
+
+也就是说：**victory 落盘的 console blob 里没有明文 DXIL**（v3 路径是"压缩 + 主机子模块"），
+只有 v5（GTA6 这条路）才是 `0x07` 里直接放裸 bitcode。两点影响：
+
+1. 任何人想从 `/tmp/vm/shaders{,2}` 里捞 DXIL 去反汇编，**捞不到**（我试过，llvm-dis 直接
+   "Invalid bitcode signature"）；要么解 `FSSM`（还没解），要么从他们自己的编译路径拿
+2. §12 的 XDAT 对比结论不受影响（比的是条目表与尺寸，不是 bitcode 内容）

@@ -43,25 +43,43 @@
 namespace xbgtasix::rootsig {
 
 // ---------------------------------------------------------------------------
-// 主机标志位（rs_xbox.rs:5-11）
+// 主机标志位：**不是固定掩码**（2026-11-25 用跨标题证据修正）
 // ---------------------------------------------------------------------------
-// 0x01000000：内存型 ABI（memory-based ABI），也是光追内部路径的标志（XBOX_INTERNAL_XDXR 的一半）
-// 0x02000000：compute-2 spill 区
-// 0x80000000：driver-discarded（驱动已丢弃该根签名的标记）
-inline constexpr std::uint32_t kForceMemoryBasedAbi = 0x01000000u;
-inline constexpr std::uint32_t kForceCompute2SpillArea = 0x02000000u;
-inline constexpr std::uint32_t kDriverDiscarded = 0x80000000u;
-// 参考实现 XBOX_ROOT_FLAGS = XBOX_INTERNAL_XDXR(0x03000000) | 0x80000000
-inline constexpr std::uint32_t kXboxRootFlags =
-    kForceMemoryBasedAbi | kForceCompute2SpillArea | kDriverDiscarded;
+// GTA6（这个标题）的根签名标志是 0x03000000，拆开正好是两位：
+//   0x01000000：内存型 ABI（memory-based ABI），也是光追内部路径的标志
+//   0x02000000：compute-2 spill 区
+// 早前按 0x01000000|0x02000000|0x80000000 写死成掩码。另一个标题（victory 的落盘
+// rootsig 样本）用的是 0xC00 / 0xC01（bit10/bit11）—— 写死的掩码套上去
+// `xbox_bits()` 返回 0，`strip_blob_for_pc()` 直接 return false：**一个字节都不改，
+// 而且连 dump 都不触发**。这是"静默失效"，比剥错更难查（踩过一次）。
+//
+// 规则式改法：D3D12_ROOT_SIGNATURE_FLAGS 目前只有 0x1..0x40 这七个标准位，
+// 其余一律按主机位处理。两个标题都能覆盖，将来遇到别的主机位也不用再改。
+//
+// 代价（写明白）：微软日后若给桌面加了 >0x7F 的新标准位，这条规则会误把它当主机位剥掉，
+// 那时把 kPcKnownFlags 补上那一位、并在 GTA6 上重跑一次本文件头注里的回归。
+//
+// 回归记录（2026-11-25，build/dumps 70 个 blob：53 个 shader 内嵌 + 17 个 rs）：
+//   旧掩码与新规则的 pc_flags()/xbox_bits() 结果 **70/70 完全相同**；
+//   语料里没有出现过任何标准位（0x1..0x40 一个都没置），所以没有"该留的被剥掉"的风险。
+inline constexpr std::uint32_t kPcKnownFlags =
+    0x00000001u |  // ALLOW_INPUT_ASSEMBLER
+    0x00000002u |  // DENY_VERTEX_SHADER_ROOT_ACCESS
+    0x00000004u |  // DENY_HULL_SHADER_ROOT_ACCESS
+    0x00000008u |  // DENY_DOMAIN_SHADER_ROOT_ACCESS
+    0x00000010u |  // DENY_GEOMETRY_SHADER_ROOT_ACCESS
+    0x00000020u |  // DENY_PIXEL_SHADER_ROOT_ACCESS
+    0x00000040u;   // ALLOW_STREAM_OUTPUT
+// 历史的固定掩码，留作对照/文档，不再参与判断
+inline constexpr std::uint32_t kXboxRootFlagsLegacy = 0x01000000u | 0x02000000u | 0x80000000u;
 
-// 剥离：留下 PC 认识的位        （rs_xbox.rs pc_flags()）
+// 剥离：留下 PC 认识的位
 inline constexpr std::uint32_t pc_flags(std::uint32_t console_flags) {
-    return console_flags & ~kXboxRootFlags;
+    return console_flags & kPcKnownFlags;
 }
-// 取出并保留的主机位           （rs_xbox.rs xbox_bits()）
+// 取出并保留的主机位
 inline constexpr std::uint32_t xbox_bits(std::uint32_t console_flags) {
-    return console_flags & kXboxRootFlags;
+    return console_flags & ~kPcKnownFlags;
 }
 
 // ---------------------------------------------------------------------------
