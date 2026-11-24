@@ -22,6 +22,7 @@ Windows。这个脚本只用 Python 标准库，直接读落盘的 dump：
     python3 tools/dxbc_rts0.py cmp    build/dumps            # shader RTS0 vs rs_*.bin 配对
     python3 tools/dxbc_rts0.py stat   build/dumps
     python3 tools/dxbc_rts0.py pairs  /tmp/vm/shaders        # console.dxil vs host.dxil
+    python3 tools/dxbc_rts0.py xdat   build/dumps            # XDAT 条目表（版本 = 分组维度）
 
 退出码 0 = 正常；1 = 有文件解析失败。
 """
@@ -349,6 +350,86 @@ def cmd_cmp(d):
     return 0
 
 
+# ------------------------------------------------- 裸 Xbox blob 的 XDAT 块
+#
+# 每个 shader 的 DXIL 段内部还套着一层：`+8 'DXIL'`、`+24 'XDAT'`、bitcode 在更后面。
+# XDAT 自己是个带类型条目表的容器：
+#
+#   +0  'XDAT'
+#   +4  u32 版本（GTA6 这批全是 5；victory 的 console blob 是 3）
+#   +8  u32 条目表绝对偏移（本语料恒为 36 = XDAT 起点 + 12）
+#   +12 条目表：(type, offset, size) × N，offset 相对整个 blob
+#   之后是各条目的 payload；**最后一条的 offset+size 恰好等于 blob 末尾**
+#
+# 条目个数由"首条 payload 偏移 == 表尾"反推：N = (首条 offset - 表偏移) / 12。
+# 自洽性在 GTA6 的 53/53 + victory 的抽样上全部成立（见 docs/rts0-analysis.md §11）。
+
+XDAT_TYPE_HINT = {
+    0x07: "v5=大块（内含 'DXIL' 子头 + bitcode）/ v3=28 字节小块",
+    0x0A: "v5=中等块（v3 无此类型）",
+    0x12: "16 字节（疑似摘要）",
+    0x0D: "v5=中等块 / v3=**bitcode 本体**",
+    0x10: "16 字节（疑似摘要）",
+}
+
+
+def parse_xdat(blob):
+    i = blob.find(b"XDAT")
+    if i < 0:
+        return None
+    ver, tab = struct.unpack_from("<II", blob, i + 4)
+    if tab + 12 > len(blob):
+        return None
+    first_off = struct.unpack_from("<I", blob, tab + 4)[0]
+    n = (first_off - tab) // 12
+    if n <= 0 or n > 32:
+        return None
+    ents = []
+    for k in range(n):
+        t, off, size = struct.unpack_from("<III", blob, tab + 12 * k)
+        ents.append({"type": t, "offset": off, "size": size})
+    return {"at": i, "version": ver, "table": tab, "entries": ents,
+            "self_consistent": (ents[0]["offset"] == tab + 12 * n
+                                and ents[-1]["offset"] + ents[-1]["size"] == len(blob))}
+
+
+def cmd_xdat(d):
+    """打印 / 统计 XDAT 条目表（GTA6 的 build/dumps 与 victory 的裸 blob 都能喂）。"""
+    targets = []
+    for f in sorted(os.listdir(d)):
+        if f.startswith("cs_") and f.endswith(".bin"):
+            targets.append((f, os.path.join(d, f), "dxbc"))
+        elif f.endswith(".dxil") or f.endswith(".bin"):
+            targets.append((f, os.path.join(d, f), "raw"))
+    groups = {}
+    for name, path, kind in targets:
+        blob = load(path)
+        if kind == "dxbc" or blob[:4] == DXBC_MAGIC:
+            try:
+                blob = chunk_map(parse_dxbc(blob))["DXIL"].data
+            except (DxbcError, KeyError):
+                continue
+        x = parse_xdat(blob)
+        if not x:
+            continue
+        key = (x["version"], tuple(e["type"] for e in x["entries"]))
+        groups.setdefault(key, []).append((name, len(blob), x))
+    for key in sorted(groups, key=lambda k: (k[0], k[1])):
+        ver, types = key
+        rows = groups[key]
+        print("== XDAT 版本 %d，条目类型序列 %s，%d 个文件"
+              % (ver, "/".join("0x%02X" % t for t in types), len(rows)))
+        for name, blen, x in rows:
+            sizes = " ".join("0x%02X:%-7d" % (e["type"], e["size"]) for e in x["entries"])
+            print("   %-34s blob=%-6d %s%s"
+                  % (name, blen, sizes, "" if x["self_consistent"] else "  ★不自洽"))
+        for t in types:
+            hint = XDAT_TYPE_HINT.get(t)
+            if hint:
+                print("     type 0x%02X → %s" % (t, hint))
+    return 0
+
+
 def cmd_stat(d):
     """按 RTS0 的「指纹」分组，看有没有系统性的两类。"""
     groups = {}
@@ -450,6 +531,8 @@ def main(argv):
         return cmd_stat(arg)
     if cmd == "pairs":
         return cmd_pairs(arg)
+    if cmd == "xdat":
+        return cmd_xdat(arg)
     print(__doc__)
     return 1
 
