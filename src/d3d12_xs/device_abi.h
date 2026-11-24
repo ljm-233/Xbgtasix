@@ -1907,6 +1907,25 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
                                                   UINT64 o = 0, UINT64 p = 0) {
     (void)b; (void)c; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l;
     (void)m; (void)n; (void)o; (void)p;
+    // 调用方 RVA：同一条槽有多个调用点，只有反汇编确认过的那一个把 e 当 ppPSO。
+    // 按调用点分组，才能判断"是否某个调用点的 e 不是输出槽"。
+    unsigned long long caller_rva = 0;
+    {
+        const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+        HMODULE mod = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
+            caller_rva = reinterpret_cast<unsigned long long>(caller) -
+                         reinterpret_cast<unsigned long long>(mod);
+        }
+        static std::atomic<int> budget{64};
+        if (budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            xbgtasix::logf("[d3d12_xs] 槽62 调用方=+0x%llX e=0x%llx", caller_rva,
+                           static_cast<unsigned long long>(e));
+        }
+    }
+
     auto* desc = reinterpret_cast<const D3D12_COMPUTE_PIPELINE_STATE_DESC*>(a);
     auto* riid = reinterpret_cast<const IID*>(d);
     static std::atomic<int> calls{0};
@@ -1947,7 +1966,8 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
                 &pc, *riid, reinterpret_cast<void**>(&pso));
         });
     }
-    if (seq <= 12) {
+    // 前 12 次全打；**之后只要失败就打**（失败是游戏走错误分支/抛异常的直接原因）
+    if (seq <= 12 || FAILED(hr)) {
         xbgtasix::logf("[d3d12_xs] 槽62 compute PSO #%d：desc=%p shader=%p len=%llu -> hr=0x%08lx pso=%p",
                        seq, static_cast<const void*>(desc),
                        desc ? desc->CS.pShaderBytecode : nullptr,
@@ -2002,7 +2022,9 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
         }
         if (write_out && iid_is_pso && SUCCEEDED(hr) && pso) {
             auto* slot = reinterpret_cast<void**>(e);
-            if (readable(slot, sizeof(void*)) && *slot == nullptr) {
+            // 允许覆盖：签名已确证 e 是 ppPSO，同一个输出槽会被多次复用，
+            // 之前要求"当前为空"才写，导致第 2 次以后拿到旧对象/空对象。
+            if (readable(slot, sizeof(void*))) {
                 void* before = *slot;
                 *slot = pso;
                 xbgtasix::logf("[d3d12_xs] 槽62 写回 *e：%p -> %p", before, static_cast<void*>(pso));
