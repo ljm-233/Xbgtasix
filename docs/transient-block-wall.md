@@ -1047,3 +1047,50 @@ Intel 的着色器编译器 igc-default64.dll 崩（前面几轮反复看到）
 3. 重新评估**着色器转换层**的必要性：DXBC 能被接受，但驱动在编译/执行时崩，
    说明"格式对"不等于"语义对"（主机 ABI 相关的 root flags 我们剥了，
    但 shader 里可能依赖主机特有的布局）
+
+## 28. ★★★ 2026-11-24：**着色器是 DXIL SM 6.0**（目标④ 的关键结论）
+
+### 做法
+
+给槽 62 加了字节码落盘（`XBGTASIX_DUMP_SHADERS=<目录>`），把游戏送进
+`CreateComputePipelineState` 的 DXBC 存下来离线解析。
+
+### 结果（前两个 shader）
+
+```
+cs_01_len5136.bin  chunk 数=9
+  [0] 'SFI0' size=8     [1] 'ISG1' size=8      [2] 'OSG1' size=8
+  [3] 'PSV0' size=104   [4] 'RTS0' size=96     [5] 'STAT' size=1976
+  [6] 'ILDN' size=128   [7] 'HASH' size=20     [8] 'DXIL' size=2648  version=0x00050065
+```
+
+`version=0x00050065` = token 5（DXIL）| major 6 | minor 0 → **Shader Model 6.0 DXIL**。
+
+### 结论（回答了目标④）
+
+- **主机发的不是 RDNA2 原生 ISA，是标准的 DXIL SM 6.0 容器**。
+  这推翻了我早前根据 `docs/shader-corpus.md` 得出的"必须反编译重建"的判断
+  —— 至少在 compute PSO 这条路径上不成立。
+- 但"格式对"不等于"能编"：实测 **Intel（igc-default64）与 NVIDIA 两个驱动
+  都在编译这批 DXIL 时崩**，Intel 侧直接导致 `DEVICE_REMOVED`。
+- 因此着色器转换层的必要性要重新表述为：**不是"格式转换"，而是"主机 ABI 对齐"**
+  —— shader 的 `RTS0` 块声明的是主机 root signature（含 memory-based ABI 等位），
+  与桌面驱动期望的 ABI 不一致。
+
+### 已验证/已撤回的实验
+
+| 实验 | 结果 |
+|---|---|
+| 落盘 + 解析 DXBC 分块 | ✅ 确认 DXIL SM6.0 |
+| 把 shader 的 `RTS0` 也剥掉主机位 | ✗ 进度退步（3376 -> 2860），已改为 opt-in（`XBGTASIX_STRIP_SHADER_RTS0=1`） |
+
+### 当前基线
+
+Intel + `XBGTASIX_PATCH_ASSERT=247AF2D,19F4F58`：**3400 行**，止于 `DEVICE_REMOVED`
+引发的自杀陷阱（`game+0x2474606`）。
+
+### 下一步
+
+1. 对比"游戏原始 RTS0"与"桌面期望的 RTS0"差在哪（能否只对齐 ABI 位而不破坏程序块一致性）
+2. 或者：让驱动不崩 —— 例如先用同一 PSO 描述在 WARP（软件驱动）上试编译，
+   若 WARP 能编过，说明 DXIL 本身合法，崩溃是硬件驱动的 bug
