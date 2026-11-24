@@ -132,7 +132,19 @@ struct XMemWorkingSetStatistics {
 
 // [推断] 签名顺序 (attributes, size)。公开资料只提到"XMemAlloc 系列"，
 //        没有给出逐字声明；顺序反了会静默破坏 ABI，是这块最大的风险点。
-__declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) { XB_XMEM_TRACE("XMemAlloc", attributes, size);
+// 经验性探针：游戏的"瞬时块"拦截器检查"第二参数 & 0xC000 == 0x8000"，
+// 那个机制对应的全局基址（game+0x75E6FF0）在我们的环境里恒为 0，
+// 导致 game+0x247AF2D 的"跨度 <= 2 MiB-1"不变量恒假。
+// 这里在 xmem 的每个入口记录一次命中，用来判断这条分配是否经过我们。
+inline void probe_transient_flags(const char* api, uint64_t v) {
+    if ((v & 0xC000ULL) != 0x8000ULL) return;
+    static std::atomic<int> n{0};
+    const int k = n.fetch_add(1, std::memory_order_relaxed);
+    if (k < 24) xbgtasix::logf("[xmem] 探针 %s 命中 0x8000 类标志：值=0x%llX（第 %d 次）", api,
+                               static_cast<unsigned long long>(v), k + 1);
+}
+
+__declspec(dllexport) void* __cdecl XMemAlloc(uint64_t attributes, size_t size) { XB_XMEM_TRACE("XMemAlloc", attributes, size); probe_transient_flags("XMemAlloc", attributes);
     if (size == 0) return nullptr;  // [自定]
 
     const size_t align = alignment_from(attributes);
@@ -350,7 +362,7 @@ LONG WINAPI lazy_commit_handler(PEXCEPTION_POINTERS info) {
 extern "C" {
 
 // 默认分配器：等价于 XMemAlloc(0, size)
-__declspec(dllexport) void* __cdecl XMemAllocDefault(size_t size) { XB_XMEM_TRACE("XMemAllocDefault", size, 0);
+__declspec(dllexport) void* __cdecl XMemAllocDefault(size_t size) { XB_XMEM_TRACE("XMemAllocDefault", size, 0); probe_transient_flags("XMemAllocDefault", size);
     return XMemAlloc(0, size);
 }
 
@@ -453,8 +465,8 @@ void* allocate_placeholder(void* address, size_t size, DWORD type, DWORD protect
 }  // namespace
 
 __declspec(dllexport) void* __cdecl XMemVirtualAlloc(void* address, size_t size,
-                                                    uint32_t alloc_type, uint64_t /*attributes*/,
-                                                    uint32_t protect) {
+                                                    uint32_t alloc_type, uint64_t attributes,
+                                                    uint32_t protect) { probe_transient_flags("XMemVirtualAlloc/type", alloc_type); probe_transient_flags("XMemVirtualAlloc/attr", attributes);
     XB_XMEM_TRACE("XMemVirtualAlloc", size, alloc_type);
     const size_t gran = page_granularity(alloc_type);
     const uint32_t placeholder = alloc_type & (MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER);
