@@ -247,6 +247,29 @@ __declspec(dllexport) HRESULT WINAPI D3D12XboxCreateDevice(IUnknown* adapter, vo
 // 并统计相邻 VA 的差值——差值稳定就说明找到了区间粒度。
 // 这一步不做任何副作用，只为下一步（真正登记 + XMemVirtualQuery 回报）提供数据。
 // ---------------------------------------------------------------------------
+// 主机虚拟内存配置：**32 字节**，由 0x1E1CF60 序章的 `vmovups %ymm0,(%rdi)` 清零确定。
+// 真机实测第一个字段是 0x400000000 = 16 GiB（总量），其余三个字段为零；
+// `config+4` 那个 u32 由 `mov %eax,0x4(%rdi)` 写入（eax 来自 0x144da2350 的算法）。
+struct VmConfig32 {
+    unsigned long long total_bytes;   // +0x00  实测 0x400000000 = 16 GiB
+    unsigned long long field_08;
+    unsigned long long field_10;
+    unsigned long long field_18;
+};
+static_assert(sizeof(VmConfig32) == 32, "主机 config 结构必须是 32 字节");
+
+inline void log_vm_config(const void* raw) {
+    if (!raw) return;
+    VmConfig32 c{};
+    std::memcpy(&c, raw, sizeof(c));
+    const unsigned long long high32 = c.total_bytes >> 32;
+    const unsigned long long low32 = c.total_bytes & 0xFFFFFFFFULL;
+    xbgtasix::logf("[d3d12_xs] 主机虚拟内存配置: total=0x%llX (%.2f GiB) "
+                   "[lo32=0x%llX hi32=0x%llX] f08=0x%llX f10=0x%llX f18=0x%llX",
+                   c.total_bytes, static_cast<double>(c.total_bytes) / (1024.0 * 1024 * 1024),
+                   low32, high32, c.field_08, c.field_10, c.field_18);
+}
+
 struct GpuVaRange {
     unsigned long long base;
     unsigned long long next;   // 相邻登记值的差（0 表示未知）
@@ -368,7 +391,29 @@ __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, 
             return E_NOTIMPL;
         }
     }
+    log_vm_config(config);
     register_gpu_va_ranges(config);
+
+    // 主机语义：把这个总量的**虚拟地址空间**预留出来（只 reserve，不 commit，
+    // 所以不占提交额度）。PC 上驱动自己管显存，预留只是让游戏看到"这段 VA 存在"。
+    // 一次性完成，之后复用。
+    if (config) {
+        VmConfig32 vc{};
+        std::memcpy(&vc, config, sizeof(vc));
+        static void* gpu_va_reserve = nullptr;
+        static unsigned long long gpu_va_size = 0;
+        constexpr unsigned long long kXboxGpuVaReserve = 16ULL << 30;   // 16 GiB 上限
+        if (vc.total_bytes && !gpu_va_reserve && vc.total_bytes <= kXboxGpuVaReserve) {
+            gpu_va_reserve = VirtualAlloc(nullptr, static_cast<SIZE_T>(vc.total_bytes),
+                                         MEM_RESERVE, PAGE_NOACCESS);
+            gpu_va_size = vc.total_bytes;
+            xbgtasix::logf("[d3d12_xs] 按主机语义预留 %.2f GiB 虚拟地址 -> %p%s",
+                           static_cast<double>(vc.total_bytes) / (1024.0 * 1024 * 1024),
+                           gpu_va_reserve,
+                           gpu_va_reserve ? "（成功）" : "（失败，驱动自管，继续）");
+        }
+        (void)gpu_va_size;
+    }
     xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX：已登记 GPU VA 区间，返回 S_OK");
     return S_OK;
 }
