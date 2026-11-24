@@ -17,6 +17,10 @@ void logf(const char* fmt, ...);
 void unimpl(const char* api);
 UnimplMode unimpl_mode();
 
+// XBGTASIX_WATCH_CTX=1：对游戏线程本地上下文里的计数 ctx+0xC04 装硬件写断点（Dr1），
+// 谁写、写多少都会打一行 [xbgtasix]。第 4 堵墙（game+0x2237178）就是被它=0 卡住的。
+void install_ctx_write_watchpoint();
+
 void set_game_root(const char* path);
 const char* game_root();
 

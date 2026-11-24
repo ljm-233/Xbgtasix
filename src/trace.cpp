@@ -173,6 +173,9 @@ UnimplMode unimpl_mode_cached() {
 // 没有它，游戏崩了只会给一个退出码；有了它可以直接 objdump 出是哪个函数。
 // 用 XBGTASIX_VEH=1 打开（默认关闭：它改变异常处理路径）。
 // ---------------------------------------------------------------------------
+// 前向声明：ctx 写断点（定义在文件后段）也要在异常钩子里用 —— 命中后要重建 ctx 读值。
+void* ctx_from_teb();
+
 LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     // 只记一次会漏：第一个异常可能是可恢复的（例如 xmem 的按需提交 AV），
     // 它把额度用掉，真正致命的那次就不打印了。改成前 N 次都记。
@@ -220,17 +223,41 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     // 这里把三个操作数、减法结果与最终和全部打出来，并显式判断无符号回绕。
     if (code == EXCEPTION_SINGLE_STEP) {
         // 数据断点命中：Rip 是"写指令的下一条"。
-        // 读回 g 的当前值，并把命中点报成 模块+RVA。
-        unsigned long long written = 0;
-        HMODULE exe_now = GetModuleHandleW(nullptr);
-        if (exe_now) {
-            std::memcpy(&written,
-                        reinterpret_cast<const void*>(
-                            reinterpret_cast<unsigned long long>(exe_now) + 0x75E6FF0ULL),
-                        sizeof(written));
+        // Dr6 的 bit0/bit1 告诉我们命中的是 Dr0（g）还是 Dr1（ctx+0xC04）。
+        const unsigned long long dr6 =
+            info->ContextRecord ? static_cast<unsigned long long>(info->ContextRecord->Dr6) : 0;
+        const bool hit_ctx = (dr6 & 0x2) != 0;
+        const bool hit_g = (dr6 & 0x1) != 0;
+        if (hit_ctx) {
+            // ctx 是线程本地的：重建一次，别缓存（换线程就换了对象）
+            void* c = ctx_from_teb();
+            if (c) {
+                auto* p = static_cast<unsigned char*>(c);
+                int v00 = *reinterpret_cast<volatile int*>(p + 0xC00);
+                int v04 = *reinterpret_cast<volatile int*>(p + 0xC04);
+                int v08 = *reinterpret_cast<volatile int*>(p + 0xC08);
+                int v0c = *reinterpret_cast<volatile int*>(p + 0xC0C);
+                logf("[xbgtasix] ★ ctx+0xC04 写断点命中！写指令结束于 %s+0x%llX，写后 +C00=%d "
+                     "+C04=%d +C08=%d +C0C=%d", name, rva, v00, v04, v08, v0c);
+            } else {
+                logf("[xbgtasix] ★ ctx+0xC04 写断点命中（ctx 重建失败）于 %s+0x%llX", name, rva);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
         }
-        logf("[xbgtasix] ★ g 写断点命中！写指令结束于 %s+0x%llX，写后 g=0x%llX", name, rva,
-             written);
+        if (hit_g || dr6 == 0) {
+            // 读回 g 的当前值，并把命中点报成 模块+RVA。
+            unsigned long long written = 0;
+            HMODULE exe_now = GetModuleHandleW(nullptr);
+            if (exe_now) {
+                std::memcpy(&written,
+                            reinterpret_cast<const void*>(
+                                reinterpret_cast<unsigned long long>(exe_now) + 0x75E6FF0ULL),
+                            sizeof(written));
+            }
+            logf("[xbgtasix] ★ g 写断点命中！写指令结束于 %s+0x%llX，写后 g=0x%llX", name, rva,
+                 written);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
@@ -238,6 +265,55 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     // 崩前两条调用是 (设备槽 50) 与 (全局 0x1475df048 的槽 132)。
     // 这里把那个全局指向的对象、它的 vtable 归属、以及 vtable[132] 的归属都打出来，
     // 用来判断"槽 132 打到了谁身上"。
+    // 定点采集：game+0x2237178 —— "诊断条目列表不能为空"那条断言（第 4 堵墙）。
+    // 判据本身是 `[obj+0xC] != 0`，obj 是个 vector（+8 cap / +C count / +10 data）。
+    // 之所以为空，是 0x14056EB10 那个 gate 返回了 false；这个 gate 里用到的"计数"
+    // 在 ctx+0xC04（vector 之外的另一条线索）。这里把两边一起打出来：
+    //   - ctx 及其 0xC00..0xC0C 四个字段（gate 的入口条件在这里）
+    //   - 断言对象 rsi 的 {cap,count,data}（确认它是不是真的空）
+    //   - gate 的两个字符串参数（.data 里 0x74539F6 / .rdata 里 0x678D1BB）
+    if (code == EXCEPTION_BREAKPOINT && rva == 0x2237178) {
+        void* c = ctx_from_teb();
+        if (c) {
+            auto* p8 = static_cast<unsigned char*>(c);
+            logf("[xbgtasix] [0x2237178] ctx=0x%llX +C00=%d +C04=%d +C08=%d +C0C=%d",
+                 reinterpret_cast<unsigned long long>(c),
+                 *reinterpret_cast<volatile int*>(p8 + 0xC00),
+                 *reinterpret_cast<volatile int*>(p8 + 0xC04),
+                 *reinterpret_cast<volatile int*>(p8 + 0xC08),
+                 *reinterpret_cast<volatile int*>(p8 + 0xC0C));
+        } else {
+            logf("[xbgtasix] [0x2237178] ctx 为空（TLS +0x7F0 是 NULL）");
+        }
+        const CONTEXT* cc = info->ContextRecord;
+        if (cc) {
+            auto* obj = reinterpret_cast<const unsigned char*>(cc->Rsi);
+            if (obj) {
+                int cap = 0, cnt = 0;
+                unsigned long long data = 0;
+                std::memcpy(&cap, obj + 0x8, 4);
+                std::memcpy(&cnt, obj + 0xC, 4);
+                std::memcpy(&data, obj + 0x10, 8);
+                logf("[xbgtasix] [0x2237178] 断言对象=0x%llX cap=%d count=%d data=0x%llX",
+                     reinterpret_cast<unsigned long long>(obj), cap, cnt, data);
+            }
+        }
+        HMODULE exe_now = GetModuleHandleW(nullptr);
+        if (exe_now) {
+            const auto b = reinterpret_cast<unsigned long long>(exe_now);
+            const auto* s1 = reinterpret_cast<const char*>(b + 0x74539F6ULL);
+            char hex[3 * 24 + 1] = {0};
+            for (int i = 0; i < 24; ++i) {
+                static const char* d = "0123456789abcdef";
+                hex[i * 3] = d[(static_cast<unsigned char>(s1[i]) >> 4) & 0xF];
+                hex[i * 3 + 1] = d[static_cast<unsigned char>(s1[i]) & 0xF];
+                hex[i * 3 + 2] = ' ';
+            }
+            hex[3 * 24] = 0;
+            logf("[xbgtasix] [0x2237178] .data 0x74539F6 前 24 字节: %s", hex);
+        }
+    }
+
     if (code == EXCEPTION_BREAKPOINT && rva == 0x2474606) {
         auto rd = [](unsigned long long a, unsigned long long* out) -> bool {
             MEMORY_BASIC_INFORMATION m{};
@@ -670,6 +746,60 @@ inline void patch_game_assert() {
          patched, already, missing);
 }
 
+// ---------------------------------------------------------------------------
+// 硬件写断点（第二个）：盯游戏线程本地上下文里的那个计数 ctx+0xC04。
+//
+// 为什么要它：第 4 堵墙（game+0x2237178）的判据是"某个 vector 不能为空"，而那个 vector
+// 之所以为空，是因为 `0x14056EB10` 一进门就看 `cmpl $0x0,0xC04(%rcx); jle -> return false`。
+// 静态读到这里只能说"这个计数是 0"，说不清"谁该把它加上去"。
+// 这里从"猜"切到"看"：谁写 ctx+0xC04、写了多少，一次就看见。
+//
+// ctx 的取法与游戏完全一致（0x140643CD0 的那三条指令）：
+//   TEB+0x58 -> TLS 数组 -> [0]（模块 TLS 块）-> +0x7F0
+// 断点装在 Dr1，与既有的 g 断点（Dr0）并存：
+//   L1=bit2, RW1=写(bits20-21=01), LEN1=4 字节(bits22-23=11) -> Dr7 |= 0x00D00004
+// 开关：XBGTASIX_WATCH_CTX=1
+// ---------------------------------------------------------------------------
+void* ctx_from_teb() {
+    auto* teb = reinterpret_cast<unsigned char*>(NtCurrentTeb());
+    if (!teb) return nullptr;
+    auto** tls = *reinterpret_cast<void***>(teb + 0x58);
+    if (!tls) return nullptr;
+    void* block = tls[0];
+    if (!block) return nullptr;
+    return *reinterpret_cast<void**>(static_cast<unsigned char*>(block) + 0x7F0);
+}
+
+void install_ctx_write_watchpoint() {
+    char env[8] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_WATCH_CTX", env, sizeof(env)) == 0 || env[0] != '1') return;
+    void* ctx = ctx_from_teb();
+    if (!ctx) {
+        logf("[xbgtasix] ctx 写断点：TLS +0x7F0 还是空的，这一轮先不装（说明还没到那一步）");
+        return;
+    }
+    const auto target = reinterpret_cast<unsigned long long>(ctx) + 0xC04ULL;
+    CONTEXT c{};
+    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    HANDLE th = GetCurrentThread();
+    if (!GetThreadContext(th, &c)) {
+        logf("[xbgtasix] ctx 写断点：取线程上下文失败 err=%lu", GetLastError());
+        return;
+    }
+    if (c.Dr1 == target && (c.Dr7 & 0x4)) return;   // 已经装在同一地址上了
+    c.Dr1 = target;
+    c.Dr7 |= 0x00D00004ULL;
+    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!SetThreadContext(th, &c)) {
+        logf("[xbgtasix] ctx 写断点：设置失败 err=%lu", GetLastError());
+        return;
+    }
+    logf("[xbgtasix] 已对 ctx+0xC04 装硬件写断点：ctx=0x%llX 目标=0x%llX Dr7=0x%llX 当前值=%d",
+         reinterpret_cast<unsigned long long>(ctx), target,
+         static_cast<unsigned long long>(c.Dr7),
+         *reinterpret_cast<volatile int*>(reinterpret_cast<unsigned char*>(ctx) + 0xC04));
+}
+
 void maybe_install_veh() {
     static bool done = false;
     if (done) return;
@@ -679,6 +809,7 @@ void maybe_install_veh() {
     AddVectoredExceptionHandler(1, on_fatal);
     logf("[xbgtasix] 已安装异常钩子（XBGTASIX_VEH=1）");
     install_g_write_watchpoint();
+    install_ctx_write_watchpoint();
     patch_game_assert();
 }
 

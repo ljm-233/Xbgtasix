@@ -61,6 +61,9 @@ STDAPI InitializeApiImplEx(unsigned long long a, unsigned long long b, unsigned 
 
 STDAPI InitializeApiImplEx2(unsigned long long a, unsigned long long b, unsigned long long flags) {
     log_once("InitializeApiImplEx2", a, b, flags);
+    // 标题在这一步之后才会去读 ctx+0xC04（第 4 堵墙）。趁现在把写断点装上 ——
+    // 这时 ctx（TLS +0x7F0）已经存在，早于它太早（DllMain 时期还是空的）。
+    xbgtasix::install_ctx_write_watchpoint();
     return S_OK;
 }
 
@@ -184,6 +187,7 @@ extern "C" {
 // 出参在 r8（见 docs/wine-host.md 4 节的反汇编：rsi/rdi 是前两个入参，r8 是 &对象）。
 // 真实语义未知；这里只做"给一个能安全解引用的对象"。
 STDAPI QueryApiImpl(unsigned long long api_id, unsigned long long version, void** out) {
+    xbgtasix::install_ctx_write_watchpoint();   // 幂等：装过就只返回
     xbgtasix::logf("[xgamert] QueryApiImpl(id=%016llX ver=%016llX) -> 哑对象（槽 %d 干活、%d 释放）",
                    api_id, version, kWorkSlot, kReleaseSlot);
     if (!out) return E_POINTER;
