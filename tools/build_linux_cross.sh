@@ -54,7 +54,7 @@ fail=0
 
 echo "== 编译 xmem.dll"
 "$CXX" "${FLAGS[@]}" -shared src/xmem/xmem.cpp src/fstrace/fstrace.cpp \
-    src/fstrace/drives.cpp src/trace.cpp \
+    src/fstrace/drives.cpp src/host_stall/host_stall.cpp src/trace.cpp \
     -o "$OUT/xmem.dll" -Wl,--out-implib,"$OUT/libxmem.dll.a" || fail=1
 
 echo "== 编译 5 个主机硬件抽象层 DLL"
