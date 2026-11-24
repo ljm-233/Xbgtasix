@@ -52,6 +52,11 @@ export WINEDLLOVERRIDES="dxgi=n;d3d11=n;d3d10core=n;d3d12=n;d3d12core=n"
 export VKGUARD_DISABLE=${VKGUARD_DISABLE:-1}
 export XBGTASIX_VEH=${XBGTASIX_VEH:-1}
 export WINEDEBUG=${WINEDEBUG:--all}
+# Wine 的 gameinput.dll 在 GameInputCreate 开头就 `getenv("SteamGameId")`，拿不到直接返回
+# E_NOTIMPL（0x80004001，实测反汇编 0x1800014f9 -> 0x180001709）。标题在 GDK 引导尾段必须建
+# 一个 IGameInput 单例，失败就 int3（game+0x5925915）。给了这个变量它才会继续往下走。
+# 这是宿主差异，不是游戏的怪癖 —— 真 Windows 上装了 GameInput redist 就有时不需要它。
+export SteamGameId=${SteamGameId:-1771300}
 
 run=( "$WINE" "$HERE/build/xbgtasix.exe" run "$(to_win "$PKG")" )
 [ -n "$dll_dir" ] && run+=( --dll-dir "$(to_win "$HERE/$dll_dir")" )

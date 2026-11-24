@@ -322,7 +322,7 @@ python3 tools/add_exports.py build/xgameruntime.dll -o build/wine-bridge/xgameru
 | 15 | `0x78` | `a=0x10FC90` | |
 | 33 | `0x108` | `a=0 b=0x149AB3020 c=0x142211C80` | |
 
-### 4.3 第 3 堵墙：`game+0x5925915`
+### 4.3 第 3 堵墙：`game+0x5925915` —— 其实是 **Wine 的 GameInput**，已用一个环境变量越过
 
 ```
 [xbgtasix] FATAL 异常 0x80000003 at game_scarlett_master.exe+0x5925915
@@ -347,9 +347,52 @@ python3 tools/add_exports.py build/xgameruntime.dll -o build/wine-bridge/xgameru
 也就是说：标题拿到我们那个哑对象之后，把它当**带引用计数的主机接口**在用，
 并且要把某个“结果”存进全局单例 `0x149AB15E8`；某一步的返回值不合格就 int3。
 
-下一步要的：把槽 29/12/15/33 的**入参语义**定下来（它们显然在传不同的 IID/结构），
-让至少一个槽返回“真东西”而不是 `S_OK`。这一点需要读 `0x5925800..0x5925915` 这个函数
-和几个调用者，本轮到此为止。
+
+### 4.4 这个 int3 的调用链：`GameInput.dll` 序号 1
+
+把 `call 0x145F3FED0` 追到 IAT，是 **`GameInput.dll` 的序号 1**（`GameInputCreate`）；
+崩溃时 `rax = 0x80004001`（**E_NOTIMPL**）。再打开 Wine 自己的 `gameinput.dll`：
+
+```
+1800014f9: lea  0x54b0(%rip),%rcx      # "SteamGameId"
+180001500: call *%rbx                  ; getenv
+180001505: test %rax,%rax
+180001508: je   0x180001700
+...
+180001709: mov  $0x80004001,%esi       ; E_NOTIMPL —— getenv 为空时就是这条
+```
+
+也就是说：**Wine 的 GameInput 只在设了 `SteamGameId` 时才肯干活**，否则 `GameInputCreate`
+直接 `E_NOTIMPL`；标题在 GDK 引导尾段必须建一个 `IGameInput` 单例（全局 `0x149AB15E8`），
+失败就 int3。这是一个典型的**宿主差异**（真 Windows 上装了 GameInput Redistributable 就正常）。
+
+`tools/run_wine.sh` 已经默认带上它：
+
+```bash
+export SteamGameId=${SteamGameId:-1771300}
+```
+
+实测效果：`game+0x5925915` 这条断言**消失**，流程再往前走到
+
+### 4.5 第 4 堵墙：`game+0x2237178`（布尔断言）
+
+```
+142237167: call 0x142213030
+14223716c: mov  0xc(%rsi),%ecx
+14223716f: call 0x140006170        ; 返回 bool
+142237174: test %al,%al
+142237176: jne  0x2237179
+142237178: int3                    ; ← 第 4 堵墙
+```
+
+`0x140006170` 拿 `[rsi+0xC]` 当参数，返回假 → int3。不是失败码陷阱，是**布尔断言**，
+得先弄清 `0x140006170` 判的是什么（`rsi` 指向的对象、`+0xC` 那个字段）。
+这一层的输入还是我们给的哑对象（这轮日志里槽 3、4 也被调了：`vtable[3] a=0xD2F8E4`、
+`vtable[4] a=0x10 b=0xD2F900 c=0xD2FA00`）。
+
+**下一步要的**：把槽 29/12/15/33/3/4 的**入参语义**定下来（它们显然在传不同的 IID/结构），
+让至少一个槽返回“真东西”而不是 `S_OK`。这一点需要读 `0x5925800..0x5925915`、
+`0x140006170` 和几个调用者，本轮到此为止。
 
 ---
 

@@ -139,7 +139,7 @@ python3 tools/host_probe.py --doctor     # 宿主是不是 Wine + 真实 GPU（�
 |---|---|---|
 | 图形栈 | 桌面 D3D12 | **必须**走 dxvk + vkd3d-proton（`run_wine.sh` 已配）；用 wine builtin 的 `dxgi`/`wined3d` 会在导入阶段就 `0xC0000135` |
 | 适配器信息 | 真卡 | 详情随环境变：给对栈时报真卡但不保证厂商号（实测把 NVIDIA 报成 `1002`），走 builtin 路径时会报占位卡 —— **别只信 DXGI**，用 `host_probe.py` / `doctor` 的 `真实 GPU` 行 |
-| 进度 | 到资源归档读取 / `game+0x247AF2D`（64 MiB 断言） | 到 `game+0x55DE020`（`QueryApiImpl` 返回空对象被解引用） |
+| 进度 | 到资源归档读取 / `game+0x247AF2D`（64 MiB 断言） | 到 `game+0x2237178`（布尔断言）；路上依次越过 `game+0x5A91C21`（缺导出）、`game+0x55DE020`（`QueryApiImpl` 空对象）、`game+0x5925915`（Wine 的 `GameInputCreate` 返回 `E_NOTIMPL`，靠 `SteamGameId` 越过） |
 | 主机检测 | — | `XBGTASIX_PLATFORM=windows\|wine` 可手动钉死；不设则探测 `ntdll!wine_get_version` |
 
 怎么跑起来的关键一步（本次实测的根因）：标题的 GDK 引导要按名字从 `xgameruntime.dll` 解析
