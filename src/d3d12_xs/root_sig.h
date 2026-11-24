@@ -236,6 +236,13 @@ inline bool strip_blob_for_pc(const void* data, std::size_t size, std::uint32_t*
     const std::uint32_t pc = pc_flags(original);
     // 调用方传进来的是可写副本（我们自己的拷贝），这里直接改。
     std::memcpy(const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(data)) + at, &pc, 4);
+    // 段内容改了，DXBC 头 +4..+20 的 16 字节摘要必然对不上 —— 与序列化端同样清零。
+    // 不清的话，桌面 CreateRootSignature 会因摘要不匹配拒绝/抛异常
+    // （实测：D3D12Core 抛 C++ 异常 -> 游戏判定致命 -> SetUnhandledExceptionFilter -> int3）。
+    if (view.dxbc) {
+        std::memcpy(const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(data)) + 4,
+                    std::vector<std::uint8_t>(16, 0).data(), 16);
+    }
     if (bits_out) *bits_out = bits;
     if (at_out) *at_out = at;
     return true;
