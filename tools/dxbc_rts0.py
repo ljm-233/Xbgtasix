@@ -125,6 +125,7 @@ class Rts0:
         self.version = self.num_params = self.num_static = self.total = None
         self.flags = None
         self.params = []
+        self.static_samplers = []
         try:
             self._parse()
         except (struct.error, IndexError) as exc:
@@ -138,9 +139,18 @@ class Rts0:
          self.total, self.flags) = struct.unpack_from("<IIIIII", d, 0)
         if self.num_params > 64:
             raise struct.error("参数个数离谱：%d" % self.num_params)
+        # 恒等式（GTA6 的 53 个 + victory 的 184 个 rootsig 上验证过）：
+        #   total 字段 == 24 + 24*numParams        ← 不含静态采样器
+        #   段体长度  == total + 52*numStatic      ← 采样器追加在 total 之后
+        # GTA6 那批 numStatic 恒 0，所以旧写法（24+24n == 段体长）碰巧也对；
+        # 一旦有静态采样器就会误报"不自洽"。victory 的 rootsig 就撞上了这个。
         if 24 + 24 * self.num_params != self.total:
-            self.error = ("自洽式不成立：24+24*%d=%d != 段体总长 %d"
+            self.error = ("自洽式不成立：24+24*%d=%d != total 字段 %d"
                           % (self.num_params, 24 + 24 * self.num_params, self.total))
+        elif len(d) != self.total + 52 * self.num_static:
+            self.error = ("段体长 %d != total %d + 52*静态采样器 %d = %d"
+                          % (len(d), self.total, self.num_static,
+                             self.total + 52 * self.num_static))
         for i in range(self.num_params):
             t, aux, tail = struct.unpack_from("<III", d, table + 12 * i)
             if tail + 12 > len(d):
@@ -153,15 +163,31 @@ class Rts0:
                 "reg": reg, "space": space, "extra": extra,
             })
 
+        # 静态采样器：紧跟在参数表之后，每项 52 字节
+        base_s = 24 + 24 * self.num_params
+        for k in range(self.num_static):
+            q = base_s + 52 * k
+            if q + 52 > len(d):
+                self.error = "静态采样器[%d] 越界" % k
+                return
+            (filt, au, av, aw, mip, aniso, comp, border,
+             min_lod, max_lod, reg, space, vis) = struct.unpack_from(
+                "<IIIIfIIIffIII", d, q)   # 13 个字段 = 52 字节
+            self.static_samplers.append({
+                "filter": filt, "addr": (au, av, aw), "max_lod": max_lod,
+                "reg": reg, "space": space,
+                "visibility": VISIBILITY.get(vis, "vis%d" % vis),
+            })
+
     def summary(self):
         types = "/".join(p["type"] for p in self.params) or "-"
         return ("v%d n=%d static=%d flags=0x%08X [%s]"
                 % (self.version, self.num_params, self.num_static, self.flags, types))
 
     def lines(self):
-        out = ["  RTS0 v%d  参数=%d  静态采样器=%d  段体总长=%d  flags=0x%08X"
+        out = ["  RTS0 v%d  参数=%d  静态采样器=%d  total=%d（不含采样器，段体长=%d）flags=0x%08X"
                % (self.version, self.num_params, self.num_static,
-                  self.total, self.flags)]
+                  self.total, self.total + 52 * self.num_static, self.flags)]
         if self.flags:
             known = [name for bit, name in RS_FLAGS.items() if self.flags & bit]
             if known:
@@ -182,6 +208,9 @@ class Rts0:
             out.append("    参数[%d] %-16s vis=%-5s %s"
                        % (p["index"], p["type"],
                           VISIBILITY.get(p["aux"], "?"), detail))
+        for k, smp in enumerate(self.static_samplers):
+            out.append("    静态采样器[%d] reg=%d space=%d vis=%s max_lod=%g"
+                       % (k, smp["reg"], smp["space"], smp["visibility"], smp["max_lod"]))
         return out
 
 
@@ -193,15 +222,14 @@ STAT_FIELDS_V1 = [
 
 
 def parse_stat(blob):
-    if len(blob) < 4:
+    """STAT 段：首双字是程序版本（0x00050065 = SM6.0 那个 token），后面不是
+    "个数+数组"的简单布局（早期版本按 count 读，读出了 327781 这种垃圾）。
+    这里只如实给出头部双字，不再假装解语义。"""
+    if len(blob) < 8:
         return {}
-    n = struct.unpack_from("<I", blob, 0)[0]
-    if n * 4 + 4 > len(blob) or n > 64:
-        return {"raw_count": n}
-    vals = struct.unpack_from("<%dI" % n, blob, 4)
-    return {"count": n, "values": list(vals),
-            "instructions": vals[0] if vals else None,
-            "temp_registers": vals[1] if n > 1 else None}
+    head = list(struct.unpack_from("<%dI" % min(8, len(blob) // 4), blob, 0))
+    return {"head": ["0x%08X" % v for v in head],
+            "program_version": "0x%08X" % head[0]}
 
 
 def psv0_strings(blob):

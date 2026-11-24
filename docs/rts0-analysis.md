@@ -101,9 +101,21 @@ DXBC 容器解析（magic / 16 字节摘要 / 版本 / 总长 / 段数 / 段偏�
 +24+12n        尾表   n 项 × 12 字节：[ShaderRegister, RegisterSpace, Extra]
 ```
 
-**自洽检验（53 个 shader + 17 个 rs，70/70 通过）**：`24 + 24*n == 段体总长`，
+**自洽检验（53 个 shader + 17 个 rs，70/70 通过）**：`24 + 24*n == total 字段`，
 且每条记录的"尾表偏移"= `24 + 12n + 12i`，误差为零。
 例：`rs_09`（n=9，240 字节）参数表 `0x18..0x84`，尾表 `0x84..0xF0`，正好收口。
+
+**2026-11-25 修正（用 victory 的 184 个 rootsig 校准出来的）**：`total` 字段**不含静态采样器**，
+正确的两条恒等式是
+
+```
+total 字段 == 24 + 24*numParams
+段体长度   == total + 52*numStatic        ← D3D12_STATIC_SAMPLER_DESC 每项 52 字节
+```
+
+GTA6 这 70 个 blob 的 `numStatic` 恒为 0，所以旧写法（`24+24n == 段体长`）碰巧也对；
+victory 的 rootsig 里有 59 个带 1~5 个静态采样器，旧写法会把它们全判成"不自洽"。
+`tools/dxbc_rts0.py` 已改成两条恒等式 + 按 `24+24n` 之后解析 52 字节采样器记录。
 
 > 踩过的坑：按 24 字节直接切片，会把"下一条记录的前半"当成上一条的后半，
 > 于是读出 `type=5`、`type=6` 这种**非法值**，从而误判"存在 DescriptorTable"。
@@ -437,3 +449,92 @@ mesh-00a5896a6ac7b7c7:  0x12:16  0x0D:1895  0x07:28
 1. 先把 53 个 `0x0D` 块单独落盘（`xdat` 子命令已经给出行程表：type/offset/size 都有）
 2. 按"是否在 §1 的失败后缀里"分组比 `0x0D` 的内部结构（若 E1 的名单出来，这组对比就直接成立；名单没出来就先按 RTS0 组对比）
 3. 版本次维度：v5 与 v3 的 `0x0D` 必须分开看，别混
+
+---
+
+## 12. 2026-11-25 追加：崩溃样本 `5d113aa6830760b6` 的 XDAT 对比 —— **没有异常**（支线结论：解释不了崩溃）
+
+### 12.1 覆盖情况
+
+崩溃样本在**两批里都在**：
+
+```
+/tmp/vm/shaders/compute-5d113aa6830760b6.{console.dxil, host.dxil, shader.bin}
+/tmp/vm/shaders2/compute-5d113aa6830760b6.{console.dxil, host.dxil, shader.bin, rootsig.bin, rootsig.txt}
+```
+
+`shaders2` 一共 240 组有 console 的样本（184 组另带 rootsig），**全部 ver=3、全部 3 条目、
+XDAT 三条自洽式 240/240 通过**。
+
+### 12.2 崩溃样本 vs 其余 239 个
+
+| 项 | 崩溃样本 | 其余分布 | 判读 |
+|---|---|---|---|
+| 条目数 / 类型序列 | 3，`0x12/0x0D/0x07` | 同 | 同构 |
+| 自洽式 | ✅ 通过 | 239/239 通过 | — |
+| `0x0D`（v3 的 bitcode） | **2406** | min 273 / p50 1559 / max 27173 | **中游，不是异常值** |
+| `0x12` 尺寸 | 16 | 239 个全 16 | 同 |
+| `0x07` 尺寸 | 28 | 239 个全 28 | 同 |
+| `host/console` 体积比 | 3.06（7716/2524） | min 1.60 / p50 4.84 / max 23.63 | 中游 |
+| 相对偏移 | 首条 payload == 表尾，末条收口 == blob 末尾 | 同 | 同 |
+
+`0x07` 的 28 字节里有 4 字节随 shader 变（崩溃样本 `66000500 0f060080 'DXIL' 06010000 10000000 04000000 'NOBC'`，
+典型样本 `66000500 bb050080 'DXIL' …`），语义未解；顺手纠正本文件 §11.2 那句"`0x07` 恒 28 字节"
+应读作"**尺寸恒 28、内容不恒定**"（240 个里 223 个取值不同）。
+
+**结论：XDAT 里没有任何可测量的异常**，崩溃样本在结构、尺寸、比值上都落在同批样本的中游。
+这条支线到此为止 —— 它解释不了那次崩溃，与主线的独立复现（NVIDIA 第 0 次调用就崩、Intel 能建、
+换 root signature 不影响）一致。
+
+### 12.3 顺带：崩溃样本的 root signature 长什么样
+
+用 `detail` 解 `/tmp/vm/shaders2/compute-5d113aa6830760b6.rootsig.bin`：
+
+```
+RTS0 v2  参数=1  静态采样器=2  total=48（段体长 152）  flags=0x00000C00
+  参数[0] 32bitConst  vis=ALL  寄存器 r0 space=0  Num32BitValues=8
+  静态采样器[0] reg=0 space=0 vis=ALL max_lod=12
+  静态采样器[1] reg=1 space=0 vis=ALL max_lod=12
+```
+
+和它同批的 124 个 rootsig 一样是 `flags=0xc00`、单参数 + 静态采样器。也就是说
+"这份 rootsig 本身也不特殊"，进一步支持主线那句"根签名不是变量"。
+
+---
+
+## 13. 2026-11-25 追加：**主机标志位不是固定掩码** —— 0x03000000 只在 GTA6 成立
+
+这条是把 victory 的 184 个 rootsig 拉进来解之后才暴露的，对本仓代码有直接影响。
+
+| 来源 | RTS0 `flags` 取值 | 非标准位 |
+|---|---|---|
+| GTA6（`build/dumps` 53 个 shader + 17 个 rs） | **`0x03000000`** | bit24 + bit25 |
+| victory 的标题（`shaders2` 184 个 rootsig） | **`0xC00`（124 个）/ `0xC01`（60 个）** | bit10 + bit11（`0xC01` 还带标准位 `ALLOW_INPUT_ASSEMBLER`） |
+
+`0x03000000` 拆开正是本仓 `root_sig.h:44-58` 记的那两位：
+`0x01000000`（memory-based ABI）+ `0x02000000`（compute-2 spill 区）—— 与 §28 的说法一致
+（**这两个位确实是主机专有的 ABI 位，也确实全部置上了**；§28 的问题只在于它不是"哪几个 shader 崩"的判别量）。
+
+**但对另一个标题就完全失效**：本仓的剥离掩码是
+
+```cpp
+kXboxRootFlags = 0x01000000 | 0x02000000 | 0x80000000   // = 0x83000000
+pc_flags(x)  = x & ~kXboxRootFlags
+xbox_bits(x) = x &  kXboxRootFlags
+```
+
+拿 victory 的 `0xC00` 去套：`xbox_bits(0xC00) == 0` ⇒ `strip_blob_for_pc()` 直接 `return false`，
+**一个字节都不改、也不落盘（`dump_root_sig` 只在剥离成功的分支里调用）**。
+反过来说，如果哪天真去跑别的标题，写死 `0x03000000` 会让剥离静默失效。
+
+建议改成"只保留 PC 认识的位"这种写法，两个标题都能覆盖：
+
+```cpp
+// 标准位只有 D3D12_ROOT_SIGNATURE_FLAGS 的 0x1..0x40；其余一律按主机位处理
+inline constexpr std::uint32_t kPcKnownFlags = 0x7Fu;
+inline constexpr std::uint32_t pc_flags (std::uint32_t f) { return f &  kPcKnownFlags; }
+inline constexpr std::uint32_t xbox_bits(std::uint32_t f) { return f & ~kPcKnownFlags; }
+```
+
+（这条只是建议，`src/` 没动。改之前要先在 GTA6 上回归：`0x03000000` / `0x80000000` 都会被归入主机位，
+行为等价；但要确认没有把某个桌面真用的位剥掉。）
