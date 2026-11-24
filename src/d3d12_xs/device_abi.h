@@ -1965,18 +1965,44 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
                        static_cast<unsigned long long>(m), static_cast<unsigned long long>(n),
                        static_cast<unsigned long long>(o), static_cast<unsigned long long>(p));
     }
-    // 实验：12/16 参 dump 里没有任何写栈指针，但 e 与 p 同值、o = e+0x18，
-    // 形态像一个"上下文/输出槽"。按 XBGTASIX_PSO62_OUT=*e 把 PSO 写进 *e 试试。
+    // **签名已确证**（反汇编 XboxBvhBuilder+0xC4E1 的调用点）：
+    //     mov (%rcx),%rax / mov %r9,%rdi          ; rdi 保存输出指针
+    //     mov 0x1f0(%rax),%r10                    ; 槽 62
+    //     lea 0x38(%rsp),%rdx                     ; arg2 = desc
+    //     mov %r9,0x28(%rsp)                      ; arg6 = 输出指针
+    //     lea <IID>,%rax / mov %rax,0x20(%rsp)    ; arg5 = IID
+    //     xor %r9d,%r9d                           ; arg4 = 0
+    //     call *%r10
+    // 对照我们的参数：a=desc b=0 c=0 d=IID e=输出指针 => **e 就是 ppPSO**。
+    // 调用方随后 `mov (%rdi),%rcx; mov (%rcx),%rax; call *0x30(%rax)`，
+    // 即若 *e 为空就会空指针崩溃（这就是 XboxBvhBuilder+0xC4F3 那次）。
+    // 所以默认写回；只在"可写且当前为空"时写，避免覆盖调用方已有对象。
     {
         char om[16] = {0};
         GetEnvironmentVariableA("XBGTASIX_PSO62_OUT", om, sizeof(om));
-        // **必须显式开启**（XBGTASIX_PSO62_OUT='*e'）。
-        // 实测开启后：*e 原本恒为 0，写入后游戏前进到 2627 行并越过 XboxBvhBuilder 崩溃。
-        // 但默认开启出现过一次 0xC0000409（fail-fast），怀疑 e 并非每次都是输出槽，
-        // 无条件写会破坏调用方内存 —— 所以保持 opt-in，不拿默认行为冒险。
-        if (om[0] == '*' && SUCCEEDED(hr) && pso) {
+        // 默认写回；XBGTASIX_PSO62_OUT=0 可关闭（用于对照实验）。
+        const bool write_out = (om[0] != '0');
+        // 只在"请求的 IID 就是 ID3D12PipelineState"时才写回。
+        // 理由：同一条槽有多个调用点，只有 XboxBvhBuilder 那个（已反汇编确认）
+        // 把 e 当 ppPSO；别处若传了别的 IID，e 很可能不是输出槽，写它会破坏内存
+        // （实测出现了 0xC0000409 fail-fast）。
+        static const IID kPsoIid = __uuidof(ID3D12PipelineState);
+        bool iid_is_pso = false;
+        if (riid) {
+            static std::atomic<int> guidlog{0};
+            if (guidlog.fetch_add(1, std::memory_order_relaxed) < 4) {
+                const auto* g = reinterpret_cast<const unsigned char*>(riid);
+                xbgtasix::logf("[d3d12_xs] 槽62 IID = {%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                               *reinterpret_cast<const unsigned int*>(g),
+                               *reinterpret_cast<const unsigned short*>(g + 4),
+                               *reinterpret_cast<const unsigned short*>(g + 6), g[8], g[9], g[10],
+                               g[11], g[12], g[13], g[14], g[15]);
+            }
+            iid_is_pso = (std::memcmp(riid, &kPsoIid, sizeof(IID)) == 0);
+        }
+        if (write_out && iid_is_pso && SUCCEEDED(hr) && pso) {
             auto* slot = reinterpret_cast<void**>(e);
-            if (readable(slot, sizeof(void*))) {
+            if (readable(slot, sizeof(void*)) && *slot == nullptr) {
                 void* before = *slot;
                 *slot = pso;
                 xbgtasix::logf("[d3d12_xs] 槽62 写回 *e：%p -> %p", before, static_cast<void*>(pso));
