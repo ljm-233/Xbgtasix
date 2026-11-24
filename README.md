@@ -124,34 +124,43 @@ build/xbgtasix.exe firstrun "<包目录>"  # verify → doctor → check → run
 
 ## 在 Linux / Wine 下运行
 
-项目原来只跑在 Windows 上；现在有了一条经 Wine 的 Linux 路径。**目前支持到“跑起来、越过引导、停在下一堵墙”，
-不是可玩状态**。细节、反汇编与原始日志见 [docs/wine-host.md](docs/wine-host.md)。
+项目原来只跑在 Windows 上；现在有一条经 Wine 的 Linux 路径。
+**当前实测：6868 ms、2577 行日志，停在 `game+0x247AF2D` —— 与真 Windows 当年那堵 64 MiB 墙是同一堵。**
+不是可玩状态；六堵墙的逐条账见 [docs/wine-host.md](docs/wine-host.md) 第 0.1 节。
 
 ```bash
-python3 tools/host_probe.py --doctor     # 宿主是不是 Wine + 真实 GPU（读 /sys/class/drm）
-./tools/run_wine.sh                      # 跑包：补 dxvk/vkd3d-proton 路径，带上异常钩子
-./tools/run_wine.sh --dll-dir build/wine-bridge --timeout 180
+python3 tools/host_probe.py --doctor     # 宿主是不是 Wine + 真实 GPU（读 /sys/class/drm，不信 DXGI）
+./tools/run_wine.sh                      # 跑包：配 dxvk/vkd3d-proton、建 g:/t: 盘符、带异常钩子
+python3 tools/probe_at.py 56EBA8 56EBBD  # 在游戏的某个 RVA 上装"眼睛"（本机 Wine 不投递硬件断点）
 ```
-
-已知差异与当前状态：
 
 | 项 | 真 Windows | Linux + Wine（本机实测） |
 |---|---|---|
-| 图形栈 | 桌面 D3D12 | **必须**走 dxvk + vkd3d-proton（`run_wine.sh` 已配）；用 wine builtin 的 `dxgi`/`wined3d` 会在导入阶段就 `0xC0000135` |
-| 适配器信息 | 真卡 | 详情随环境变：给对栈时报真卡但不保证厂商号（实测把 NVIDIA 报成 `1002`），走 builtin 路径时会报占位卡 —— **别只信 DXGI**，用 `host_probe.py` / `doctor` 的 `真实 GPU` 行 |
-| 进度 | 到资源归档读取 / `game+0x247AF2D`（64 MiB 断言） | 同样到 `game+0x247AF2D`（**6868 ms / 2577 行**）—— 修掉盘符假成功、槽 3 返回值之后追平了真机口 |
-| 盘符 | 平台挂载 | **Wine 的盘符只能来自 `$WINEPREFIX/dosdevices` 符号链接**；`DefineDosDeviceW` 在 Wine 下返回成功却不生效（三种写法都试过）。`tools/run_wine.sh` 会在启动前建 `g:`/`t:` | 到 `game+0x2237178`（空的诊断 vector 断言）；路上依次越过 `game+0x5A91C21`（缺四个内部导出）、`game+0x55DE020`（`QueryApiImpl` 空对象）、`game+0x5925915`（Wine 的 `GameInputCreate` 返回 `E_NOTIMPL`，靠 `SteamGameId` 越过）、`game+0x2237178`（`appdata0.rpf` 在 `G:` 上打不开 —— Wine 盘符假成功）、`game+0x55DEA79`（槽 3 返回值被当指针用），见 `docs/wine-host.md` 第 8~11 节。调试入口：`python3 tools/probe_at.py <rva>[,<rva>]`（本机 Wine 不投递硬件断点，只能走 int3 探针） |
-| 主机检测 | — | `XBGTASIX_PLATFORM=windows\|wine` 可手动钉死；不设则探测 `ntdll!wine_get_version` |
+| 图形栈 | 桌面 D3D12 | **必须**走 dxvk + vkd3d-proton（`run_wine.sh` 已配）；用 wine builtin 的 `dxgi`/`wined3d` 会在**导入阶段**就 `0xC0000135` |
+| 适配器信息 | 真卡 | 随环境变：给对栈时报真卡但不保证厂商号（实测把 NVIDIA 报成 `1002`），builtin 路径下报占位卡 —— **别只信 DXGI**，看 `doctor` 的 `真实 GPU` 行 |
+| 进度 | 到 `game+0x247AF2D`（64 MiB 断言） | 同样到 `game+0x247AF2D`（**6868 ms / 2577 行**） |
+| 盘符 | 平台挂载 | **只能来自 `$WINEPREFIX/dosdevices/` 符号链接**，且必须在起进程前建；`DefineDosDeviceW` 在 Wine 下"返回成功但不生效"（三种写法 + 注册表都不行） |
+| 宿主差异 | — | Wine 的 `GameInputCreate` 在没设 `SteamGameId` 时返回 `E_NOTIMPL`（`run_wine.sh` 已带）；Wine 不投递硬件断点（调试走 int3 探针） |
+| 主机检测 | — | `XBGTASIX_PLATFORM=windows\|wine` 可钉死；不设则探测 `ntdll!wine_get_version` |
 
-怎么跑起来的关键一步（本次实测的根因）：标题的 GDK 引导要按名字从 `xgameruntime.dll` 解析
-`InitializeApiImpl` / `InitializeApiImplEx` / `InitializeApiImplEx2` / `UninitializeApiImpl` 四个内部入口点。
-缺它们 → 引导返回 `0x89240101` → 标题在 `game+0x5A91C21` `int3`（就是 Wine 上“482 ms 就死”那一枪）。
-手工实现见 [src/xgameruntime/api_impl.cpp](src/xgameruntime/api_impl.cpp)；
-本机没有 mingw-w64，用 [tools/add_exports.py](tools/add_exports.py) 给现成 DLL 追加导出完成了验证（461 → 465）。
+六堵墙（逐条"原因 / 怎么过的 / 耗时"见 docs 第 0.1 节）：
+`0x5A91C21` 缺四个内部导出 → `0x55DE020` QueryApiImpl 空对象 → `0x5925915` Wine GameInput →
+`0x2237178` 盘符假成功 → `0x55DEA79` 槽 3 返回值被当指针 → `0x247AF2D` 64 MiB 墙（真机同款）。
+**前五堵里两堵是我们自己的缺口、两堵是宿主差异，只有最后一堵是要建模的真问题。**
 
-> 交叉编译（在有 mingw-w64 的机器上）用 `./tools/build_linux_cross.sh`；产物仍是 Windows PE，由 Wine 加载。
+两条可复用的宿主通则单独成文：[docs/wine-host-rules.md](docs/wine-host-rules.md)。
+
+编译：本机 mingw-w64 在 `~/toolchain-dl/mingw/usr/bin`（不在 PATH 里）：
+
+```bash
+export PATH="$HOME/toolchain-dl/mingw/usr/bin:$PATH"
+CXX=x86_64-w64-mingw32-g++ GDK_INC=/path/to/gdk/include_clean ./tools/build_linux_cross.sh   # 8 个 shim
+```
+
+`build.sh` 需要 `dxc`（只用于 shader 测试），Linux 上跑不了整条；核心 DLL 不需要它。
 
 ---
+
 
 ## 性能（本机实测）
 
