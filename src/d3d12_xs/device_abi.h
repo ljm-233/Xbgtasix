@@ -16,6 +16,7 @@
 #include <new>
 #include <utility>
 
+#include "xbgtasix/host_stall.h"
 #include "xbgtasix/trace.h"
 
 #include "descriptor_heap_abi.h"   // 句柄翻译表（描述符 CPU 句柄：arena 地址 <-> PC 堆地址）
@@ -252,6 +253,8 @@ inline HRESULT WINAPI frame_statistics_x(DeviceProxy*, UINT64 token, UINT type,
 //   几十秒。必须用 `xbgtasix::host_stall::scope` 把它包起来（见 include/xbgtasix/host_stall.h），
 //   否则标题的开机 hang check 会在 30 s 后把进程杀掉（它数的是"主线程没进展的轮数"，
 //   而驱动编译在我们线程里，它看不见进展）。参考 Leonida PR #7858 的同一机制。
+//   60–67 这一段现在由下方 `host_pso_slot_stub` 接管：**参数 dump 桩**（默认 E_NOTIMPL），
+//   唯一真正调用驱动的地方是 env 开关下的可行性实验，那里已经用 host_stall::scope 包好。
 template <std::size_t N>
 HRESULT WINAPI device_extension_stub_n(DeviceProxy*, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
                                        UINT64 d = 0) {
@@ -298,6 +301,707 @@ HRESULT WINAPI device_extension_stub_n(DeviceProxy*, UINT64 a = 0, UINT64 b = 0,
         return v && *v == '1';
     }();
     return unimpl_as_ok ? S_OK : E_NOTIMPL;
+}
+
+// ===========================================================================
+// 主机 PSO 槽（55 / 60 / 61 / 62 / 66 / 67）：参数 dump 桩 + 预留实验入口
+// ===========================================================================
+//
+// 证据分级（把"参考实现说的"和"本机实测的"分开写，以后不要再混）：
+//
+//  [参考] 槽位身份：omonkeyz/xbox-emulator（GPL-3.0，与本仓库同许可）
+//         `crates/compat/d3d12_xs/device_wrap.rs` 末尾 `vtable()` 的注释：
+//           55 = 派生 PSO（base PSO + 状态补丁）
+//           60 = Xbox graphics PSO create
+//           61 = 扩展采样器创建
+//           62 = Xbox compute PSO create
+//           66 / 67 = PSO 序列化 / 反序列化（参考实现用自研 TBPS 容器）
+//  [实测] 本仓库 build/ 下 **202 个 .log** 里没有任何一次 slot=60/61/62 的调用：
+//         未建模槽只出现过 7/8/9/17/18/20/27/36/39/70/127/133。真机最后停在
+//         game+0x247AF2D（XboxBvhBuilder 构造后的自身断言），之前最后一条 D3D 调用是
+//         槽 19 CreateUnorderedAccessView（build/real-veh.log 末尾）—— 也就是
+//         **根本还没走到 PSO 创建这一步**。
+//  [实测] 静态侧也给不出正证据：在 120 MB 的无符号标题 EXE 里 `call [reg+0x1e0]`
+//         有 185 处、`call [reg+0x1f0]` 有 373 处，但"基址寄存器就是设备指针"这件事
+//         无法只靠字节模式证明（同一位移在任何对象上都可能出现）。
+//         ⇒ **签名、参数个数、desc 布局全部未实测。**
+//
+// 所以这一段的实现分级是：
+//   55 / 60 / 61 / 62 / 66 / 67：**桩**，返回 E_NOTIMPL，但必须打出足够定位的信息 ——
+//       槽号、调用方模块内 RVA、8 个参数、可读指针的前 64 B、以及（60/62）对每个参数
+//       做一次"按桌面 desc 布局读是否完全合法"的形状自检：不合法时给出**第一个非法字段
+//       在 desc 内的偏移**，这正是下一次真机实验要对照的数据。
+//   真正的 desc 翻译/创建**默认不做**：布局未知时按猜想去解引用等于把野指针喂给驱动
+//   （实测 slot 70 同号转发直接崩在 D3D12Core）。唯一的例外是 env 开关
+//   `XBGTASIX_HOST_PSO_TRANSLATE=1` 下的**图形 PSO 可行性实验**：形状自检通过才用桌面
+//   布局原样试建一次，记 HRESULT 后立刻 Release，**不把指针写回游戏的 out 参数**
+//   （位置未知），桩的返回值始终是 E_NOTIMPL。
+//
+// 两个**独立的后续依赖**（拿到槽 60 的参数也不会自动解决）：
+//   1) 主机 PSO desc 是否与桌面 D3D12_GRAPHICS_PIPELINE_STATE_DESC 同构；
+//   2) 主机着色器字节码格式 —— docs/d3d12xs-evidence.md 记录 shaders.rpf 里扫不到
+//      DXBC/DXIL/SHDR/RDEF 魔数；桌面管线只吃 DXIL，格式不对时 desc 再正确也是
+//      E_INVALIDARG（见 docs/graphics-pitfalls.md 第 2 条）。
+inline constexpr std::size_t kHostDerivedPsoSlot = 55;
+inline constexpr std::size_t kHostGraphicsPsoSlot = 60;
+inline constexpr std::size_t kHostSamplerXSlot = 61;
+inline constexpr std::size_t kHostComputePsoSlot = 62;
+inline constexpr std::size_t kHostPsoSerializeSlot = 66;
+inline constexpr std::size_t kHostPsoDeserializeSlot = 67;
+
+constexpr bool is_host_pso_slot(std::size_t slot) {
+    return slot == kHostDerivedPsoSlot || slot == kHostGraphicsPsoSlot ||
+           slot == kHostSamplerXSlot || slot == kHostComputePsoSlot ||
+           slot == kHostPsoSerializeSlot || slot == kHostPsoDeserializeSlot;
+}
+
+// 只用于日志里的可读标签；括号里的"参考"= 来自参考实现的槽表，**不是**本机实测。
+inline const char* host_pso_slot_name(std::size_t slot) {
+    switch (slot) {
+        case kHostDerivedPsoSlot: return "派生PSO(base+patch, 参考)";
+        case kHostGraphicsPsoSlot: return "graphicsPSO(参考)";
+        case kHostSamplerXSlot: return "samplerX(参考)";
+        case kHostComputePsoSlot: return "computePSO(参考)";
+        case kHostPsoSerializeSlot: return "PSO序列化(参考)";
+        case kHostPsoDeserializeSlot: return "PSO反序列化(参考)";
+        default: return "?";
+    }
+}
+
+// ---- 只读"这段内存能不能安全读"：绝不为一条日志去碰野指针 ----
+// 返回从 addr 起**可连续读**的字节数（want 与当前已提交区域剩余长度的较小值）。
+// 未提交页、PAGE_NOACCESS、PAGE_GUARD 一律返回 0。
+inline std::size_t host_readable_span(UINT64 addr, std::size_t want,
+                                      MEMORY_BASIC_INFORMATION* out) {
+    if (addr < 0x10000) return 0;
+    MEMORY_BASIC_INFORMATION m{};
+    if (!VirtualQuery(reinterpret_cast<const void*>(addr), &m, sizeof(m)) || m.RegionSize == 0)
+        return 0;
+    if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
+    const UINT64 base = reinterpret_cast<UINT64>(m.BaseAddress);
+    const UINT64 avail = static_cast<UINT64>(m.RegionSize) - (addr - base);
+    if (out) *out = m;
+    return avail < want ? static_cast<std::size_t>(avail) : want;
+}
+
+inline bool host_is_module_address(UINT64 addr) {
+    if (addr < 0x10000) return false;
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(static_cast<uintptr_t>(addr)), &mod))
+        return false;
+    return mod != nullptr;
+}
+
+// GUID 的版本位（Data3 的 bits 12..15）与变体位（byte8 高 2 位 = 10）。主机扩展方法
+// 经常把 REFIID 直接当参数；先认出"这像不像一个 IID"，日志才读得下去。
+// 返回 0 = 不像 GUID；1..8 = 版本号。
+inline unsigned host_guid_version(const unsigned char* p16) {
+    const unsigned data3 = static_cast<unsigned>(p16[6]) | (static_cast<unsigned>(p16[7]) << 8);
+    const unsigned version = (data3 >> 12) & 0xF;
+    if (version < 1 || version > 8) return 0;
+    if ((p16[8] & 0xC0) != 0x80) return 0;
+    return version;
+}
+
+// ---- 桌面 desc 的"形状自检" ----
+// 这不是在断言"主机 desc 就是桌面布局"，而是把最省事的假设变成一个**可判定**的问题：
+// 如果这块内存按桌面 D3D12_GRAPHICS/COMPUTE_PIPELINE_STATE_DESC 读，所有小枚举、布尔、
+// 指针都落在合法域里，那么它与桌面布局同构的可能性就很高，值得逐字段比对；否则日志会
+// 指出第一个不合法字段的**偏移**，那正是下次真机实验要看的差异位置。
+// 注意：形状自检通过 ≠ 能创建成功（还有着色器字节码格式这一关）。
+enum class PsoShape : int {
+    kPlausible = 0,
+    kNotReadable,
+    kBadRootSignature,
+    kBadShaderBytecode,
+    kBadStreamOutput,
+    kBadBlend,
+    kBadRasterizer,
+    kBadDepthStencil,
+    kBadInputLayout,
+    kBadStripCut,
+    kBadTopology,
+    kBadRenderTargets,
+    kBadRtvFormat,
+    kBadDsvFormat,
+    kBadSample,
+    kBadNodeMask,
+    kBadCachedPso,
+    kBadFlags,
+};
+
+inline const char* pso_shape_name(PsoShape shape) {
+    switch (shape) {
+        case PsoShape::kPlausible: return "通过";
+        case PsoShape::kNotReadable: return "内存不可读";
+        case PsoShape::kBadRootSignature: return "根签名指针不像 COM 对象";
+        case PsoShape::kBadShaderBytecode: return "着色器字节码指针/长度非法";
+        case PsoShape::kBadStreamOutput: return "流输出描述非法";
+        case PsoShape::kBadBlend: return "混合状态枚举越界";
+        case PsoShape::kBadRasterizer: return "光栅化状态枚举越界";
+        case PsoShape::kBadDepthStencil: return "深度/模板状态枚举越界";
+        case PsoShape::kBadInputLayout: return "输入布局非法";
+        case PsoShape::kBadStripCut: return "IBStripCutValue 越界";
+        case PsoShape::kBadTopology: return "PrimitiveTopologyType 越界";
+        case PsoShape::kBadRenderTargets: return "NumRenderTargets 越界";
+        case PsoShape::kBadRtvFormat: return "RTVFormats 里有非法格式";
+        case PsoShape::kBadDsvFormat: return "DSVFormat 非法";
+        case PsoShape::kBadSample: return "SampleDesc 非法";
+        case PsoShape::kBadNodeMask: return "NodeMask 非法";
+        case PsoShape::kBadCachedPso: return "CachedPSO 指针/长度非法";
+        case PsoShape::kBadFlags: return "Flags 越界";
+    }
+    return "?";
+}
+
+struct PsoShapeResult {
+    PsoShape shape = PsoShape::kPlausible;
+    std::size_t offset = 0;  // 第一个可疑字段在 desc 内的偏移
+    UINT64 value = 0;        // 该字段的值（或可疑指针）
+};
+
+inline PsoShapeResult pso_shape_bad(PsoShape shape, std::size_t offset, UINT64 value) {
+    return PsoShapeResult{shape, offset, value};
+}
+
+inline PsoShapeResult host_check_bytecode(const D3D12_SHADER_BYTECODE& code,
+                                          std::size_t base) {
+    constexpr SIZE_T kMaxShaderBytes = 16u << 20;  // 宽松上界：正常 DXIL 远小于 16 MB
+    if (!code.pShaderBytecode) {
+        if (code.BytecodeLength != 0)
+            return pso_shape_bad(PsoShape::kBadShaderBytecode,
+                                 base + offsetof(D3D12_SHADER_BYTECODE, pShaderBytecode),
+                                 code.BytecodeLength);
+        return {};
+    }
+    if (code.BytecodeLength == 0 || code.BytecodeLength > kMaxShaderBytes)
+        return pso_shape_bad(PsoShape::kBadShaderBytecode,
+                             base + offsetof(D3D12_SHADER_BYTECODE, BytecodeLength),
+                             code.BytecodeLength);
+    if (!host_readable_span(reinterpret_cast<UINT64>(code.pShaderBytecode), 4, nullptr))
+        return pso_shape_bad(PsoShape::kBadShaderBytecode,
+                             base + offsetof(D3D12_SHADER_BYTECODE, pShaderBytecode),
+                             reinterpret_cast<UINT64>(code.pShaderBytecode));
+    return {};
+}
+
+// COM 对象的判据：前 8 B 是模块内地址（vtable 指针）。主机的 root signature 也可能
+// 是"句柄"而不是对象指针 —— 那种情况下这里会不合格，正好是我们要在日志里看到的差异。
+inline PsoShapeResult host_check_root_signature(ID3D12RootSignature* root, std::size_t base) {
+    if (!root) return {};  // 空根签名交给桌面自己回 E_INVALIDARG，不算"形状不合法"
+    const UINT64 addr = reinterpret_cast<UINT64>(root);
+    if (host_readable_span(addr, 8, nullptr) < 8)
+        return pso_shape_bad(PsoShape::kBadRootSignature, base, addr);
+    UINT64 vtable_ptr = 0;
+    std::memcpy(&vtable_ptr, root, sizeof(vtable_ptr));
+    if (!host_is_module_address(vtable_ptr))
+        return pso_shape_bad(PsoShape::kBadRootSignature, base, vtable_ptr);
+    return {};
+}
+
+inline PsoShapeResult host_check_cached_pso(const D3D12_CACHED_PIPELINE_STATE& cached,
+                                            std::size_t base) {
+    constexpr SIZE_T kMaxCachedBytes = 64u << 20;
+    if (!cached.pCachedBlob) {
+        if (cached.CachedBlobSizeInBytes != 0)
+            return pso_shape_bad(PsoShape::kBadCachedPso,
+                                 base + offsetof(D3D12_CACHED_PIPELINE_STATE, pCachedBlob),
+                                 cached.CachedBlobSizeInBytes);
+        return {};
+    }
+    if (cached.CachedBlobSizeInBytes == 0 || cached.CachedBlobSizeInBytes > kMaxCachedBytes)
+        return pso_shape_bad(
+            PsoShape::kBadCachedPso,
+            base + offsetof(D3D12_CACHED_PIPELINE_STATE, CachedBlobSizeInBytes),
+            cached.CachedBlobSizeInBytes);
+    if (!host_readable_span(reinterpret_cast<UINT64>(cached.pCachedBlob),
+                            static_cast<std::size_t>(cached.CachedBlobSizeInBytes), nullptr))
+        return pso_shape_bad(PsoShape::kBadCachedPso,
+                             base + offsetof(D3D12_CACHED_PIPELINE_STATE, pCachedBlob),
+                             reinterpret_cast<UINT64>(cached.pCachedBlob));
+    return {};
+}
+
+// 枚举的合法域直接取自 d3d12.h 的首/末枚举值（不是魔法数字），越小越不容易误判。
+// MinGW 的 d3d12.h 里 FILL_MODE 是 2..3、CULL_MODE 是 1..3、COMPARISON_FUNC 是 1..8。
+inline PsoShapeResult check_graphics_pso_shape(const void* p) {
+    constexpr std::size_t kSize = sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC);
+    if (!p || host_readable_span(reinterpret_cast<UINT64>(p), kSize, nullptr) < kSize)
+        return pso_shape_bad(PsoShape::kNotReadable, 0, reinterpret_cast<UINT64>(p));
+    const auto& d = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(p);
+
+    // 1) 根签名
+    {
+        const auto r = host_check_root_signature(
+            d.pRootSignature, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, pRootSignature));
+        if (r.shape != PsoShape::kPlausible) return r;
+    }
+    // 2) 五个着色器阶段（VS/PS/DS/HS/GS 在结构里是连续数组）
+    {
+        const std::size_t base = offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, VS);
+        const PsoShapeResult stages[] = {
+            host_check_bytecode(d.VS, base + 0 * sizeof(D3D12_SHADER_BYTECODE)),
+            host_check_bytecode(d.PS, base + 1 * sizeof(D3D12_SHADER_BYTECODE)),
+            host_check_bytecode(d.DS, base + 2 * sizeof(D3D12_SHADER_BYTECODE)),
+            host_check_bytecode(d.HS, base + 3 * sizeof(D3D12_SHADER_BYTECODE)),
+            host_check_bytecode(d.GS, base + 4 * sizeof(D3D12_SHADER_BYTECODE)),
+        };
+        for (const auto& r : stages)
+            if (r.shape != PsoShape::kPlausible) return r;
+    }
+    // 3) 流输出
+    {
+        constexpr std::size_t kBase =
+            offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, StreamOutput);
+        const auto& so = d.StreamOutput;
+        if (so.NumEntries > 64)
+            return pso_shape_bad(PsoShape::kBadStreamOutput,
+                                 kBase + offsetof(D3D12_STREAM_OUTPUT_DESC, NumEntries),
+                                 so.NumEntries);
+        if (so.NumEntries && (!so.pSODeclaration ||
+                              !host_readable_span(reinterpret_cast<UINT64>(so.pSODeclaration),
+                                                  sizeof(D3D12_SO_DECLARATION_ENTRY) *
+                                                      static_cast<std::size_t>(so.NumEntries),
+                                                  nullptr)))
+            return pso_shape_bad(PsoShape::kBadStreamOutput,
+                                 kBase + offsetof(D3D12_STREAM_OUTPUT_DESC, pSODeclaration),
+                                 reinterpret_cast<UINT64>(so.pSODeclaration));
+        if (so.NumStrides > 64)
+            return pso_shape_bad(PsoShape::kBadStreamOutput,
+                                 kBase + offsetof(D3D12_STREAM_OUTPUT_DESC, NumStrides),
+                                 so.NumStrides);
+        if (so.NumStrides && (!so.pBufferStrides ||
+                              !host_readable_span(reinterpret_cast<UINT64>(so.pBufferStrides),
+                                                  sizeof(UINT) *
+                                                      static_cast<std::size_t>(so.NumStrides),
+                                                  nullptr)))
+            return pso_shape_bad(PsoShape::kBadStreamOutput,
+                                 kBase + offsetof(D3D12_STREAM_OUTPUT_DESC, pBufferStrides),
+                                 reinterpret_cast<UINT64>(so.pBufferStrides));
+        if (so.RasterizedStream > 7)  // 宽松上界：D3D12 实际只用到 0..3
+            return pso_shape_bad(PsoShape::kBadStreamOutput,
+                                 kBase + offsetof(D3D12_STREAM_OUTPUT_DESC, RasterizedStream),
+                                 so.RasterizedStream);
+    }
+    // 4) 混合状态
+    {
+        constexpr std::size_t kBlend =
+            offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, BlendState);
+        constexpr std::size_t kRt = kBlend + offsetof(D3D12_BLEND_DESC, RenderTarget);
+        constexpr std::size_t kRtStride = sizeof(D3D12_RENDER_TARGET_BLEND_DESC);
+        if (d.BlendState.AlphaToCoverageEnable > 1)
+            return pso_shape_bad(PsoShape::kBadBlend,
+                                 kBlend + offsetof(D3D12_BLEND_DESC, AlphaToCoverageEnable),
+                                 d.BlendState.AlphaToCoverageEnable);
+        if (d.BlendState.IndependentBlendEnable > 1)
+            return pso_shape_bad(PsoShape::kBadBlend,
+                                 kBlend + offsetof(D3D12_BLEND_DESC, IndependentBlendEnable),
+                                 d.BlendState.IndependentBlendEnable);
+        for (UINT i = 0; i < 8; ++i) {
+            const auto& rt = d.BlendState.RenderTarget[i];
+            const std::size_t b = kRt + static_cast<std::size_t>(i) * kRtStride;
+            if (rt.BlendEnable > 1)
+                return pso_shape_bad(PsoShape::kBadBlend,
+                                     b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, BlendEnable),
+                                     rt.BlendEnable);
+            if (rt.LogicOpEnable > 1)
+                return pso_shape_bad(PsoShape::kBadBlend,
+                                     b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, LogicOpEnable),
+                                     rt.LogicOpEnable);
+            if (rt.SrcBlend < D3D12_BLEND_ZERO || rt.SrcBlend > D3D12_BLEND_INV_ALPHA_FACTOR)
+                return pso_shape_bad(PsoShape::kBadBlend,
+                                     b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, SrcBlend),
+                                     rt.SrcBlend);
+            if (rt.DestBlend < D3D12_BLEND_ZERO || rt.DestBlend > D3D12_BLEND_INV_ALPHA_FACTOR)
+                return pso_shape_bad(PsoShape::kBadBlend,
+                                     b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, DestBlend),
+                                     rt.DestBlend);
+            if (rt.BlendOp < D3D12_BLEND_OP_ADD || rt.BlendOp > D3D12_BLEND_OP_MAX)
+                return pso_shape_bad(PsoShape::kBadBlend,
+                                     b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, BlendOp),
+                                     rt.BlendOp);
+            if (rt.SrcBlendAlpha < D3D12_BLEND_ZERO ||
+                rt.SrcBlendAlpha > D3D12_BLEND_INV_ALPHA_FACTOR)
+                return pso_shape_bad(
+                    PsoShape::kBadBlend,
+                    b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, SrcBlendAlpha),
+                    rt.SrcBlendAlpha);
+            if (rt.DestBlendAlpha < D3D12_BLEND_ZERO ||
+                rt.DestBlendAlpha > D3D12_BLEND_INV_ALPHA_FACTOR)
+                return pso_shape_bad(
+                    PsoShape::kBadBlend,
+                    b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, DestBlendAlpha),
+                    rt.DestBlendAlpha);
+            if (rt.BlendOpAlpha < D3D12_BLEND_OP_ADD || rt.BlendOpAlpha > D3D12_BLEND_OP_MAX)
+                return pso_shape_bad(PsoShape::kBadBlend,
+                                     b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, BlendOpAlpha),
+                                     rt.BlendOpAlpha);
+            if (rt.LogicOp > D3D12_LOGIC_OP_OR_INVERTED)
+                return pso_shape_bad(PsoShape::kBadBlend,
+                                     b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, LogicOp),
+                                     rt.LogicOp);
+            if (rt.RenderTargetWriteMask & ~0x0Fu)
+                return pso_shape_bad(
+                    PsoShape::kBadBlend,
+                    b + offsetof(D3D12_RENDER_TARGET_BLEND_DESC, RenderTargetWriteMask),
+                    rt.RenderTargetWriteMask);
+        }
+    }
+    // 5) 光栅化状态
+    {
+        constexpr std::size_t kBase =
+            offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, RasterizerState);
+        const auto& rs = d.RasterizerState;
+        if (rs.FillMode < D3D12_FILL_MODE_WIREFRAME || rs.FillMode > D3D12_FILL_MODE_SOLID)
+            return pso_shape_bad(PsoShape::kBadRasterizer,
+                                 kBase + offsetof(D3D12_RASTERIZER_DESC, FillMode), rs.FillMode);
+        if (rs.CullMode < D3D12_CULL_MODE_NONE || rs.CullMode > D3D12_CULL_MODE_BACK)
+            return pso_shape_bad(PsoShape::kBadRasterizer,
+                                 kBase + offsetof(D3D12_RASTERIZER_DESC, CullMode), rs.CullMode);
+        if (rs.FrontCounterClockwise > 1 || rs.DepthClipEnable > 1 ||
+            rs.MultisampleEnable > 1 || rs.AntialiasedLineEnable > 1 ||
+            rs.ConservativeRaster > 1)
+            return pso_shape_bad(PsoShape::kBadRasterizer, kBase,
+                                 static_cast<UINT64>(rs.FrontCounterClockwise) |
+                                     (static_cast<UINT64>(rs.DepthClipEnable) << 8) |
+                                     (static_cast<UINT64>(rs.MultisampleEnable) << 16) |
+                                     (static_cast<UINT64>(rs.AntialiasedLineEnable) << 24) |
+                                     (static_cast<UINT64>(rs.ConservativeRaster) << 32));
+        // ForcedSampleCount 只允许 0/1/2/4/8（D3D12 的合法集合）
+        switch (rs.ForcedSampleCount) {
+            case 0: case 1: case 2: case 4: case 8: break;
+            default:
+                return pso_shape_bad(
+                    PsoShape::kBadRasterizer,
+                    kBase + offsetof(D3D12_RASTERIZER_DESC, ForcedSampleCount),
+                    rs.ForcedSampleCount);
+        }
+    }
+    // 6) 深度/模板状态
+    {
+        constexpr std::size_t kBase =
+            offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, DepthStencilState);
+        const auto& ds = d.DepthStencilState;
+        if (ds.DepthEnable > 1)
+            return pso_shape_bad(PsoShape::kBadDepthStencil,
+                                 kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, DepthEnable),
+                                 ds.DepthEnable);
+        if (ds.DepthWriteMask > D3D12_DEPTH_WRITE_MASK_ALL)
+            return pso_shape_bad(PsoShape::kBadDepthStencil,
+                                 kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, DepthWriteMask),
+                                 ds.DepthWriteMask);
+        if (ds.DepthFunc < D3D12_COMPARISON_FUNC_NEVER ||
+            ds.DepthFunc > D3D12_COMPARISON_FUNC_ALWAYS)
+            return pso_shape_bad(PsoShape::kBadDepthStencil,
+                                 kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, DepthFunc),
+                                 ds.DepthFunc);
+        if (ds.StencilEnable > 1)
+            return pso_shape_bad(PsoShape::kBadDepthStencil,
+                                 kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, StencilEnable),
+                                 ds.StencilEnable);
+        const D3D12_DEPTH_STENCILOP_DESC* faces[] = {&ds.FrontFace, &ds.BackFace};
+        const std::size_t face_offsets[] = {
+            kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, FrontFace),
+            kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, BackFace)};
+        for (int f = 0; f < 2; ++f) {
+            const auto& face = *faces[f];
+            const std::size_t b = face_offsets[f];
+            const D3D12_COMPARISON_FUNC func = face.StencilFunc;
+            if (func < D3D12_COMPARISON_FUNC_NEVER || func > D3D12_COMPARISON_FUNC_ALWAYS)
+                return pso_shape_bad(
+                    PsoShape::kBadDepthStencil,
+                    b + offsetof(D3D12_DEPTH_STENCILOP_DESC, StencilFunc), func);
+            const D3D12_STENCIL_OP ops[] = {face.StencilFailOp, face.StencilDepthFailOp,
+                                            face.StencilPassOp};
+            if (ops[0] < D3D12_STENCIL_OP_KEEP || ops[0] > D3D12_STENCIL_OP_DECR ||
+                ops[1] < D3D12_STENCIL_OP_KEEP || ops[1] > D3D12_STENCIL_OP_DECR ||
+                ops[2] < D3D12_STENCIL_OP_KEEP || ops[2] > D3D12_STENCIL_OP_DECR)
+                return pso_shape_bad(
+                    PsoShape::kBadDepthStencil,
+                    b + offsetof(D3D12_DEPTH_STENCILOP_DESC, StencilFailOp),
+                    static_cast<UINT64>(ops[0]) | (static_cast<UINT64>(ops[1]) << 8) |
+                        (static_cast<UINT64>(ops[2]) << 16));
+        }
+    }
+    // 7) 输入布局
+    {
+        constexpr std::size_t kBase =
+            offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, InputLayout);
+        if (d.InputLayout.NumElements > 128)
+            return pso_shape_bad(PsoShape::kBadInputLayout,
+                                 kBase + offsetof(D3D12_INPUT_LAYOUT_DESC, NumElements),
+                                 d.InputLayout.NumElements);
+        if (d.InputLayout.NumElements &&
+            (!d.InputLayout.pInputElementDescs ||
+             !host_readable_span(
+                 reinterpret_cast<UINT64>(d.InputLayout.pInputElementDescs),
+                 sizeof(D3D12_INPUT_ELEMENT_DESC) *
+                     static_cast<std::size_t>(d.InputLayout.NumElements),
+                 nullptr)))
+            return pso_shape_bad(PsoShape::kBadInputLayout,
+                                 kBase + offsetof(D3D12_INPUT_LAYOUT_DESC, pInputElementDescs),
+                                 reinterpret_cast<UINT64>(d.InputLayout.pInputElementDescs));
+    }
+    // 8) 其余小字段
+    if (d.IBStripCutValue > D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF)
+        return pso_shape_bad(
+            PsoShape::kBadStripCut,
+            offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, IBStripCutValue), d.IBStripCutValue);
+    if (d.PrimitiveTopologyType > D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
+        return pso_shape_bad(PsoShape::kBadTopology,
+                             offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, PrimitiveTopologyType),
+                             d.PrimitiveTopologyType);
+    if (d.NumRenderTargets > 8)
+        return pso_shape_bad(PsoShape::kBadRenderTargets,
+                             offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, NumRenderTargets),
+                             d.NumRenderTargets);
+    for (UINT i = 0; i < d.NumRenderTargets; ++i) {
+        const UINT fmt = static_cast<UINT>(d.RTVFormats[i]);
+        // 0 = DXGI_FORMAT_UNKNOWN：有 RTV 时桌面一定拒绝，属于"形状不合法"
+        if (fmt == 0 || fmt > 0xC0)
+            return pso_shape_bad(
+                PsoShape::kBadRtvFormat,
+                offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, RTVFormats) +
+                    static_cast<std::size_t>(i) * sizeof(DXGI_FORMAT),
+                fmt);
+    }
+    {
+        const UINT fmt = static_cast<UINT>(d.DSVFormat);
+        if (fmt > 0xC0)
+            return pso_shape_bad(PsoShape::kBadDsvFormat,
+                                 offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, DSVFormat), fmt);
+    }
+    {
+        const UINT n = d.SampleDesc.Count;
+        if (n != 1 && n != 2 && n != 4 && n != 8 && n != 16)
+            return pso_shape_bad(PsoShape::kBadSample,
+                                 offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, SampleDesc) +
+                                     offsetof(DXGI_SAMPLE_DESC, Count),
+                                 n);
+        if (d.SampleDesc.Quality > 0xFFFFu)
+            return pso_shape_bad(PsoShape::kBadSample,
+                                 offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, SampleDesc) +
+                                     offsetof(DXGI_SAMPLE_DESC, Quality),
+                                 d.SampleDesc.Quality);
+    }
+    if (d.NodeMask & ~1u)  // 单节点主机；实测槽 8 的队列描述符 nodeMask=1
+        return pso_shape_bad(PsoShape::kBadNodeMask,
+                             offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, NodeMask),
+                             d.NodeMask);
+    {
+        const auto r = host_check_cached_pso(
+            d.CachedPSO, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, CachedPSO));
+        if (r.shape != PsoShape::kPlausible) return r;
+    }
+    if (d.Flags & ~0xFu)  // 宽松上界：桌面只有 DEBUG=0x1，主机可能多几位
+        return pso_shape_bad(PsoShape::kBadFlags,
+                             offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, Flags), d.Flags);
+    return {};
+}
+
+inline PsoShapeResult check_compute_pso_shape(const void* p) {
+    constexpr std::size_t kSize = sizeof(D3D12_COMPUTE_PIPELINE_STATE_DESC);
+    if (!p || host_readable_span(reinterpret_cast<UINT64>(p), kSize, nullptr) < kSize)
+        return pso_shape_bad(PsoShape::kNotReadable, 0, reinterpret_cast<UINT64>(p));
+    const auto& d = *static_cast<const D3D12_COMPUTE_PIPELINE_STATE_DESC*>(p);
+    {
+        const auto r = host_check_root_signature(
+            d.pRootSignature, offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, pRootSignature));
+        if (r.shape != PsoShape::kPlausible) return r;
+    }
+    {
+        const auto r =
+            host_check_bytecode(d.CS, offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, CS));
+        if (r.shape != PsoShape::kPlausible) return r;
+    }
+    if (d.NodeMask & ~1u)
+        return pso_shape_bad(PsoShape::kBadNodeMask,
+                             offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, NodeMask), d.NodeMask);
+    {
+        const auto r = host_check_cached_pso(
+            d.CachedPSO, offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, CachedPSO));
+        if (r.shape != PsoShape::kPlausible) return r;
+    }
+    if (d.Flags & ~0xFu)
+        return pso_shape_bad(PsoShape::kBadFlags,
+                             offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, Flags), d.Flags);
+    return {};
+}
+
+// ---- 实验入口（默认关）：XBGTASIX_HOST_PSO_TRANSLATE=1 ----
+// 每次调用都读一次环境变量（不是 static 缓存）：这样"先跑默认、再开开关"的实验
+// 在同一进程内也成立（测试里要用到），PSO 创建本来就不是热路径。
+inline bool host_pso_translate_requested() {
+    char value[8] = {0};
+    return GetEnvironmentVariableA("XBGTASIX_HOST_PSO_TRANSLATE", value, sizeof(value)) > 0 &&
+           value[0] == '1';
+}
+
+// 图形 PSO 的**可行性实验**：形状自检通过时，用桌面布局**原样**试建一次
+// （不做任何字段改写 —— 在布局未知时任何改写都是猜测），记 HRESULT 后立刻 Release。
+// **不写回游戏的 out 参数**：它的位置/语义未知，把指针塞进来源不明的内存比明确失败
+// 危险得多。因此这个函数不改变桩的返回值（仍是 E_NOTIMPL）。
+inline void host_pso_try_create_graphics(DeviceProxy* self, UINT64 desc_addr) {
+    if (!self->pc) {
+        xbgtasix::logf("[d3d12_xs] slot=60 实验直通跳过：没有真实桌面设备（self->pc 为空）");
+        return;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+    std::memcpy(&desc, reinterpret_cast<const void*>(desc_addr), sizeof(desc));
+    ID3D12PipelineState* created = nullptr;
+    HRESULT hr = E_FAIL;
+    {
+        // 驱动编译可能几十秒；不标成"仅主机侧停顿"会被标题的开机 hang check 杀掉
+        xbgtasix::host_stall::scope stall;
+        hr = static_cast<ID3D12Device*>(self->pc)->CreateGraphicsPipelineState(
+            &desc, __uuidof(ID3D12PipelineState),
+            reinterpret_cast<void**>(&created));
+    }
+    xbgtasix::logf("[d3d12_xs] slot=60 实验直通 CreateGraphicsPipelineState("
+                   "VS=%lluB PS=%lluB NumRT=%u RTV0=%d DSV=%d sample=%u/%u nodeMask=0x%x "
+                   "cached=%lluB) -> hr=0x%08lx pso=%p（已释放；桩仍返回 E_NOTIMPL）",
+                   static_cast<unsigned long long>(desc.VS.BytecodeLength),
+                   static_cast<unsigned long long>(desc.PS.BytecodeLength),
+                   desc.NumRenderTargets, static_cast<int>(desc.RTVFormats[0]),
+                   static_cast<int>(desc.DSVFormat), desc.SampleDesc.Count,
+                   desc.SampleDesc.Quality, desc.NodeMask,
+                   static_cast<unsigned long long>(desc.CachedPSO.CachedBlobSizeInBytes),
+                   static_cast<unsigned long>(hr), static_cast<void*>(created));
+    if (created) created->Release();
+}
+
+// 主机 PSO 槽的统一桩：8 个参数全部记录，指针能读就 dump 64 B，然后**明确失败**。
+// 参数 5..8（e..h）在调用方只传了更少参数时读到的是调用方的影子空间/栈 ——
+// 这是安全的（只是读内存），但**可能不是真参数**，日志里要按"疑似"看待。
+template <std::size_t N>
+HRESULT WINAPI host_pso_slot_stub(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
+                                  UINT64 d = 0, UINT64 e = 0, UINT64 f = 0, UINT64 g = 0,
+                                  UINT64 h = 0) {
+    static_assert(is_host_pso_slot(N), "host_pso_slot_stub 只用于 55/60/61/62/66/67");
+    static std::atomic<int> detailed{24};  // 每个槽前 24 次调用打完整 dump
+    static std::atomic<UINT64> calls{0};
+    const UINT64 call_index = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const UINT64 args[8] = {a, b, c, d, e, f, g, h};
+    (void)self;
+
+    if (detailed.fetch_sub(1, std::memory_order_relaxed) > 0) {
+        // 调用方返回地址必须在本函数自己的栈帧里取：__builtin_return_address(0)
+        // 放进 helper 会变成 helper 的调用者。所以这里重复了通用桩里那几行。
+        const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+        HMODULE caller_module = nullptr;
+        unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(caller), &caller_module) &&
+            caller_module) {
+            rva = reinterpret_cast<unsigned long long>(caller) -
+                  reinterpret_cast<unsigned long long>(caller_module);
+        }
+        xbgtasix::logf("[d3d12_xs] 主机 PSO 槽 slot=%zu（%s）第 %llu 次调用 调用方=+0x%llX "
+                       "a=0x%llx b=0x%llx c=0x%llx d=0x%llx e=0x%llx f=0x%llx g=0x%llx "
+                       "h=0x%llx -> E_NOTIMPL（签名未实测，见 device_abi.h 该段注释）",
+                       N, host_pso_slot_name(N), static_cast<unsigned long long>(call_index),
+                       rva, static_cast<unsigned long long>(a),
+                       static_cast<unsigned long long>(b),
+                       static_cast<unsigned long long>(c),
+                       static_cast<unsigned long long>(d),
+                       static_cast<unsigned long long>(e),
+                       static_cast<unsigned long long>(f),
+                       static_cast<unsigned long long>(g),
+                       static_cast<unsigned long long>(h));
+        for (int i = 0; i < 8; ++i) {
+            const UINT64 addr = args[i];
+            if (addr < 0x10000) continue;  // 小整数/空指针：不是可指向的地址
+            MEMORY_BASIC_INFORMATION m{};
+            const std::size_t span = host_readable_span(addr, 64, &m);
+            const char tag = static_cast<char>('a' + i);
+            if (span == 0) {
+                xbgtasix::logf("[d3d12_xs]   slot=%zu %c=0x%llx 不可读（未提交/守卫页/"
+                               "非用户地址），跳过 dump",
+                               N, tag, static_cast<unsigned long long>(addr));
+                continue;
+            }
+            unsigned char bytes[64] = {0};
+            std::memcpy(bytes, reinterpret_cast<const void*>(addr), span);
+            UINT64 first8 = 0;
+            if (span >= 8) std::memcpy(&first8, bytes, sizeof(first8));
+            const bool module_like = host_is_module_address(first8);
+            const unsigned guid_version = span >= 16 ? host_guid_version(bytes) : 0;
+            char note[192] = {0};
+            if (module_like) {
+                std::snprintf(note, sizeof(note),
+                              " | 首 8 B=0x%llx 在模块内（疑似 vtable/函数指针）",
+                              static_cast<unsigned long long>(first8));
+            } else if (guid_version != 0) {
+                std::snprintf(note, sizeof(note),
+                              " | 前 16 B 像 GUID（版本 %u，疑似 REFIID 参数）", guid_version);
+            }
+            xbgtasix::logf("[d3d12_xs]   slot=%zu %c=0x%llx 区域基址=%p 大小=0x%llx "
+                           "保护=0x%lx 可读=0x%zx B%s",
+                           N, tag, static_cast<unsigned long long>(addr), m.BaseAddress,
+                           static_cast<unsigned long long>(m.RegionSize),
+                           static_cast<unsigned long>(m.Protect), span, note);
+            for (std::size_t off = 0; off < 64 && off < span; off += 16) {
+                char hex[3 * 16 + 1] = {0};
+                for (std::size_t k = 0; k < 16 && off + k < span; ++k) {
+                    std::snprintf(hex + k * 3, 4, "%02x ",
+                                  static_cast<unsigned>(bytes[off + k]));
+                }
+                xbgtasix::logf("[d3d12_xs]     slot=%zu %c+0x%02zx: %s", N, tag, off, hex);
+            }
+        }
+        // 60/62：对每个参数做"按桌面 desc 布局读是否合法"的自检。
+        // 通过 = 最可能的 desc 参数；不合格 = 直接给出第一个非法字段的偏移与值。
+        if constexpr (N == kHostGraphicsPsoSlot || N == kHostComputePsoSlot) {
+            for (int i = 0; i < 8; ++i) {
+                const UINT64 addr = args[i];
+                if (addr < 0x10000) continue;
+                const PsoShapeResult shape =
+                    N == kHostGraphicsPsoSlot
+                        ? check_graphics_pso_shape(reinterpret_cast<const void*>(addr))
+                        : check_compute_pso_shape(reinterpret_cast<const void*>(addr));
+                const char tag = static_cast<char>('a' + i);
+                if (shape.shape == PsoShape::kPlausible) {
+                    xbgtasix::logf("[d3d12_xs]   slot=%zu %c=0x%llx 形状自检=通过"
+                                   "（按桌面 %s 读全部合法 → 最可能的 desc 参数）",
+                                   N, tag, static_cast<unsigned long long>(addr),
+                                   N == kHostGraphicsPsoSlot
+                                       ? "GRAPHICS_PIPELINE_STATE_DESC"
+                                       : "COMPUTE_PIPELINE_STATE_DESC");
+                } else if (shape.shape != PsoShape::kNotReadable) {
+                    xbgtasix::logf("[d3d12_xs]   slot=%zu %c=0x%llx 形状自检=不合格 "
+                                   "原因=%s 字段偏移=+0x%zx 值=0x%llx",
+                                   N, tag, static_cast<unsigned long long>(addr),
+                                   pso_shape_name(shape.shape), shape.offset,
+                                   static_cast<unsigned long long>(shape.value));
+                }
+            }
+        }
+    } else if (call_index % 256 == 0) {
+        xbgtasix::logf("[d3d12_xs] 主机 PSO 槽 slot=%zu 已调用 %llu 次"
+                       "（完整 dump 只打每个槽的前 24 次）",
+                       N, static_cast<unsigned long long>(call_index));
+    }
+
+    // 唯一的真实创建入口：默认关，形状自检通过才试，且结果只写日志、不返回给调用方。
+    if constexpr (N == kHostGraphicsPsoSlot) {
+        if (host_pso_translate_requested()) {
+            const PsoShapeResult shape =
+                check_graphics_pso_shape(reinterpret_cast<const void*>(a));
+            if (shape.shape == PsoShape::kPlausible) {
+                host_pso_try_create_graphics(self, a);
+            } else {
+                xbgtasix::logf("[d3d12_xs] slot=60 实验直通跳过：a=0x%llx 形状自检=不合格 "
+                               "原因=%s 字段偏移=+0x%zx 值=0x%llx",
+                               static_cast<unsigned long long>(a),
+                               pso_shape_name(shape.shape), shape.offset,
+                               static_cast<unsigned long long>(shape.value));
+            }
+        }
+    }
+    return E_NOTIMPL;
 }
 
 // The Xbox command-list interface keeps the ordinary D3D12 list methods at
@@ -1115,6 +1819,10 @@ Slot device_slot() {
     if constexpr (N == 79) return reinterpret_cast<Slot>(&schedule_frame_event_x);
     if constexpr (N == 80) return reinterpret_cast<Slot>(&wait_frame_event_x);
     if constexpr (N == 81) return reinterpret_cast<Slot>(&frame_statistics_x);
+    // 主机 PSO 相关槽：55/60/61/62/66/67 走带完整参数 dump 的专用桩（仍是 E_NOTIMPL，
+    // 但打出槽号、调用方 RVA、8 个参数、可读指针的前 64 B 与桌面 desc 形状自检）。
+    if constexpr (is_host_pso_slot(N))
+        return reinterpret_cast<Slot>(&host_pso_slot_stub<N>);
     // 主机扩展槽（>= 44）在 PC 设备上**不存在**，按同号转发会把参数喂给别的方法
     // （实测 slot 70 直接崩在 D3D12Core）。未实现的一律走"明确失败 + 记一次"，
     // 让游戏走它自己的降级/报错路径，而不是在驱动内部炸掉。

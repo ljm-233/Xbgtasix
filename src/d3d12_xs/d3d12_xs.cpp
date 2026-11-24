@@ -11,6 +11,7 @@
 #include "xbgtasix/trace.h"
 #include "xbgtasix/host_stall.h"
 #include "device_abi.h"
+#include "root_sig.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -154,14 +155,38 @@ __declspec(dllexport) HRESULT WINAPI D3D12CreateDevice(IUnknown* adapter,
     return hr;
 }
 
+// ===========================================================================
+// 根签名序列化：主机标志位剥离（不是裸转发）
+//
+// 主机 desc 里的 Flags 带 0x01000000 / 0x02000000 / 0x80000000 三个 PC 不认的位，
+// 直接交给桌面 d3d12 会 E_INVALIDARG（本机实测 0x80070057
+// "Unsupported bit-flag set (root signature flags ...)"）。
+// 所以在私有副本上剥掉这三位再转发，成功后把原始位写回 blob 的 RTS0 段。
+// 详见 src/d3d12_xs/root_sig.h 的文件头（含移植来源与各版本偏移依据）。
+//
+// D3D12SerializeRootSignature（1.0）原先在 forward.def 里是 PE 转发器，
+// 转发器没有代码可以插剥离逻辑，所以那一条改成这里的手写实现——
+// 它同样是包内 DLL 按名导入的 2 个 d3d12_xs 函数之一，游戏会真的走到。
+// ===========================================================================
 __declspec(dllexport) HRESULT WINAPI
 D3D12SerializeVersionedRootSignature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc,
                                      ID3DBlob** blob,
                                      ID3DBlob** error) {
-    using PFN = HRESULT(WINAPI*)(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC*, ID3DBlob**, ID3DBlob**);
+    using PFN = xbgtasix::rootsig::SerializeVersionedFn;
     static PFN pfn = resolve<PFN>("D3D12SerializeVersionedRootSignature");
     if (!pfn) return E_FAIL;
-    return pfn(desc, blob, error);
+    return xbgtasix::rootsig::serialize_versioned(pfn, desc, blob, error);
+}
+
+__declspec(dllexport) HRESULT WINAPI
+D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC* desc,
+                           D3D_ROOT_SIGNATURE_VERSION version,
+                           ID3DBlob** blob,
+                           ID3DBlob** error) {
+    using PFN = xbgtasix::rootsig::SerializeFn;
+    static PFN pfn = resolve<PFN>("D3D12SerializeRootSignature");
+    if (!pfn) return E_FAIL;
+    return xbgtasix::rootsig::serialize_1_0(pfn, desc, version, blob, error);
 }
 
 __declspec(dllexport) HRESULT WINAPI D3D12CreateRootSignatureDeserializer(LPCVOID data,

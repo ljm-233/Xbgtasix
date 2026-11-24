@@ -1,5 +1,5 @@
 ; 自动生成，勿手改。由 tools/forward_shim.py 从 d3d12.dll 生成。
-; 源导出 19 个；转发 14 个；手写实现 4 个；跳过修饰名 0 个。
+; 源导出 19 个；转发 13 个；手写实现 5 个；跳过修饰名 0 个。
 LIBRARY d3d12_xs
 EXPORTS
   D3D12CoreCreateLayeredDevice=d3d12.D3D12CoreCreateLayeredDevice
@@ -13,6 +13,5 @@ EXPORTS
   D3D12PIXGetThreadInfo=d3d12.D3D12PIXGetThreadInfo
   D3D12PIXNotifyWakeFromFenceSignal=d3d12.D3D12PIXNotifyWakeFromFenceSignal
   D3D12PIXReportCounter=d3d12.D3D12PIXReportCounter
-  D3D12SerializeRootSignature=d3d12.D3D12SerializeRootSignature
   GetBehaviorValue=d3d12.GetBehaviorValue
   SetAppCompatStringPointer=d3d12.SetAppCompatStringPointer
