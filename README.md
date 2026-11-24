@@ -91,6 +91,21 @@
 
 只跑子集：`./tools/run_suite.sh --only t27,t31`；强制核显：`XBGTASIX_ADAPTER=0 ./tools/run_suite.sh`。
 
+### 回归断言：DXIL 句柄的 kind 与组件类型
+
+victory 侧生成桌面对应 DXIL 时，`dx.op.annotateHandle` 的 kind 由访问指令决定，
+`props.1`（typed/texture 上是 `(组件数 << 8) | ComponentType`）由组件类型决定，
+**两者都必须进入句柄身份**（`victory-1k/crates/victory-shader/src/emit/lower.rs` 的 `handle()`）。
+
+```bash
+python3 tools/handle_kind_census.py comp <装着 .ll 的目录>   # 期望 0 命中
+```
+
+`comp` 归零是本项目的回归断言：**任何人动 `handle()` 或其调用点的 props，都要跑一次**。
+非零 = 同一个描述符被不同组件类型共用了一条句柄（声明 `4×F32` 却跑 `atomicOr` 就是这一条），
+vkd3d 会按 f32 建 view，SPIR-V 里就是 `OpAtomicOr %float`，NVIDIA 驱动直接崩。
+背景、真值对照与另外两类精度问题见 `docs/handle-kind-analysis.md`。
+
 对自己有权使用的本地游戏副本，先用启动器静态检查。`verify` 和 `check` 不启动游戏。
 `run` 和 `firstrun` 会运行目标程序，仅适合在隔离的测试环境中诊断，不是游玩入口。
 
@@ -199,6 +214,7 @@ Xbgtasix/
   tools/check_docs.py          文档相对链接检查
   tools/push_via_api.py        git TLS 不可用时用 API 重放提交历史
   tools/match_texture.py       模型名 ↔ 贴图名 匹配
+  tools/handle_kind_census.py  DXIL 句柄 kind / 组件类型普查（gta6 | victory | slots | comp）
   tools/packaging/             rpf9_probe / rpf_carve / encryption_survey / shader_stats
                                / find_pe / pe_surface / verify_package
   docs/                        28 份结论文档
