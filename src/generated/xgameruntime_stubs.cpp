@@ -7,7 +7,7 @@ extern "C" {
 uintptr_t xbgtasix_stub_0000(void) { XB_UNIMPL("EXPERIMENTAL_XGameStreamingGetClientOrientation"); return 0; }
 uintptr_t xbgtasix_stub_0001(void) { XB_UNIMPL("EXPERIMENTAL_XGameStreamingGetMotionInfo"); return 0; }
 uintptr_t xbgtasix_stub_0002(void) { XB_UNIMPL("EXPERIMENTAL_XGameStreamingGetMotionState"); return 0; }
-uintptr_t xbgtasix_stub_0003(void) { XB_UNIMPL("QueryApiImpl"); return 0; }
+// xbgtasix_stub_0003（QueryApiImpl）：已在 src/xgameruntime/api_impl.cpp 里真实现，桩退休。
 long xbgtasix_stub_0004(void) { XB_UNIMPL("XAsyncBegin"); return (long)0x80004001; }
 uintptr_t xbgtasix_stub_0005(void) { XB_UNIMPL("XAsyncComplete"); return 0; }
 long xbgtasix_stub_0006(void) { XB_UNIMPL("XAsyncGetResult"); return (long)0x80004001; }

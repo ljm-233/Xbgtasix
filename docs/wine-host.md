@@ -195,16 +195,26 @@ export WINEDLLOVERRIDES="dxgi=n;d3d11=n;d3d10core=n;d3d12=n;d3d12core=n"
 
 ## 3. 修法（两层）
 
-### 3.1 源码层（正解，需要在有 mingw-w64 的机器上重新 build.sh）
+### 3.1 源码层（正路，本机已打通）
 
 - `src/xgameruntime/exports.txt` 追加四个名字（手写实现清单，不属于生成桩）；
 - 新增 `src/xgameruntime/api_impl.cpp`：四个 `extern "C"` 入口，返回 `S_OK`，
   并各自记一行 `[xgamert] ...` 日志（带宿主与 Wine 版本），方便下次一眼看出“引导走到哪了”。
 
-### 3.2 本机可验证的一层：给现成 DLL 补导出表
+### 3.2 应急层：给现成 DLL 补导出表（现在不需要了，留作工具）
 
-本机（Arch）**没有** `x86_64-w64-mingw32-g++`，也没有 `sudo` 装不了，所以**编不了**。
-为了不等环境，写了 [`tools/add_exports.py`](../tools/add_exports.py)：给现成的 PE **追加**导出名，
+本机（Arch）的 mingw-w64 不在 PATH 里，但在 `~/toolchain-dl/mingw/usr/bin`：
+
+```bash
+export PATH="$HOME/toolchain-dl/mingw/usr/bin:$PATH"
+x86_64-w64-mingw32-g++ --version   # GCC 16.2.0，target x86_64-w64-mingw32
+CXX=x86_64-w64-mingw32-g++ GDK_INC=/mnt/winbot-software/GTA6/gdk/include_clean \
+    ./tools/build_linux_cross.sh    # 8 个 shim，全从源码编，导出 465
+```
+
+`build.sh` 本身在 Linux 上跑不了：它要 `dxc`（只用于 shader 测试，核心 DLL 不需要），
+且里面的 `/d/mingw64/bin` 是 git-bash 的路径。
+在 mingw 到手之前，为了不等环境写了 [`tools/add_exports.py`](../tools/add_exports.py)：给现成的 PE **追加**导出名，
 原有 461 个一个字节都不动 ——
 
 做法：文件末尾加一节 `.edata2`（`0x60000040`，可读可执行），里面放 4 个 4 字节函数体
@@ -239,7 +249,7 @@ python3 tools/add_exports.py build/xgameruntime.dll -o build/wine-bridge/xgameru
 
 ---
 
-## 4. 下一堵墙：`QueryApiImpl` 得返回一个真的对象
+## 4. 现在这堵墙：`QueryApiImpl` 的对象被要"真东西"了（哑对象已上，露出第 3 堵）
 
 ```
 1455de012: call 0x1455de048          ; 内部：必要时先做引导，然后 call [0x146e04eb0] = QueryApiImpl
@@ -274,7 +284,72 @@ python3 tools/add_exports.py build/xgameruntime.dll -o build/wine-bridge/xgameru
 2. 造一个最小 COM 对象：`vtable[2]` = `Release`（返回 0），`vtable[29]` = 实际工作入口（先返回 `S_OK`）；
 3. 用“第一次调用记录 + 返回哑对象”的方式跑一轮，看标题接着要什么。
 
-**这一块本轮没有做**，先把 482 ms 的刀口撬开、把“多系统”的地基铺好。
+### 4.1 入参是**两个 GUID 指针**，不是整数
+
+哑对象实现（`src/xgameruntime/api_impl.cpp`）把每次调用都记了下来，实测四种：
+
+```
+[xgamert] QueryApiImpl(id=0000000145F41040 ver=0000000145F41040)
+[xgamert] QueryApiImpl(id=0000000145F41170 ver=0000000145F41180)
+[xgamert] QueryApiImpl(id=0000000145F41110 ver=0000000145F41110)
+```
+
+三个值都落在 `.rdata` 的 GUID 表里（每 16 字节一个），按小端读出来是：
+
+| 地址 | GUID |
+|---|---|
+| `0x145F41040` | `073B7DCB-1FCF-4030-94BE-E3C9EB623428` |
+| `0x145F41110` | `01ACD177-F199-4763-A38E-CCBB55CE32E0` |
+| `0x145F41170` | `37E56907-2F10-41E8-B72F-36EDB185331A` |
+| `0x145F41180` | `BF2346B2-39AF-4658-B5EA-44713C7E83B3` |
+
+**修正第 4 节的旧推断**：`QueryApiImpl` 不是“按 API 编号取对象”，是
+`QueryApiImpl(const GUID* id, const GUID* iid, void** out)` —— COM 式的“按 IID 要实现”。
+
+### 4.2 哑对象跑出来的槽位地图
+
+实现：静态 256 字节对象（只给 8 字节会被标题写坏后面的全局量），vtable 40 槽，
+每槽一个独立函数体（只有这样才能从里面知道自己是谁），槽 2 = `Release` 返回 0，其余槽
+**首次**被调用时记一行再返回 `S_OK`（每次都记会被刷屏）。
+
+实测被调到的槽（`vtable[N]` 的 off = `N*8`）：
+
+| 槽 | off | 入参（`this` 之后） | 备注 |
+|---|---|---|---|
+| 29 | `0xE8` | `a=0x370720` | 第 4 节那处 `mov 0xe8(%rax),%rax` 打的就是它 |
+| 2 | `0x10` | `a=0x370720` | 紧接着调用 —— 与“Release”一致 |
+| 12 | `0x60` | `a=1 b=1 c=0x1471B90A0` | |
+| 15 | `0x78` | `a=0x10FC90` | |
+| 33 | `0x108` | `a=0 b=0x149AB3020 c=0x142211C80` | |
+
+### 4.3 第 3 堵墙：`game+0x5925915`
+
+```
+[xbgtasix] FATAL 异常 0x80000003 at game_scarlett_master.exe+0x5925915
+#5  game+0x81B253    #6  game+0x53EC04F   #7  game+0x53EBF3A
+#8  game+0x661F0     #9  game+0x1D109C9   #10 game+0x5A91C0D   ← 还在那条 GDK 引导里
+#11 game+0x56A1E5A   #12 kernel32+0x11739  #13 ntdll+0x10E2F
+```
+
+`0x5925915` 又是一个 `FAILED(hr) → int3` 陷阱；它所在的那段在做一个 **单例 + 引用计数**的动作：
+
+```
+1459258e2: mov (%rsi),%rax
+1459258e5: mov %rsi,%rcx
+1459258e8: call *0x8(%rax)          ; vtable[1]，像 AddRef
+1459258eb: mov 0x149ab15e8,%rcx     ; 全局单例
+1459258f2: test %rcx,%rcx
+1459258f5: jne 0x145925918
+1459258f7: mov %rsi,0x149ab15e8     ; 存进去
+145925909: call *0x10(%rax)         ; vtable[2]，像 Release
+```
+
+也就是说：标题拿到我们那个哑对象之后，把它当**带引用计数的主机接口**在用，
+并且要把某个“结果”存进全局单例 `0x149AB15E8`；某一步的返回值不合格就 int3。
+
+下一步要的：把槽 29/12/15/33 的**入参语义**定下来（它们显然在传不同的 IID/结构），
+让至少一个槽返回“真东西”而不是 `S_OK`。这一点需要读 `0x5925800..0x5925915` 这个函数
+和几个调用者，本轮到此为止。
 
 ---
 
@@ -350,7 +425,8 @@ python3 tools/host_probe.py --doctor       # 先看宿主与真实 GPU
 
 ## 6. 还没做的
 
-1. `QueryApiImpl` 的对象（第 4 节）——下一堵墙，需要定 `vtable` 语义；
+1. `QueryApiImpl` 对象的槽语义（第 4 节）——当前这堵墙：哑对象能过 10 次调用，
+   然后游戏在 `game+0x5925915` 拒绝我们给的返回值；
 2. `d3d12_xs` / `xmem` 里真正需要“按宿主分叉”的点还没挑出来（本轮只把地基和 doctor 接上）。
    已知候选：`XMemVirtualAlloc` 的大块预留（Wine 的地址空间布局与 Windows 不同，24 GB×2 都成功了，
    但**保留区语义**是否一致没有验证）、`PresentX` 家族在 vkd3d-proton 下的槽位行为；

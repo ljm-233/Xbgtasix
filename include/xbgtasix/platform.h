@@ -56,8 +56,9 @@ inline const char* host_platform_name() {
 inline std::string host_wine_version() {
     if (!host_is_wine()) return {};
     using Fn = const char*(*)();
-    auto fn = reinterpret_cast<Fn>(
-        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version"));
+    // 先过一手 void*：直接从 FARPROC 转函数指针会吃 -Wcast-function-type。
+    auto fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")));
     if (!fn) return {};
     const char* v = fn();
     return v ? std::string(v) : std::string();
