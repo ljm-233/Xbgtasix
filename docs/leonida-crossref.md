@@ -86,9 +86,30 @@ XDAT 目录，tag `0x07` 明确写 `NOBC`（不发 LLVM bitcode），真代码�
 **有全开源的替代品**，而且不挑机器（纯 Python 解码器 + 进程内 SPIR-V 汇编器，
 只要有 `spirv-val` 就能自检；本机 `spirv-val` 来自 Vulkan SDK 1.4.363.1）。
 
-代价说清：这 6 条是 PS；mesh（8,666 条）与 wave64 VS/PS/GS 才是难的部分，
-而且本机**没有 GPU 侧的管线创建验证**（对方有 `vk_pipeline_check`，
-在 30+ 种 GPU/驱动组合上跑过 hand-written 测试）。
+### 2.1.1 不止 PS：三个主要阶段都验了
+
+用同一条链（carve → FSSM → 纯 Python 反汇编 → SPIR-V → **驱动真建管线**），
+对占语料 91% 的三个阶段各抽 8 条（PS 6 条）**[本机实测]**：
+
+| 阶段 | 语料条数 | 样本 | 翻译 | spirv-val | **驱动建管线** | 编译均值 / 最慢 |
+|---|---|---|---|---|---|---|
+| PS | 11,983 | 6 | 6 | 6 | **6/6** | 0.20 s / 0.20 s |
+| mesh | 8,666 | 8 | 8 | 8 | **8/8** | 2.16 s / 3.87 s |
+| mesh（`--wave64-emulate`） | — | 8 | 8 | 8 | **8/8**，全部归为 wave32 | 1.14 s / 1.65 s |
+| CS | 2,676 | 8 | 8 | 8 | **8/8** | 1.08 s / 2.59 s |
+
+两条要点：
+
+1. **mesh 在本机走"精确"路径**：加 `--wave64-emulate` 之后，这 8 条从"无 required
+   subgroup size"变成 wave32 分类——即 32 宽 subgroup 上语义精确。对方 README 的说法是
+   compute/mesh 在模拟下精确、VS/PS/GS 的跨半边 wave 仍近似；我们没抽 VS，这一条未验证。
+2. **单条管线编译 1–4 秒**，而标题的 hang check 只给 30 轮 × 1 s →
+   **连续编译十几到几十条管线就足以让它自杀**。本机 8 条 mesh 就花掉 17 s（未模拟）/
+   9 s（模拟）。这把 [host-stall](host-stall.md) 从"预防性设计"变成"必需品"，
+   也解释了为什么参考实现要专门为 `vkCreateComputePipelines` 记账。
+
+边界：`vk_pipeline_check` 只证明**驱动接受**并建出了管线对象，**不验证输出正确**；
+像素级正确性要靠之后的真机首帧。
 
 ---
 
