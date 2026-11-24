@@ -65,6 +65,27 @@ inline int device_version(REFIID iid) {
 
 namespace detail {
 
+// 把槽 16（CreateRootSignature）收到的 blob 落盘，供 t49_pso_warp 用**游戏自己的**
+// 根签名去试编译 shader —— 空根签名必然 E_INVALIDARG，考不出 DXIL 是否合法。
+inline void dump_root_sig(const void* blob, std::size_t size) {
+    char dir[MAX_PATH] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_DUMP_SHADERS", dir, sizeof(dir)) == 0 || !dir[0]) return;
+    if (!blob || size < 32 || size > (1u << 20)) return;
+    CreateDirectoryA(dir, nullptr);
+    static std::atomic<int> n{0};
+    char path[MAX_PATH] = {0};
+    std::snprintf(path, sizeof(path), "%s\\rs_%02d_len%zu.bin", dir,
+                  n.fetch_add(1, std::memory_order_relaxed) + 1, size);
+    HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD wrote = 0;
+    WriteFile(f, blob, static_cast<DWORD>(size), &wrote, nullptr);
+    CloseHandle(f);
+}
+
+
+
 // 桌面 D3D12 在少数路径上**抛 C++ 异常**而不是返回 HRESULT（实测：
 // game+0x1E86853 -> d3d12_xs -> D3D12Core -> ucrtbase -> RaiseException 0xE06D7363）。
 // 异常穿透到游戏会直接把它带崩，所以在我们调用驱动的边界上统一收敛成 HRESULT。
@@ -1876,6 +1897,7 @@ uintptr_t WINAPI forward_slot_strip_root(DeviceProxy* proxy, uintptr_t a1 = 0, u
         // 主机侧拿到的仍是同一份数据，但主机位已经是"要传给桌面"的值；
         // 若游戏之后还要用原始位，它会重新序列化）。
         if (xbgtasix::rootsig::strip_blob_for_pc(blob, blob_size, &bits, &at)) {
+            dump_root_sig(blob, blob_size);
             static std::atomic<int> n{0};
             const int k = n.fetch_add(1, std::memory_order_relaxed);
             if (k < 16) {
