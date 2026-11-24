@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -63,6 +64,27 @@ inline int device_version(REFIID iid) {
 }
 
 namespace detail {
+
+// 桌面 D3D12 在少数路径上**抛 C++ 异常**而不是返回 HRESULT（实测：
+// game+0x1E86853 -> d3d12_xs -> D3D12Core -> ucrtbase -> RaiseException 0xE06D7363）。
+// 异常穿透到游戏会直接把它带崩，所以在我们调用驱动的边界上统一收敛成 HRESULT。
+template <typename Fn>
+inline HRESULT catch_deep(const char* what, Fn&& fn) {
+    try {
+        return fn();
+    } catch (const std::bad_alloc&) {
+        xbgtasix::logf("[d3d12_xs] %s 抛 std::bad_alloc -> E_OUTOFMEMORY", what);
+        return E_OUTOFMEMORY;
+    } catch (const std::exception& e) {
+        xbgtasix::logf("[d3d12_xs] %s 抛 std::exception(%s) -> E_FAIL", what, e.what());
+        return E_FAIL;
+    } catch (...) {
+        xbgtasix::logf("[d3d12_xs] %s 抛未知 C++ 异常 -> E_FAIL", what);
+        return E_FAIL;
+    }
+}
+
+
 
 inline void* wrap_command_queue(ID3D12CommandQueue* owned_pc_ref);
 
@@ -1632,8 +1654,10 @@ inline HRESULT WINAPI create_resource_from_address_x(DeviceProxy* self, void* ba
         ID3D12Heap* heap = nullptr;
         const HRESULT hr_heap = dev3->OpenExistingHeapFromAddress(base_addr, IID_PPV_ARGS(&heap));
         if (SUCCEEDED(hr_heap) && heap) {
-            const HRESULT hr = pc->CreatePlacedResource(
-                heap, 0, &pc_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, riid, out);
+            const HRESULT hr = catch_deep("槽133 CreatePlacedResource", [&] {
+                return pc->CreatePlacedResource(heap, 0, &pc_desc, D3D12_RESOURCE_STATE_COMMON,
+                                                nullptr, riid, out);
+            });
             heap->Release();
             xbgtasix::logf("[d3d12_xs] 槽133 -> placed resource hr=0x%08lx out=%p（与标题内存共享）",
                            static_cast<unsigned long>(hr), out ? *out : nullptr);
@@ -1658,8 +1682,10 @@ inline HRESULT WINAPI create_resource_from_address_x(DeviceProxy* self, void* ba
     props.Type = D3D12_HEAP_TYPE_DEFAULT;
     props.CreationNodeMask = 1;
     props.VisibleNodeMask = 1;
-    const HRESULT hr = pc->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-                                                   D3D12_RESOURCE_STATE_COMMON, nullptr, riid, out);
+    const HRESULT hr = catch_deep("槽133 CreateCommittedResource", [&] {
+        return pc->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                           D3D12_RESOURCE_STATE_COMMON, nullptr, riid, out);
+    });
     xbgtasix::logf("[d3d12_xs] 槽133 -> committed 降级 hr=0x%08lx out=%p"
                    "（**数据不与标题内存共享**，仅验证对象 ABI）",
                    static_cast<unsigned long>(hr), out ? *out : nullptr);
@@ -1916,8 +1942,10 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
     if (desc && riid) {
         // 主机 desc 的 pRootSignature 是我们的代理对象：转交给桌面时需要原生对象。
         D3D12_COMPUTE_PIPELINE_STATE_DESC pc = *desc;
-        hr = static_cast<ID3D12Device*>(self->pc)->CreateComputePipelineState(
-            &pc, *riid, reinterpret_cast<void**>(&pso));
+        hr = catch_deep("槽62 CreateComputePipelineState", [&] {
+            return static_cast<ID3D12Device*>(self->pc)->CreateComputePipelineState(
+                &pc, *riid, reinterpret_cast<void**>(&pso));
+        });
     }
     if (seq <= 12) {
         xbgtasix::logf("[d3d12_xs] 槽62 compute PSO #%d：desc=%p shader=%p len=%llu -> hr=0x%08lx pso=%p",
