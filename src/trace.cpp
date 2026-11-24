@@ -372,7 +372,28 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
                     }
                 }
             }
-            info->ContextRecord->Rsi = info->ContextRecord->Rcx;
+            // 反汇编 0x5C8FA70 的 pop 函数可知它在链表里按 (rsi, rdi) 两个键找节点：
+            //     mov rax,[rax+0x18] / cmp [rax],rsi / cmp [rax+0x10],rdi
+            // 键对不上就会一路走到 null 再解引用（实测崩点 0x5C8FA96）。
+            // 现场 rsi 已被冲成小整数，正确的键是 scope id = game+0x56A2A60
+            // （0x247AD4F 的 `lea rdx,[game+0x56A2A60]` 就是它）。
+            // 用环境变量可以切换恢复策略，便于二分：
+            {
+                char mode[32] = {0};
+                GetEnvironmentVariableA("XBGTASIX_TRAP_RSI", mode, sizeof(mode));
+                const unsigned long long base0 =
+                    reinterpret_cast<unsigned long long>(addr) - rva;
+                if (mode[0] == 'i') {           // 统一：用 scope id
+                    info->ContextRecord->Rsi = base0 + 0x56A2A60;
+                    info->ContextRecord->Rdx = info->ContextRecord->Rcx;
+                    logf("[xbgtasix]   陷阱：rsi=scope id(game+0x56A2A60) rdx=rcx");
+                } else if (mode[0] == 'n') {    // 不改
+                    logf("[xbgtasix]   陷阱：不修改 rsi/rdx（对照）");
+                } else {                        // 默认：rcx
+                    info->ContextRecord->Rsi = info->ContextRecord->Rcx;
+                    logf("[xbgtasix]   陷阱：rsi=rcx");
+                }
+            }
             info->ContextRecord->Rip = reinterpret_cast<unsigned long long>(addr) - rva + 0x247AF2E;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
