@@ -325,6 +325,31 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
         logf("[xbgtasix] 访问类型=%llu 地址=%p", info->ExceptionRecord->ExceptionInformation[0],
              reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1]));
     }
+    // ---------------------------------------------------------------------
+    // 可恢复陷阱：game+0x247AF2D 的"跨度 <= 2 MiB-1"不变量在本构建里结构性恒真
+    // （实测 begin=0、end=0x4000000、g=0，无回绕，两项都是游戏自己的立即数）。
+    // 这里允许显式跳过它以便观察**下一处**阻塞，但必须：
+    //   * 只在环境变量里点名才生效（默认绝不改变游戏行为）
+    //   * 大声记录"掩盖了游戏自身的不变量"
+    //   * 恢复 rsi（0x247AF35 要用它，现场的 rsi 已被冲成小整数）
+    // ---------------------------------------------------------------------
+    if (code == EXCEPTION_BREAKPOINT && rva == 0x247AF2D) {
+        char env[256] = {0};
+        const DWORD n = GetEnvironmentVariableA("XBGTASIX_SKIP_GAME_ASSERT", env, sizeof(env));
+        if (n > 0 && std::strstr(env, "247AF2D")) {
+            logf("[xbgtasix] ⚠ 跳过游戏断言 game+0x247AF2D（XBGTASIX_SKIP_GAME_ASSERT 已点名）");
+            logf("[xbgtasix]   这**掩盖了游戏自身的不变量**：跨度 0x4000000 > 0x1FFFFF，"
+                 "仅用于探测下一处阻塞");
+            logf("[xbgtasix]   陷阱前 rsi=0x%llX rcx=0x%llX -> 用 rcx 恢复 rsi 并跳到 +0x247AF2E",
+                 static_cast<unsigned long long>(info->ContextRecord->Rsi),
+                 static_cast<unsigned long long>(info->ContextRecord->Rcx));
+            info->ContextRecord->Rsi = info->ContextRecord->Rcx;
+            info->ContextRecord->Rip = reinterpret_cast<unsigned long long>(addr) - rva + 0x247AF2E;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        logf("[xbgtasix]   （想跨过去看下一处阻塞：设 XBGTASIX_SKIP_GAME_ASSERT=247AF2D）");
+    }
+
     return EXCEPTION_CONTINUE_SEARCH;   // 继续原处理，不改变游戏行为
 }
 
