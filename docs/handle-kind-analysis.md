@@ -17,8 +17,9 @@
 | victory 侧 annotateHandle | **6341 次 / 237 个模块**（254 个里有 17 个没用句柄），17 种 kind 取值 |
 | 句柄级矛盾（kind 说 texture、紧邻用法是 rawBuffer*/buffer*） | **0 条**。原因是 victory 的 kind 本来就是"看用法猜"出来的，句柄级必然自洽——查错必须换到**槽口径** |
 | 槽口径矛盾 | **20 个 descriptor 槽 / 17 个模块**（共 1991 个 heap 槽、254 个模块） |
-| 其中最接近本 bug 的一类 | kind 标成 `Texture2D+UAV (0x1002)`、后面跟 `atomicBinOp.i32`：**2 个槽 / 2 个模块** |
-| 另外两类错标 | 同一槽被标成两种 buffer kind（RawBuffer↔StructuredBuffer）13 槽；同一槽被标成 `CBuffer(13)` 又被当 `RawBuffer(11)` 用 5 槽 |
+| 崩溃面的静态指纹 | kind 标成 `Texture2D+UAV (0x1002)`、`props.1 = 1033 = 4×F32`、后面跟 `atomicBinOp.i32`：**2 个槽 / 2 个句柄 / 2 个模块** |
+| 真正的病灶（已由修法定死） | **不是 kind 标错**：`handle()` 的去重键漏了 `props.1`（组件类型），同一描述符先被 float 路径建过 handle，整数 atomic 复用了同一条 → 声明 `4×F32` 却跑 `atomicOr` |
+| 另外两类（精度问题，不崩） | 同一槽被标成两种 buffer kind（RawBuffer↔StructuredBuffer）13 槽；同一槽被标成 `CBuffer(13)` 又被当 `RawBuffer(11)` 用 5 槽 |
 
 三条前提修正（与分析结论直接相关）：
 
@@ -29,9 +30,10 @@
    `textureLoad/textureStore/textureGather` 一次都没出现。所以"texture kind 怎么标才对"的
    真值来源只能是 DXIL 规范 + victory 自身用法，不能靠主机产物。
 3. **victory 侧不存在"句柄标 Texture2D 却紧跟着 rawBufferStore"这种形态**（0 条）。
-   错标出现在**同一个 descriptor 槽在不同位置被标成不同 kind**，以及**原子操作落在 texture 头上**。
-   所以"字符串匹配 `store` 猜 uav"不是唯一病灶，`descriptor_data` 里"拿第一个使用点决定 kind"
-   同样在出错（见 §4）。
+   真正炸掉的那一处，kind 本身是对的（它确实是 typed texture UAV），错在**两条不同组件类型的
+   资源共用了同一个 handle**——去重键漏了 `props.1`。这条已由另一路的修法实测定死（§3.4）。
+   除此之外还有两层"猜"的问题留着：`descriptor_data` 拿"第一个使用点"决定 kind、
+   字符串 `contains("store")` 猜 UAV 位（§4），它们造成的是 20 个槽的精度错标，不是崩溃。
 
 ---
 
@@ -46,6 +48,10 @@
   10 TypedBuffer / 11 RawBuffer / 12 StructuredBuffer / 13 CBuffer / 14 Sampler），bit 12（`0x1000`）是 UAV 标志。
   这个解码被数据验证过：**所有裸 kind（无 `0x1000`）的句柄只被 load 类指令使用，
   所有带 `0x1000` 的句柄才有 store/atomic**（见 §3 表）。
+- `props.1`（第二个 i32）按 kind 分两种含义，这一点是定位 §3.4 的关键：
+  **typed/texture** 时是 `(组件数 << 8) | DXIL ComponentType`（I32=4 / U32=5 / I64=6 / U64=7 /
+  F16=8 / F32=9 / F64=10），所以 `1033 = 0x409 = 4×F32`、`261 = 0x105 = 1×U32`；
+  **structured/raw/cbuffer** 时是 stride / 长度（`12`、`176`、`65536`…），不是组件类型。
 - 槽口径（判断"同一资源"）：把 `createHandleFromHeap` 的索引表达式折成
   `(语义变量, 常量)`——变量落到 `cbuf(<handle>,<offset>).<field>`，常量是 `lshr (add %base, C), 5` 里的
   `C>>5`。同一 CBV 字段 + 同一常量 = 同一个 descriptor 槽。C 不是 32 的倍数时记为不可精确解析，
@@ -202,28 +208,22 @@ cs_43  L125: atomicBinOp.i32(i32 78, %dx.types.Handle %4, i32 0, i32 %71, i32 un
 
 三类分开读：
 
-**(A) 原子落在 Texture2D 头上：2 槽 / 2 模块。**
+**(A) 原子落在 Texture2D 头上：2 槽 / 2 句柄 / 2 模块（已定案，见 §3.4）。**
 `compute-5d113aa6830760b6.ll`
 
 ```
+L784  %728 = createHandleFromHeap(i32 218, i32 %727, i1 false, i1 false)
 L785  %729 = annotateHandle(i32 216, %728, ResourceProperties { i32 4098, i32 1033 })
 L786  %730 = getDimensions(i32 72, %729, i32 undef)
 L808  %752 = atomicBinOp.i32(i32 78, %729, i32 2 /*Or*/, %745, %747, i32 undef, i32 %751)
 ```
 
-`0x1033`(=1033=0x409) 是 victory 自己给 image 描述符的哨兵值
-（`emit/lower.rs:2812` → `((kind | u, 0x409), Some(kind))`）。也就是说 vkd3d 看到的是一条
-"类型未知的 typed texture UAV"，没有 format，按你说的默认落到 **R32f**，而这条原子是
-`atomicOr`——就是在 float 资源上做整数原子。
+`1033 = 0x409` 解出来是 `4×F32`（组件数 4、ComponentType F32=9）。
+也就是说这条句柄被声明成 "typed texture UAV，4 个 f32 分量"，
+而它上面唯一的类型化访问是 `atomicBinOp.i32`（整数 `Or`）。
 `compute-2f03a2df10503cef.ll` 同形：`4098@L3494` + `atomicBinOp@L3522`。
-
-与 GTA6 真值对照：主机产物 15 次原子全部一维坐标 + raw buffer，**没有一次落在 image 上**。
-所以这两个标签至少和真值不一致。
-
-要说清的一点：这两个槽上**没有** `rawBuffer*` 访问（只有 atomic + getDimensions），
-所以单凭静态数据只能说"标签可疑、与真值方向相反"，不能说"它一定是 buffer 被错标成 texture"。
-另一种解释同样成立：它确实是 image 原子，缺的是 UAV format（`R32_UINT`），而不是 kind。
-能区分这两者的判据在 §4 第 3 条。
+这两条就是全批 6341 个 annotate 里唯一两处"声明 F32、实际跑整数原子"的句柄
+（`tools/handle_kind_census.py comp` 的口径，见 §3.4）。
 
 **(B) 同一槽被标成两种 buffer kind（RawBuffer ↔ StructuredBuffer）：13 槽。**
 最干净的一例 `compute-3cf39f4495b908d0.ll`：
@@ -256,9 +256,69 @@ L186 %146 = annotateHandle(%145, { i32 11, i32 0 })      ← RawBuffer
 descriptor 被算成了同一个索引），那问题在索引侧而不在 kind 侧——静态数据分不开这两者，
 但两者都在 victory 的同一段代码里（`descriptor_data`）。
 
+### 3.4 真正的病灶：handle 去重键漏了组件类型（props.1）
+
+上面 (A) 的定性在 2026-11-25 被修法定死了，结论要改：
+
+**kind 没有错。这两处是"同一个描述符索引被两类不同组件类型的资源共用了同一条 handle"。**
+
+病灶在 `victory-1k/crates/victory-shader/src/emit/lower.rs` 的 `handle()`（`:3123`）：
+
+```rust
+// 修之前（git 里还是这样）：键里没有 props.1
+handles: HashMap<(usize, Site, u8, bool, u32), V>,
+...
+let key = (self.cur, *load, *first, sampler, props.0);   // ← 少了 props.1
+
+// 修之后（当前工作区）
+handles: HashMap<(usize, Site, u8, bool, u32, u32), V>,
+let key = (self.cur, *load, *first, sampler, props.0, props.1);   // lower.rs:3132
+```
+
+`props.0` 是 kind（含 UAV 位），`props.1` 是组件类型/步长。漏掉 `props.1` 以后，
+同一个描述符（同 `cur`、同 descriptor load 点、同 `first`、同 kind）先被 float 路径建过一次 handle，
+后面的整数 atomic 直接**复用它**——`.ll` 里就只剩一条 handle、一次 annotate：
+
+```
+%729 = annotateHandle(..., { i32 4098, i32 1033 })    // 4×F32
+%752 = atomicBinOp.i32(..., %729, i32 2 /*Or*/, ...)   // 整数原子打在 F32 声明上
+```
+
+把 `props.1` 加进键之后（另一路的实测结果，我没有重跑）：
+
+| 指标 | 修之前 | 修之后 |
+|---|---|---|
+| annotate 的 `props.1` | `1033` = 4×F32 | `261` = 1×U32 |
+| vkd3d 产出的 SPIR-V | 按 f32 建 view | 多出 `%31 = OpTypeImage %uint … R32ui`，原子是 `OpAtomicOr %uint` |
+| `spirv-val` | `AtomicOr: expected Result Type to be integer scalar type` | **exit 0** |
+| pso-probe（NVIDIA，空设备） | `Exception 0xc0000005` | **0: ok** |
+
+所以 §7 里原来"到底是 buffer 被错标成 texture，还是 texture 缺 UAV format"这个二选一，
+答案是**后者**：资源确实是 typed UAV，缺的是"按 u32 建 view"这一层信息——而它丢在 handle 身份里，
+不是在 kind 里。
+
+这条给"kind 判据"补了一层：**kind 决定"资源是哪一类"，`props.1` 决定"按什么组件看它"，
+两者都必须进入 handle 的身份**。同一个描述符在不同使用点要不同组件类型时，必须是两条 handle、
+两条 annotate，绝不允许复用。
+
+顺带解释了一个之前的疑点：为什么"句柄级矛盾 0 条"却有 bug——因为矛盾的双方（float 声明 与
+整数原子）在 IR 层面被合并成了一条 handle，句柄级根本看不到"两方"。
+
+复现这条统计：
+
+```bash
+python3 tools/handle_kind_census.py comp /tmp/atomscan/ll --json /tmp/handle-kind/comp.json
+# 模块 254，句柄 2
+#   compute-2f03a2df10503cef.ll L3494 kind=4098(Texture2D+UAV) 声明=4xF32 实际=i32 op=atomicBinOp lines=[3522]
+#   compute-5d113aa6830760b6.ll L785  kind=4098(Texture2D+UAV) 声明=4xF32 实际=i32 op=atomicBinOp lines=[808]
+```
+
+注意 `/tmp/atomscan/ll` 是**修之前**的产物，所以还能看到这两条；用修好的 victory 重新生成，
+`comp` 口径应当归零，而 `annotate` 里会多出 `{4098, 261}` 这种 `1×U32` 的标注。
+
 ---
 
-## 4. 判据：kind 只能由"后面跟着的那条访问指令"决定
+## 4. 判据：kind 由后面的访问指令决定，`props.1` 由组件类型决定
 
 从 GTA6 的 53 个真值模块 + victory 自身 6341 条标注归纳出来的规则：
 
@@ -314,6 +374,33 @@ cs_43 L27/L125）：kind 在产物里根本没写，但**类别字节是 UAV、�
 > 只有"同槽完全没有 buffer 访问、且描述符被读成 image 尺寸数据、原子坐标是二维"三条同时成立，
 > 才允许标 texture —— 而那时必须给出格式，否则整数原子还是会绑到 `R32f` 上。
 
+### 4.4 第二层：handle 的身份必须含组件类型
+
+kind 判对只是第一步。§3.4 定案之后，规则要补第二层：
+
+**一条 handle 的身份 = （描述符来源 site, kind, `props.1` 组件类型）。三者任一不同，
+就必须是两条 `createHandleFromHeap` + 两条 `annotateHandle`，绝不能复用。**
+
+`props.1` 的解析（typed/texture 才有意义）：
+
+| 值 | 含义 |
+|---|---|
+| `0x409` = 1033 | 4 × F32（victory 对 image 描述符的固定写法，`lower.rs:2812`） |
+| `0x105` = 261 | 1 × U32 ← 整数原子要的 |
+| `0x10?`/`0x2??` | 组件数 × DXIL ComponentType（I32=4 / U32=5 / I64=6 / U64=7 / F16=8 / F32=9） |
+| `12` / `176` / `65536` | structured 的 stride、cbuffer 的大小 —— **不是**组件类型，别拿它判类型 |
+
+配套的静态自检（本次就是这么定位的，也是回归时该守的那条）：对每个 `annotateHandle`，
+拿 `props.1` 解出的 ComponentType 和后面那条类型化访问指令的元素类型对一遍——
+**声明 F32 却出现 `.i32/.i64` 访问，或者声明 U32/I32 却出现 `.f32/.f16`，就是复用出错**。
+`rawBuffer*`（kind 11/0x100B）不受这条约束：raw buffer 本来就没有元素类型，按字节看是合法的。
+
+```bash
+python3 tools/handle_kind_census.py comp <ll-dir>
+```
+
+本批（修之前的语料）命中 2 个句柄，全是 §3.3 (A) 那两个；修好后应归零。
+
 ---
 
 ## 5. 影响面
@@ -323,14 +410,15 @@ cs_43 L27/L125）：kind 在产物里根本没写，但**类别字节是 UAV、�
 
 | 类别 | 槽 | 模块 | 占槽 | 占模块 |
 |---|---|---|---|---|
-| 原子落在 `Texture2D+UAV` 上（最接近崩溃形态） | 2 | 2 | 0.10% | 0.79% |
+| `props.1` 声明 F32 却跑整数原子（组件类型复用，**就是崩的那两处**） | 2 | 2 | 0.10% | 0.79% |
 | 同一槽两种 buffer kind（Raw↔Structured） | 13 | 10 | 0.65% | 3.9% |
 | 同一槽 CBuffer ↔ RawBuffer | 5 | 5 | 0.25% | 2.0% |
-| **合计异常槽（去重）** | **20** | **17** | **1.0%** | **6.7%** |
+| **合计异常槽（去重，含上面崩的那 2 槽）** | **20** | **17** | **1.0%** | **6.7%** |
 | 参考：kind 12 + `rawBuffer*`（精度问题，不判罪） | — | 68 | — | 26.8% |
 
 含原子操作的模块只有 10 个（16 次 `atomicBinOp.i32`，`i64` 与 compareExchange 均 0 次），
-其中 2 个的原子落在 texture 标注上。这就是"崩溃面"的全部静态候选。
+其中 2 个的原子落在 texture 标注上——而这两处的真实原因是 `props.1` 复用（§3.4），
+不是 kind 错。这是"崩溃面"的全部静态候选：**修 `handle()` 那个键，这两处一起消失**。
 
 如果 vkd3d 的类型推断粒度不是 per-descriptor-slot 而是整张 heap，风险面会从 2 个槽扩到
 "10 个含原子的模块"，但那一步静态定不了，得在 vkd3d 侧做最小复现。
@@ -360,10 +448,9 @@ python3 tools/handle_kind_census.py victory /tmp/atomscan/ll --conflicts   # 句
    能给的替代真值是"class 字节 + 访问指令"的对应关系（§2.1）。
 2. **没有找到一个"kind=Texture2D 且紧邻 rawBufferStore"的句柄**。这类形态在本批 0 条；
    错标表现为槽级（§3.3）。
-3. **两个原子槽（`compute-2f03a2df10503cef`、`compute-5d113aa6830760b6`）到底是
-   "buffer 被标成 texture" 还是 "texture 缺 format"**，静态分不开：这两个槽上没有 buffer 访问，
-   原子坐标是二维（`%95=%1<<5+%89`、`%98=%2<<5+%91`），像像素坐标；但 elem 哨兵 `0x409` +
-   整数 `atomicOr` 又正好落进"默认 R32f"的坑。两条路的修法不同（改 kind vs 补格式），
-   得靠一次真实编译 + vkd3d 侧 dump 才能定。
+3. ~~两个原子槽到底"buffer 错标成 texture"还是"texture 缺 format"~~ —— **已定案（2026-11-25）**：
+   是后者，而且比"缺 format"更深一层，是 **handle 身份漏了组件类型**（`props.1`）。
+   证据与修法见 §3.4；静态指纹是 `props.1=1033(4×F32)` + `atomicBinOp.i32`。
 4. 5 个 "CBuffer ↔ RawBuffer" 槽里，有 4 个模块（`compute-24f989…`/`3a7919…`/`a1d865…`/`fb332f…`）
    行号完全一致，是同一 shader 的变体；**到底是 kind 标错还是索引丢了常量**，静态同样分不开。
+   B/C 两类（共 18 槽）按现状判为"精度问题、不崩"，不再往下追；等有崩溃样本再回来。

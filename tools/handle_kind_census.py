@@ -28,6 +28,7 @@ victory 从主机 shader 生成桌面 DXIL 时，`dx.op.annotateHandle` 的第�
     python3 tools/handle_kind_census.py victory /tmp/atomscan/ll [--json /tmp/y.json]
     python3 tools/handle_kind_census.py victory /tmp/atomscan/ll --conflicts   # 只打矛盾样本
     python3 tools/handle_kind_census.py slots   /tmp/atomscan/ll [--json /tmp/z.json]
+    python3 tools/handle_kind_census.py comp    /tmp/atomscan/ll [--json /tmp/w.json]
 
 退出码 0 = 正常（统计成功）。
 """
@@ -697,6 +698,76 @@ def scan_victory_slots(dirpath):
     return res
 
 
+# ---------------------------------------------------------------- 组件类型层（props.1）
+
+# DXIL ComponentType。typed/texture 资源的 ResourceProperties 第二个 i32 是
+# `(组件数 << 8) | ComponentType`；structured/raw/cbuffer 那一位是 stride / 大小。
+COMPONENT_TYPE = {1: "I1", 2: "I16", 3: "U16", 4: "I32", 5: "U32", 6: "I64",
+                  7: "U64", 8: "F16", 9: "F32", 10: "F64"}
+INT_TYPES = {1, 2, 3, 4, 5, 6, 7}
+FLOAT_OPS = {"f32", "f16", "f64"}
+INT_OPS = {"i32", "i64", "i16", "i8"}
+TYPED_KINDS = set(range(1, 10)) | {10, 17, 18}
+
+
+def decode_props2(kind_low, comp):
+    """typed/texture 才解组件类型；其它 kind 的第二个字段是 stride/长度，不是组件类型。"""
+    if kind_low not in TYPED_KINDS:
+        return None
+    ctype = comp & 0xFF
+    if ctype not in COMPONENT_TYPE:
+        return None
+    return comp >> 8, COMPONENT_TYPE[ctype]
+
+
+def scan_victory_comp(dirpath):
+    """找「annotate 声明的组件类型」和「后面那条访问指令的元素类型」不符的句柄。
+
+    这正是 `handle()` 去重键漏掉 props.1 时留下的静态指纹：同一个描述符先被
+    4×f32 的路径建了 handle，整数 atomic 复用同一条，于是 props.1 说 F32、
+    原子却是 i32 —— vkd3d 按 F32 建 view，SPIR-V 里就是 OpAtomicOr %float。
+    """
+    files = sorted(f for f in os.listdir(dirpath) if f.endswith(".ll"))
+    hits = []
+    for f in files:
+        with open(os.path.join(dirpath, f), "r", encoding="utf-8", errors="replace") as g:
+            text = g.read()
+        lines, handles, annotates, phis = parse_module(text)
+        uses = collect_uses(lines, handles)
+        for a in annotates:
+            h = handles[a]
+            low = h["kind"] & 0xFFF
+            dec = decode_props2(low, h["elem"])
+            if dec is None:
+                continue
+            lanes, ctype = dec
+            ops = access_ops_for(a, handles, uses, phis)
+            types = set()
+            for o in ops:
+                m = re.search(r"@dx\.op\.[A-Za-z0-9_]+\.[A-Za-z0-9]+", lines[o["line"] - 1])
+                if m:
+                    types.add(m.group(0).rsplit(".", 1)[1])
+            want_int = (ctype in COMPONENT_TYPE and COMPONENT_TYPE and
+                        [k for k, v in COMPONENT_TYPE.items() if v == ctype][0] in INT_TYPES)
+            bad = sorted((types & FLOAT_OPS) if want_int else (types & INT_OPS))
+            if bad:
+                hits.append({"module": f, "line": h["line"], "kind": h["kind"],
+                             "kind_name": kind_name(h["kind"])[0],
+                             "declared": "%dx%s" % (lanes, ctype),
+                             "op_types": sorted(types), "wrong": bad,
+                             "ops": sorted({o["op"] for o in ops}),
+                             "op_lines": [o["line"] for o in ops][:6],
+                             "text": lines[h["line"] - 1].strip()[:200]})
+    mods = sorted({x["module"] for x in hits})
+    print("== 组件类型层（props.1 声明 vs 访问指令的元素类型）")
+    print("   模块 %d，句柄 %d" % (len(files), len(hits)))
+    for x in hits:
+        print("   %-34s L%-5d kind=%-5d(%s) 声明=%-6s 实际=%s op=%s lines=%s"
+              % (x["module"], x["line"], x["kind"], x["kind_name"], x["declared"],
+                 ",".join(x["op_types"]), ",".join(x["ops"]), x["op_lines"]))
+    return {"dir": dirpath, "modules": len(files), "hits": hits, "hit_modules": mods}
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
@@ -713,6 +784,8 @@ def main(argv):
         res = scan_victory(target, only_conflicts)
     elif mode == "slots":
         res = scan_victory_slots(target)
+    elif mode == "comp":
+        res = scan_victory_comp(target)
     else:
         print(__doc__)
         return 2
