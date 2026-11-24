@@ -34,16 +34,17 @@ WINE="$PROTON_DIR/bin/wine"
 to_win() { printf 'Z:%s' "$(printf '%s' "$1" | tr '/' '\\')"; }
 
 # ---------------------------------------------------------------------------
-# 盘符：Wine 只认 $WINEPREFIX/dosdevices 里的符号链接。
-# 实测（docs/wine-host.md 8.8）：shim 里的 DefineDosDeviceW(DDD_RAW_TARGET_PATH) 在 Wine 下
-# **返回成功但不生效** —— G:\appdata0.rpf 依旧 ERROR_FILE_NOT_FOUND(2)，而同一个文件用
-# D:\GTA6\... 全路径能开。三种写法（raw DOS / raw unix / 非 raw）都试过，都不行。
-# 于是这一步放到宿主侧做：启动**之前**把 g:/t: 建出来，新起的进程就能看见。
-# 注意：这不是 drives.cpp 的活。drives.cpp 在进程里跑，那时候 Wine 的盘符表已经建好了，
-# 它再调 DefineDosDeviceW 也加不进来（实测三种写法都"成功但不生效"）。drives.cpp 现在只负责
-# "映射完自检 + 失败时大声报 404"。删掉下面这两行，立刻回到"文件明明在、GetLastError=2"。
-#   g:  Xbox 的持久存储/内容盘（游戏在这里找 appdata0.rpf 等包内文件）
-#   t:  临时盘（崩溃转储、缓存）
+# 盘符 vs 路径重写
+# ---------------------------------------------------------------------------
+# 默认走**路径重写**：shim（xmem.dll 的 IAT 钩子）在文件 API 转发之前把 "G:/x"、"G:\x"
+# 换成真实目录，不需要任何宿主盘符机制。这一层在 windows 和 wine 上走同一条代码路径。
+# 开启方式：不设任何变量（默认开）；显式打开 XBGTASIX_PATH_REWRITE=1。
+#
+# 回退到"造盘符"模式：XBGTASIX_PATH_REWRITE=0（等价于 XBGTASIX_NO_PATH_REWRITE=1）。
+# 那个模式下 Wine 只认 $WINEPREFIX/dosdevices 里的符号链接 —— 实测（docs/wine-host.md 8.8）：
+# 进程里 DefineDosDeviceW(DDD_RAW_TARGET_PATH) 三种写法在 Wine 下**返回成功但不生效**，
+# G:\appdata0.rpf 依旧 ERROR_FILE_NOT_FOUND(2)，而同一个文件用全路径能开。所以必须
+# 启动**之前**把 g:/t: 建出来。删掉这两行，立刻回到"文件明明在、GetLastError=2"。
 # ---------------------------------------------------------------------------
 setup_drive() {
   local letter=$1 target=$2
@@ -51,8 +52,23 @@ setup_drive() {
   ln -sfn "$target" "$WINEPREFIX/dosdevices/$letter:"
   echo "== 盘符      $letter: -> $target"
 }
-setup_drive g "$PKG"
-setup_drive t "$WINEPREFIX/drive_c/users/steamuser/AppData/Local/Xbgtasix/T"
+
+# 重写模式默认开；只认 0/1，别的值当默认
+REWRITE=${XBGTASIX_PATH_REWRITE:-1}
+if [ "$REWRITE" = "0" ]; then
+  export XBGTASIX_PATH_REWRITE=0
+  export XBGTASIX_NO_PATH_REWRITE=1
+  echo "== 模式      盘符映射（shim 不重写路径）"
+  setup_drive g "$PKG"
+  setup_drive t "$WINEPREFIX/drive_c/users/steamuser/AppData/Local/Xbgtasix/T"
+else
+  export XBGTASIX_PATH_REWRITE=1
+  unset XBGTASIX_NO_PATH_REWRITE
+  echo "== 模式      路径重写（不建盘符；G: -> $PKG，T: -> LOCALAPPDATA\\Xbgtasix\\T）"
+  if [ -e "$WINEPREFIX/dosdevices/g:" ] || [ -e "$WINEPREFIX/dosdevices/t:" ]; then
+    echo "             注意：dosdevices 里仍有 g:/t: 符号链接（重写模式下用不到，留着不影响结论）"
+  fi
+fi
 
 args=()
 dll_dir=""

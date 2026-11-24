@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace xbgtasix {
 
@@ -32,9 +33,25 @@ void install_int3_probes();
 void set_game_root(const char* path);
 const char* game_root();
 
-// 由 DllMain 在进程早期调用：把主机盘符（G: 持久存储 / T: 临时盘）映射到 PC 目录。
+// 由 DllMain 在进程早期调用：给主机盘符（G: 持久存储 / T: 临时盘）找落地目录。
 // 实测游戏启动期会直接探测 G:\appdata0.rpf 与 T:\<guid>.dmp。
+// 落地方式由 path_rewrite_enabled() 决定：默认在文件 API 层做**路径重写**，
+// 只有回退模式下才走 DefineDosDevice（Wine 下还要宿主 dosdevices 配合）。
 void install_console_drives();
+
+// 路径重写：游戏继续用 G:\... / G:/...，实际落到真实目录，不再依赖任何宿主盘符机制。
+//   XBGTASIX_PATH_REWRITE=1     打开（默认就是打开的）
+//   XBGTASIX_NO_PATH_REWRITE=1  回退到盘符模式（要和宿主 dosdevices 符号链接配合）
+//   XBGTASIX_DRIVE_G / _T / _D  覆盖落地目录（与盘符模式共用同一张表）
+bool path_rewrite_enabled();
+
+// 命中表里的盘符前缀（大小写不敏感，正/反斜杠都认）就把替换结果写进 out 并返回 true。
+// UNC（\\server\share）、设备路径（\\?\ / \\.\）、相对路径、表外盘符一律返回 false（原样放行）。
+// 每次命中记一行去重日志（[rewrite]），上限见 kMaxRewriteLines。
+bool rewrite_console_path(const wchar_t* in, std::wstring& out);
+
+// 至今命中重写的次数（含被日志上限丢掉的），给收尾统计用。
+long long path_rewrite_count();
 
 } // namespace xbgtasix
 

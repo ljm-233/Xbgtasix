@@ -96,6 +96,11 @@ wine cmd /c "if exist G:\\appdata0.rpf (echo G_YES) else (echo G_NO)"   # -> G_Y
 **不是进程内的 shim**。原因：shim 跑起来的时候，这个进程的盘符表已经从 `dosdevices/` 建完了，
 再调 `DefineDosDeviceW` 加不进来。
 
+> **2026-11-25 补（更省事的一条路）**：既然进程内造不出盘符，就在**文件 API 这一层**把
+> `G:\...` 换成真实路径 —— 不需要任何宿主盘符机制，Windows 和 Wine 同一条代码路径。
+> 本仓库已默认这么做（[path-rewrite.md](path-rewrite.md)），并实测"把 `g:`/`t:` 符号链接
+> 移走仍停在 `game+0x247AF2D`"。通则二描述的现象没有变，只是不再必须去迎合它。
+
 进程内那份代码（本仓库 `src/fstrace/drives.cpp`）保留的职责只有两条：
 
 1. **映射完立刻自检**（`GetFileAttributesW(L"G:\\")`），不要相信 `DefineDosDeviceW` 的返回值；

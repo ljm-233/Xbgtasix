@@ -31,7 +31,7 @@ Wine 上 482 ms 就死的那个断言（`0x80000003` at `game+0x5A91C21`）**不
 | `game+0x5A91C21` | shim 缺四个内部导出（`InitializeApiImpl*` / `UninitializeApiImpl`） | 源码里真实现（465 导出） | 482 ms | **宿主无关**，我们自己的缺口 |
 | `game+0x55DE020` | `QueryApiImpl` 返回空对象被解引用 | 哑对象（vtable 40 槽） | 248 ms | **宿主无关**，缺口 |
 | `game+0x5925915` | Wine `GameInputCreate` 返回 `E_NOTIMPL`（`getenv("SteamGameId")` 为空） | `SteamGameId=1771300` | 292 ms | **宿主差异** |
-| `game+0x2237178` | `appdata0.rpf` 在 `G:` 上打不开（Wine 盘符假成功） | `$WINEPREFIX/dosdevices/g:` 符号链接 | 3186 ms | **宿主差异** |
+| `game+0x2237178` | `appdata0.rpf` 在 `G:` 上打不开（Wine 盘符假成功） | `$WINEPREFIX/dosdevices/g:` 符号链接 → **已换成文件 API 层路径重写**（[path-rewrite](path-rewrite.md)，不要盘符也能到 6868 ms 那堵墙） | 3186 ms | **宿主差异** |
 | `game+0x55DEA79` | 哑对象槽 3 的返回值被当指针 `movups` 解引用 | 槽 3 返回零块 | 3186 ms | **我们自己的缺口** |
 | `game+0x247AF2D` | 64 MiB 瞬时块不变量（**真机同款**） | 未解，见 [transient-block-wall](transient-block-wall.md) | **6868 ms** | **真问题**，与宿主无关 |
 
@@ -747,6 +747,11 @@ Wine 的盘符是**进程启动时**从 `dosdevices/`（和注册表）建出来
 
 也就是说：**Wine 现在追平了真 Windows 当年的进度点**（`0x247AF2D` 那堵墙，
 见 [transient-block-wall.md](transient-block-wall.md)：跳过去在物理上不成立）。
+
+> **2026-11-25 更新**：这一步已经不再靠宿主盘符。`dosdevices/g:` 只是"走到这里"的历史手段，
+> 现在由 shim 在文件 API 转发前把 `G:\...` / `G:/...` 换成真实目录（重写模式，默认开），
+> **把 `g:`/`t:` 符号链接移走也照样停在 `game+0x247AF2D`**。原理、钩子清单、对照数据见
+> [path-rewrite.md](path-rewrite.md)。盘符模式保留为回退（`XBGTASIX_PATH_REWRITE=0`）。
 
 ---
 

@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// fstrace.cpp —— 主 exe 文件 API 的 IAT 挂钩追踪（XBGTASIX_FSTRACE=1 开启，默认关闭）
+// fstrace.cpp —— 主 exe 文件 API 的 IAT 挂钩层：**路径重写（常开）** + 追踪（可选）
+//
+// 这一层现在干两件事，共用同一批 thunk：
+//   A) 路径重写 —— 把 "G:\x" / "G:/x" 换成包目录里的真实路径再转发。
+//      开关 XBGTASIX_PATH_REWRITE（默认开）/ XBGTASIX_NO_PATH_REWRITE=1（回退盘符模式）。
+//      为什么要在这一层做：盘符是宿主耦合（Wine 只认启动前的 $WINEPREFIX/dosdevices，
+//      运行时 DefineDosDeviceW 三种写法和注册表都无效）。重写之后 Windows 和 Wine
+//      走同一条代码路径。细节与表的来源见 drives.cpp。
+//   B) 追踪 —— XBGTASIX_FSTRACE=1 时把每次文件 API 调用记一行（去重、上限 500 行）。
+//      只有它开着才写日志；只开重写时一条日志都不写，开销是"查表 + 可能的替换"。
 //
 // 为什么需要它
 // ------------
@@ -23,8 +32,8 @@
 //     FindFirstFileW / GetFileAttributesW / GetFileAttributesExW / ReadFile，
 //     全在 api-ms-win-core-file-l1-1-0.dll 里；CreateFile2 与 CopyFileW 根本不在
 //     导入表，属于正常跳过而不是失败）。
-//  3. 关掉开关时**一个字节都不改**：连 IAT 都不 patch（比"patch 了但只转发"更保守，
-//     少一条可能影响游戏行为的路径）；thunk 里仍然保留"关了就纯转发"的判断，
+//  3. 两个开关都关时**一个字节都不改**：连 IAT 都不 patch（比"patch 了但只转发"更保守，
+//     少一条可能影响游戏行为的路径）；thunk 里仍然保留"没开就纯转发"的判断，
 //     作为第二道保险。
 //
 // 重入（很关键）
@@ -36,7 +45,9 @@
 // 另外去重锁与日志锁是两把独立的锁，且 logf 一律在**释放去重锁之后**调用（先
 // claim_line 判断，再在锁外 emit），两者不构成锁序，不会死锁。
 //
-// 只被编进 xgameruntime.dll（build.sh 把 src/xgameruntime/*.cpp 一起编）。
+// 只被编进 xmem.dll：build.sh / tools/build_linux_cross.sh 都是
+// "src/xmem/xmem.cpp + src/fstrace/{fstrace,drives}.cpp + host_stall + trace" 一起编。
+// xmem.dll 是游戏**静态导入**的，所以它的 DllMain 比游戏第一行代码更早跑。
 #include <windows.h>
 
 #include "xbgtasix/host_stall.h"
@@ -72,10 +83,30 @@ bool read_env_switch() {
     return n > 0 && b[0] == '1';
 }
 
-bool enabled() {
+// 追踪（XBGTASIX_FSTRACE=1）：只有它开启时才写日志。
+bool tracing() {
     static const bool on = read_env_switch();
     return on;
 }
+
+// 是否要接管 IAT：追踪**或**路径重写任一开启。
+// 这两件事共用一个 thunk 层（都在文件 API 转发之前动手），所以装钩子的条件取并集：
+// 只做追踪时行为与从前完全一致（不重写）；只做重写时不写那 500 行/500 条日志。
+bool active() {
+    static const bool on = tracing() || xbgtasix::path_rewrite_enabled();
+    return on;
+}
+
+// 路径重写的小包装：命中就返回替换后的缓冲，否则原样返回入参指针（零拷贝放行）。
+// 用 std::wstring 是因为重写结果长度不定；只在命中时才分配。
+struct RwPath {
+    std::wstring buf;
+    bool hit = false;
+    const wchar_t* apply(const wchar_t* in) {
+        hit = xbgtasix::rewrite_console_path(in, buf);
+        return hit ? buf.c_str() : in;
+    }
+};
 
 // ------------------------------------------------------------ 上限与缓冲
 constexpr int kMaxLogLines = 500;      // 去重后的日志行上限（超了静默丢弃）
@@ -170,6 +201,17 @@ bool path_to_utf8(const wchar_t* w, char* out, size_t out_size) {
     return true;
 }
 
+// ANSI 路径 -> UTF-8（只为日志）。先按 ACP 转 wide，再走上面那条路。
+bool path_to_utf8_ansi(const char* s, char* out, size_t out_size) {
+    if (!s || !out || out_size < 16) return false;
+    const int n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    if (n <= 0) return false;
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, s, -1, w.data(), n) != n) return false;
+    w.resize(static_cast<size_t>(n - 1));
+    return path_to_utf8(w.c_str(), out, out_size);
+}
+
 // dwDesiredAccess 解码成可读文本，例如 "GENERIC_READ|FILE_READ_DATA+0x2"。
 // 认不出的位追加 +0x..，保证信息不丢。
 const char* access_text(DWORD access, char* buf, size_t n) {
@@ -238,7 +280,14 @@ struct OrigFns {
     decltype(&::GetFileAttributesW) GetFileAttributesW = nullptr;
     decltype(&::GetFileAttributesExW) GetFileAttributesExW = nullptr;
     decltype(&::FindFirstFileW) FindFirstFileW = nullptr;
+    decltype(&::FindFirstFileExW) FindFirstFileExW = nullptr;
     decltype(&::CopyFileW) CopyFileW = nullptr;
+    decltype(&::GetFileAttributesA) GetFileAttributesA = nullptr;
+    decltype(&::CreateDirectoryW) CreateDirectoryW = nullptr;
+    decltype(&::RemoveDirectoryW) RemoveDirectoryW = nullptr;
+    decltype(&::DeleteFileW) DeleteFileW = nullptr;
+    decltype(&::MoveFileExW) MoveFileExW = nullptr;
+    decltype(&::SetFileAttributesW) SetFileAttributesW = nullptr;
 };
 
 OrigFns g_orig;
@@ -251,17 +300,21 @@ void store_orig(void** field, void* value) { memcpy(field, &value, sizeof(void*)
 
 // ============================================================ thunk
 // 每个 thunk 的结构都一样：
-//   1) 开关关着 -> 直接转发（正常情况下这些槽根本没被改过，走不到这里）
+//   1) 两个开关都关 -> 直接转发（正常情况下这些槽根本没被改过，走不到这里）
 //   2) 原指针为空 -> 返回失败而不是空指针调用（正常不可能发生：install 保证
 //      "先拿到原函数指针，再改写槽"）
-//   3) 先转发，再取 GetLastError，再记日志，最后 SetLastError 还原 ——
+//   3) **先重写路径**（RwPath::apply），再把重写后的指针转发下去。命中与否都会
+//      走同一次原函数调用，游戏那一侧的入参缓冲一字不改（我们只读）。
+//   4) 先转发，再取 GetLastError，再记日志，最后 SetLastError 还原 ——
 //      日志内部的 CreateFileA/WriteFile/GetFinalPathNameByHandleW 会覆盖
 //      LastError，不还原就等于我们偷偷改了游戏看得见的状态。
+// 重写不算"多一条路径"：没命中（UNC/相对路径/表外盘符）时 apply 返回原指针，
+// 和从前完全一致。
 HANDLE WINAPI hook_CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
                                LPSECURITY_ATTRIBUTES lpSecurityAttributes,
                                DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes,
                                HANDLE hTemplateFile) {
-    if (!enabled()) {
+    if (!active()) {
         return g_orig.CreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
                                   dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
     }
@@ -270,11 +323,14 @@ HANDLE WINAPI hook_CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD 
         return INVALID_HANDLE_VALUE;
     }
     ReentryGuard guard;
-    const HANDLE h = g_orig.CreateFileW(lpFileName, dwDesiredAccess, dwShareMode,
+    // 路径重写：G:\x / G:/x -> 真实目录下的 x（见 drives.cpp）。不命中就原样转发。
+    RwPath rw;
+    const wchar_t* const name = rw.apply(lpFileName);
+    const HANDLE h = g_orig.CreateFileW(name, dwDesiredAccess, dwShareMode,
                                         lpSecurityAttributes, dwCreationDisposition,
                                         dwFlagsAndAttributes, hTemplateFile);
     const DWORD err = GetLastError();
-    if (guard.outermost()) {
+    if (tracing() && guard.outermost()) {
         char path[kPathU8Buf];
         if (!path_to_utf8(lpFileName, path, sizeof(path))) {
             snprintf(path, sizeof(path), "(路径转 UTF-8 失败)");
@@ -301,7 +357,7 @@ HANDLE WINAPI hook_CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD 
 HANDLE WINAPI hook_CreateFile2(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
                                DWORD dwCreationDisposition,
                                LPCREATEFILE2_EXTENDED_PARAMETERS pCreateExParams) {
-    if (!enabled()) {
+    if (!active()) {
         return g_orig.CreateFile2(lpFileName, dwDesiredAccess, dwShareMode, dwCreationDisposition,
                                   pCreateExParams);
     }
@@ -310,10 +366,12 @@ HANDLE WINAPI hook_CreateFile2(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD 
         return INVALID_HANDLE_VALUE;
     }
     ReentryGuard guard;
-    const HANDLE h = g_orig.CreateFile2(lpFileName, dwDesiredAccess, dwShareMode,
+    RwPath rw;
+    const wchar_t* const name = rw.apply(lpFileName);
+    const HANDLE h = g_orig.CreateFile2(name, dwDesiredAccess, dwShareMode,
                                         dwCreationDisposition, pCreateExParams);
     const DWORD err = GetLastError();
-    if (guard.outermost()) {
+    if (tracing() && guard.outermost()) {
         char path[kPathU8Buf];
         if (!path_to_utf8(lpFileName, path, sizeof(path))) {
             snprintf(path, sizeof(path), "(路径转 UTF-8 失败)");
@@ -339,7 +397,9 @@ HANDLE WINAPI hook_CreateFile2(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD 
 
 BOOL WINAPI hook_ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
                           LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped) {
-    if (!enabled()) {
+    // ReadFile 只拿 HANDLE，没有路径可重写 —— 这个钩子纯粹为了追踪。
+    // 重写模式（不追踪）下直接转发，不做任何额外动作。
+    if (!tracing()) {
         return g_orig.ReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead,
                                lpOverlapped);
     }
@@ -384,15 +444,16 @@ BOOL WINAPI hook_ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToR
 }
 
 DWORD WINAPI hook_GetFileAttributesW(LPCWSTR lpFileName) {
-    if (!enabled()) return g_orig.GetFileAttributesW(lpFileName);
+    if (!active()) return g_orig.GetFileAttributesW(lpFileName);
     if (!g_orig.GetFileAttributesW) {
         SetLastError(ERROR_INVALID_FUNCTION);
         return INVALID_FILE_ATTRIBUTES;
     }
     ReentryGuard guard;
-    const DWORD attrs = g_orig.GetFileAttributesW(lpFileName);
+    RwPath rw;
+    const DWORD attrs = g_orig.GetFileAttributesW(rw.apply(lpFileName));
     const DWORD err = GetLastError();
-    if (guard.outermost()) {
+    if (tracing() && guard.outermost()) {
         char path[kPathU8Buf];
         if (!path_to_utf8(lpFileName, path, sizeof(path))) {
             snprintf(path, sizeof(path), "(路径转 UTF-8 失败)");
@@ -415,15 +476,16 @@ DWORD WINAPI hook_GetFileAttributesW(LPCWSTR lpFileName) {
 
 BOOL WINAPI hook_GetFileAttributesExW(LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId,
                                       LPVOID lpFileInformation) {
-    if (!enabled()) return g_orig.GetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
+    if (!active()) return g_orig.GetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
     if (!g_orig.GetFileAttributesExW) {
         SetLastError(ERROR_INVALID_FUNCTION);
         return FALSE;
     }
     ReentryGuard guard;
-    const BOOL ok = g_orig.GetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
+    RwPath rw;
+    const BOOL ok = g_orig.GetFileAttributesExW(rw.apply(lpFileName), fInfoLevelId, lpFileInformation);
     const DWORD err = GetLastError();
-    if (guard.outermost()) {
+    if (tracing() && guard.outermost()) {
         char path[kPathU8Buf];
         if (!path_to_utf8(lpFileName, path, sizeof(path))) {
             snprintf(path, sizeof(path), "(路径转 UTF-8 失败)");
@@ -441,15 +503,16 @@ BOOL WINAPI hook_GetFileAttributesExW(LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS
 }
 
 HANDLE WINAPI hook_FindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW lpFindFileData) {
-    if (!enabled()) return g_orig.FindFirstFileW(lpFileName, lpFindFileData);
+    if (!active()) return g_orig.FindFirstFileW(lpFileName, lpFindFileData);
     if (!g_orig.FindFirstFileW) {
         SetLastError(ERROR_INVALID_FUNCTION);
         return INVALID_HANDLE_VALUE;
     }
     ReentryGuard guard;
-    const HANDLE h = g_orig.FindFirstFileW(lpFileName, lpFindFileData);
+    RwPath rw;
+    const HANDLE h = g_orig.FindFirstFileW(rw.apply(lpFileName), lpFindFileData);
     const DWORD err = GetLastError();
-    if (guard.outermost()) {
+    if (tracing() && guard.outermost()) {
         char path[kPathU8Buf];
         if (!path_to_utf8(lpFileName, path, sizeof(path))) {
             snprintf(path, sizeof(path), "(路径转 UTF-8 失败)");
@@ -471,17 +534,61 @@ HANDLE WINAPI hook_FindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW lpFindF
     return h;
 }
 
+// FindFirstFileExW：枚举的另一种入口（游戏可能用它按大小/名字过滤目录）。
+// 和 FindFirstFileW 一样只重写路径，转发原函数。
+HANDLE WINAPI hook_FindFirstFileExW(LPCWSTR lpFileName, FINDEX_INFO_LEVELS fInfoLevelId,
+                                    LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp,
+                                    LPVOID lpSearchFilter, DWORD dwAdditionalFlags) {
+    if (!active()) {
+        return g_orig.FindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp,
+                                       lpSearchFilter, dwAdditionalFlags);
+    }
+    if (!g_orig.FindFirstFileExW) {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return INVALID_HANDLE_VALUE;
+    }
+    ReentryGuard guard;
+    RwPath rw;
+    const HANDLE h = g_orig.FindFirstFileExW(rw.apply(lpFileName), fInfoLevelId, lpFindFileData,
+                                             fSearchOp, lpSearchFilter, dwAdditionalFlags);
+    const DWORD err = GetLastError();
+    if (tracing() && guard.outermost()) {
+        char path[kPathU8Buf];
+        if (!path_to_utf8(lpFileName, path, sizeof(path))) {
+            snprintf(path, sizeof(path), "(路径转 UTF-8 失败)");
+        }
+        char key[kPathU8Buf + 32];
+        snprintf(key, sizeof(key), "FindFirstFileExW|%s", path);
+        if (claim_line(key)) {
+            char res[64];
+            if (h == INVALID_HANDLE_VALUE || h == nullptr) {
+                snprintf(res, sizeof(res), "失败(无匹配)");
+            } else {
+                snprintf(res, sizeof(res), "HANDLE=0x%llX",
+                         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)));
+            }
+            emit("FindFirstFileExW", path, "枚举目录(Ex)", res, err);
+        }
+    }
+    SetLastError(err);
+    return h;
+}
+
 BOOL WINAPI hook_CopyFileW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName,
                            BOOL bFailIfExists) {
-    if (!enabled()) return g_orig.CopyFileW(lpExistingFileName, lpNewFileName, bFailIfExists);
+    if (!active()) return g_orig.CopyFileW(lpExistingFileName, lpNewFileName, bFailIfExists);
     if (!g_orig.CopyFileW) {
         SetLastError(ERROR_INVALID_FUNCTION);
         return FALSE;
     }
     ReentryGuard guard;
-    const BOOL ok = g_orig.CopyFileW(lpExistingFileName, lpNewFileName, bFailIfExists);
+    // 两个入参都是路径，都要重写（主机盘符上的复制：包目录 -> G:，或反过来）
+    RwPath rw_from, rw_to;
+    const wchar_t* const src_path = rw_from.apply(lpExistingFileName);
+    const wchar_t* const dst_path = rw_to.apply(lpNewFileName);
+    const BOOL ok = g_orig.CopyFileW(src_path, dst_path, bFailIfExists);
     const DWORD err = GetLastError();
-    if (guard.outermost()) {
+    if (tracing() && guard.outermost()) {
         char from[kPathU8Buf];
         char to[kPathU8Buf];
         if (!path_to_utf8(lpExistingFileName, from, sizeof(from))) {
@@ -497,6 +604,170 @@ BOOL WINAPI hook_CopyFileW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName,
             snprintf(res, sizeof(res), ok ? "成功" : "失败");
             emit("CopyFileW", path, "复制", res, err);
         }
+    }
+    SetLastError(err);
+    return ok;
+}
+
+// ------------------------------------------------ 编码转换（给 ANSI 变体的钩子用）
+// ACP -> wide / wide -> ACP。用 CP_ACP 是因为 GetFileAttributesA 的入参就是 ACP；
+// 任何一步失败都让调用方"原样转发"，绝不用猜出来的路径去开文件。
+bool acp_to_wide(const char* s, std::wstring& out) {
+    if (s == nullptr) return false;
+    const int n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    if (n <= 0) return false;
+    out.assign(static_cast<size_t>(n), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, s, -1, out.data(), n) != n) return false;
+    out.resize(static_cast<size_t>(n - 1));
+    return true;
+}
+
+bool wide_to_acp(const std::wstring& s, std::string& out) {
+    const int n = WideCharToMultiByte(CP_ACP, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return false;
+    out.assign(static_cast<size_t>(n), '\0');
+    if (WideCharToMultiByte(CP_ACP, 0, s.c_str(), -1, out.data(), n, nullptr, nullptr) != n) {
+        return false;
+    }
+    out.resize(static_cast<size_t>(n - 1));
+    return true;
+}
+
+// 写侧 / 属性 / ANSI 变体的统一日志（只在 XBGTASIX_FSTRACE=1 时写，且逐路径去重）
+void emit_simple(const char* api, const wchar_t* path, const char* what, BOOL ok, DWORD err) {
+    char p[kPathU8Buf];
+    if (!path_to_utf8(path, p, sizeof(p))) snprintf(p, sizeof(p), "(路径转 UTF-8 失败)");
+    char key[kPathU8Buf + 32];
+    snprintf(key, sizeof(key), "%s|%s", api, p);
+    if (claim_line(key)) emit(api, p, what, ok ? "成功" : "失败", err);
+}
+
+// ============================================================ 写侧与 ANSI 变体
+// 任务书第一步只拦了读（CreateFileW / GetFileAttributes* / FindFirstFile*），那一轮已经
+// 跑到 game+0x247AF2D。这里补第二步：游戏导入表里真实存在的写侧与 ANSI 入口。
+// 全部只做"重写路径 -> 转发"，表外路径（C:/D:/相对/UNC）一个字节都不动。
+// 不拦 CreateFileMappingW：它收的是 HANDLE，不是路径，天然不需要重写。
+DWORD WINAPI hook_GetFileAttributesA(LPCSTR lpFileName) {
+    if (!active()) return g_orig.GetFileAttributesA(lpFileName);
+    if (!g_orig.GetFileAttributesA) {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return INVALID_FILE_ATTRIBUTES;
+    }
+    ReentryGuard guard;
+    // ACP -> wide -> 重写 -> ACP。任何一步失败就原样转发（宁可 404 也不猜路径）。
+    std::wstring wide, rewritten;
+    std::string narrow;
+    const char* use = lpFileName;
+    if (acp_to_wide(lpFileName, wide) && xbgtasix::rewrite_console_path(wide.c_str(), rewritten) &&
+        wide_to_acp(rewritten, narrow)) {
+        use = narrow.c_str();
+    }
+    const DWORD attrs = g_orig.GetFileAttributesA(use);
+    const DWORD err = GetLastError();
+    if (tracing() && guard.outermost()) {
+        char p[kPathU8Buf];
+        if (lpFileName == nullptr || !path_to_utf8_ansi(lpFileName, p, sizeof(p))) {
+            snprintf(p, sizeof(p), "(ANSI 路径)");
+        }
+        char key[kPathU8Buf + 32];
+        snprintf(key, sizeof(key), "GetFileAttributesA|%s", p);
+        if (claim_line(key)) {
+            char res[64];
+            if (attrs == INVALID_FILE_ATTRIBUTES) {
+                snprintf(res, sizeof(res), "失败(INVALID_FILE_ATTRIBUTES)");
+            } else {
+                snprintf(res, sizeof(res), "属性=0x%lX", static_cast<unsigned long>(attrs));
+            }
+            emit("GetFileAttributesA", p, "查询属性(ANSI)", res, err);
+        }
+    }
+    SetLastError(err);
+    return attrs;
+}
+
+BOOL WINAPI hook_CreateDirectoryW(LPCWSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    if (!active()) return g_orig.CreateDirectoryW(lpPathName, lpSecurityAttributes);
+    if (!g_orig.CreateDirectoryW) {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return FALSE;
+    }
+    ReentryGuard guard;
+    RwPath rw;
+    const BOOL ok = g_orig.CreateDirectoryW(rw.apply(lpPathName), lpSecurityAttributes);
+    const DWORD err = GetLastError();
+    if (tracing() && guard.outermost()) emit_simple("CreateDirectoryW", lpPathName, "建目录", ok, err);
+    SetLastError(err);
+    return ok;
+}
+
+BOOL WINAPI hook_RemoveDirectoryW(LPCWSTR lpPathName) {
+    if (!active()) return g_orig.RemoveDirectoryW(lpPathName);
+    if (!g_orig.RemoveDirectoryW) {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return FALSE;
+    }
+    ReentryGuard guard;
+    RwPath rw;
+    const BOOL ok = g_orig.RemoveDirectoryW(rw.apply(lpPathName));
+    const DWORD err = GetLastError();
+    if (tracing() && guard.outermost()) emit_simple("RemoveDirectoryW", lpPathName, "删目录", ok, err);
+    SetLastError(err);
+    return ok;
+}
+
+BOOL WINAPI hook_DeleteFileW(LPCWSTR lpFileName) {
+    if (!active()) return g_orig.DeleteFileW(lpFileName);
+    if (!g_orig.DeleteFileW) {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return FALSE;
+    }
+    ReentryGuard guard;
+    RwPath rw;
+    const BOOL ok = g_orig.DeleteFileW(rw.apply(lpFileName));
+    const DWORD err = GetLastError();
+    if (tracing() && guard.outermost()) emit_simple("DeleteFileW", lpFileName, "删文件", ok, err);
+    SetLastError(err);
+    return ok;
+}
+
+BOOL WINAPI hook_SetFileAttributesW(LPCWSTR lpFileName, DWORD dwFileAttributes) {
+    if (!active()) return g_orig.SetFileAttributesW(lpFileName, dwFileAttributes);
+    if (!g_orig.SetFileAttributesW) {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return FALSE;
+    }
+    ReentryGuard guard;
+    RwPath rw;
+    const BOOL ok = g_orig.SetFileAttributesW(rw.apply(lpFileName), dwFileAttributes);
+    const DWORD err = GetLastError();
+    if (tracing() && guard.outermost()) {
+        emit_simple("SetFileAttributesW", lpFileName, "设属性", ok, err);
+    }
+    SetLastError(err);
+    return ok;
+}
+
+BOOL WINAPI hook_MoveFileExW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, DWORD dwFlags) {
+    if (!active()) return g_orig.MoveFileExW(lpExistingFileName, lpNewFileName, dwFlags);
+    if (!g_orig.MoveFileExW) {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return FALSE;
+    }
+    ReentryGuard guard;
+    RwPath rw_from, rw_to;   // 两个入参都是路径
+    const BOOL ok = g_orig.MoveFileExW(rw_from.apply(lpExistingFileName),
+                                       rw_to.apply(lpNewFileName), dwFlags);
+    const DWORD err = GetLastError();
+    if (tracing() && guard.outermost()) {
+        char from[kPathU8Buf];
+        char to[kPathU8Buf];
+        if (!path_to_utf8(lpExistingFileName, from, sizeof(from))) snprintf(from, sizeof(from), "(?)");
+        if (!path_to_utf8(lpNewFileName, to, sizeof(to))) snprintf(to, sizeof(to), "(?)");
+        char path[2 * kPathU8Buf + 8];
+        snprintf(path, sizeof(path), "%s -> %s", from, to);
+        char key[2 * kPathU8Buf + 40];
+        snprintf(key, sizeof(key), "MoveFileExW|%s", path);
+        if (claim_line(key)) emit("MoveFileExW", path, "移动/改名", ok ? "成功" : "失败", err);
     }
     SetLastError(err);
     return ok;
@@ -526,8 +797,24 @@ Target g_targets[] = {
      reinterpret_cast<void**>(&g_orig.GetFileAttributesExW), {}, 0},
     {"FindFirstFileW", reinterpret_cast<void*>(&hook_FindFirstFileW),
      reinterpret_cast<void**>(&g_orig.FindFirstFileW), {}, 0},
+    {"FindFirstFileExW", reinterpret_cast<void*>(&hook_FindFirstFileExW),
+     reinterpret_cast<void**>(&g_orig.FindFirstFileExW), {}, 0},
     {"CopyFileW", reinterpret_cast<void*>(&hook_CopyFileW),
      reinterpret_cast<void**>(&g_orig.CopyFileW), {}, 0},
+    // 写侧 / 属性 / ANSI 变体（第二步）。导入表里没有的会被 install 静默跳过，
+    // 所以这里多写几条不影响没用到它们的程序。
+    {"GetFileAttributesA", reinterpret_cast<void*>(&hook_GetFileAttributesA),
+     reinterpret_cast<void**>(&g_orig.GetFileAttributesA), {}, 0},
+    {"CreateDirectoryW", reinterpret_cast<void*>(&hook_CreateDirectoryW),
+     reinterpret_cast<void**>(&g_orig.CreateDirectoryW), {}, 0},
+    {"RemoveDirectoryW", reinterpret_cast<void*>(&hook_RemoveDirectoryW),
+     reinterpret_cast<void**>(&g_orig.RemoveDirectoryW), {}, 0},
+    {"DeleteFileW", reinterpret_cast<void*>(&hook_DeleteFileW),
+     reinterpret_cast<void**>(&g_orig.DeleteFileW), {}, 0},
+    {"MoveFileExW", reinterpret_cast<void*>(&hook_MoveFileExW),
+     reinterpret_cast<void**>(&g_orig.MoveFileExW), {}, 0},
+    {"SetFileAttributesW", reinterpret_cast<void*>(&hook_SetFileAttributesW),
+     reinterpret_cast<void**>(&g_orig.SetFileAttributesW), {}, 0},
 };
 
 constexpr size_t kTargetCount = sizeof(g_targets) / sizeof(g_targets[0]);
@@ -822,8 +1109,8 @@ void recheck_slots() {
 }  // namespace
 
 void install_if_enabled() {
-    // 开关关着就什么都不做：不读 PE、不改内存、不写日志。
-    if (!enabled()) return;
+    // 追踪和路径重写都没开就什么都不做：不读 PE、不改内存、不写日志。
+    if (!active()) return;
     static bool done = false;   // 幂等：DllMain 理论上只来一次，复检路径也走这里
     if (done) return;
     done = true;
@@ -831,7 +1118,7 @@ void install_if_enabled() {
 }
 
 void recheck_if_needed() {
-    if (!enabled()) return;
+    if (!active()) return;
     recheck_slots();
 }
 

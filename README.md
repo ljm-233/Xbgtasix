@@ -139,7 +139,7 @@ python3 tools/probe_at.py 56EBA8 56EBBD  # 在游戏的某个 RVA 上装"眼睛"
 | 图形栈 | 桌面 D3D12 | **必须**走 dxvk + vkd3d-proton（`run_wine.sh` 已配）；用 wine builtin 的 `dxgi`/`wined3d` 会在**导入阶段**就 `0xC0000135` |
 | 适配器信息 | 真卡 | 随环境变：给对栈时报真卡但不保证厂商号（实测把 NVIDIA 报成 `1002`），builtin 路径下报占位卡 —— **别只信 DXGI**，看 `doctor` 的 `真实 GPU` 行 |
 | 进度 | 到 `game+0x247AF2D`（64 MiB 断言） | 同样到 `game+0x247AF2D`（**6868 ms / 2577 行**） |
-| 盘符 | 平台挂载 | **只能来自 `$WINEPREFIX/dosdevices/` 符号链接**，且必须在起进程前建；`DefineDosDeviceW` 在 Wine 下"返回成功但不生效"（三种写法 + 注册表都不行） |
+| 盘符 | 平台挂载 | **不必再造盘符**：shim 在文件 API 转发前把 `G:\...` 换成真实目录（[path-rewrite](docs/path-rewrite.md)，默认开，`g:`/`t:` 符号链接移走也能到 0x247AF2D）。回退模式才需要 `$WINEPREFIX/dosdevices/` 符号链接（`XBGTASIX_PATH_REWRITE=0`） |
 | 宿主差异 | — | Wine 的 `GameInputCreate` 在没设 `SteamGameId` 时返回 `E_NOTIMPL`（`run_wine.sh` 已带）；Wine 不投递硬件断点（调试走 int3 探针） |
 | 主机检测 | — | `XBGTASIX_PLATFORM=windows\|wine` 可钉死；不设则探测 `ntdll!wine_get_version` |
 

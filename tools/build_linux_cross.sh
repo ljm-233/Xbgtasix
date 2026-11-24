@@ -76,7 +76,11 @@ for m in AcpHal xapu chad xg_xs XCRDAPI; do
     xg_xs)   SRC=src/console_hw/xg_xs.cpp ;;
     XCRDAPI) SRC=src/console_hw/xcrdapi.cpp ;;
   esac
-  "$CXX" "${FLAGS[@]}" -shared "$SRC" src/trace.cpp "$OUT/$m.def" \
+  # XCRDAPI 自己会 CreateFileW（OpenFile 收到的是游戏的 G:\... 路径），
+  # 而 xmem 的 IAT 钩子管不到别的 DLL —— 所以把路径重写表（drives.cpp）也编进它。
+  EXTRA=()
+  [ "$m" = "XCRDAPI" ] && EXTRA=(src/fstrace/drives.cpp)
+  "$CXX" "${FLAGS[@]}" -shared "$SRC" src/trace.cpp "${EXTRA[@]}" "$OUT/$m.def" \
       -o "$OUT/$m.dll" -Wl,--out-implib,"$OUT/lib$m.dll.a" || fail=1
 done
 

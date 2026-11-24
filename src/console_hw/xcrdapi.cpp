@@ -785,6 +785,15 @@ std::atomic<uint32_t> g_staging_buffer_size{0};
 // 失败不写死结论，避免日志里出现误导性"文件不存在"）。
 HANDLE open_path_candidates(const std::wstring& wanted, std::wstring* used) {
     std::vector<std::wstring> cands;
+    // 第 0 级：**路径重写**。游戏会把 "G:\appdata0.rpf" 这种主机盘符路径直接交给这个
+    // 工厂（实测日志：OpenFile(slot4) 'G:\appdata0.rpf' hr=0x80070002）。xmem 的 IAT
+    // 钩子只改**主 exe** 的导入表，管不到我们自己的 DLL，所以这一层必须自己查一次表：
+    //   G:/T:（以及 XBGTASIX_DRIVE_* 指定的盘符）-> 真实目录。
+    // 不命中（相对路径 / UNC / 表外盘符）就一条都不加，行为与从前完全一致。
+    {
+        std::wstring rewritten;
+        if (::xbgtasix::rewrite_console_path(wanted.c_str(), rewritten)) cands.push_back(rewritten);
+    }
     cands.push_back(wanted);
     const char* root_ansi = ::xbgtasix::game_root();
     if (root_ansi != nullptr && root_ansi[0] != '\0') {

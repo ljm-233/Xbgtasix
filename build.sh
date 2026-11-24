@@ -230,8 +230,12 @@ for m in AcpHal xapu chad xg_xs XCRDAPI; do
     exit 1
   fi
   echo "== $m.dll ($SRC)"
+  # XCRDAPI 要自己开文件（IDStorageFactoryX::OpenFile 拿到的就是游戏的 G:\... 路径），
+  # 而 xmem 的 IAT 钩子管不到别的 DLL，所以它的路径重写表也编进来（drives.cpp）。
+  EXTRA=()
+  [ "$m" = "XCRDAPI" ] && EXTRA=(src/fstrace/drives.cpp)
   "$CXX" "${FLAGS[@]}" "${LDFLAGS_STATIC[@]}" -shared \
-      "$SRC" src/trace.cpp \
+      "$SRC" src/trace.cpp "${EXTRA[@]}" \
       -o "$OUT/$m.dll" -Wl,--out-implib,"$OUT/lib$m.dll.a" || exit 1
 done
 
