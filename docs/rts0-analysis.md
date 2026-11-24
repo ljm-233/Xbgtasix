@@ -648,3 +648,92 @@ cs_49  lines=3900  createHandle=5  rawLoad=3   rawStore=10  cbuffer=4
 1. 任何人想从 `/tmp/vm/shaders{,2}` 里捞 DXIL 去反汇编，**捞不到**（我试过，llvm-dis 直接
    "Invalid bitcode signature"）；要么解 `FSSM`（还没解），要么从他们自己的编译路径拿
 2. §12 的 XDAT 对比结论不受影响（比的是条目表与尺寸，不是 bitcode 内容）
+
+---
+
+## 17. 2026-11-25：`dxil-ms-xb2` 单独立论 —— 事实成立、**作为解释被证伪**
+
+§15 只把 "53/53 是 `dxil-ms-xb2`、句柄是 `{ ptr }`" 当事实报了出来。这一节把它当**假说**来打，
+因为"triple 是 xb2 所以驱动不支持"是从事实跳到解释，中间那一步没证据。
+
+### 17.1 已证的事实（可复现）
+
+| 事实 | 证据 |
+|---|---|
+| 53/53 模块的 `target triple` 是 `dxil-ms-xb2` | `llvm-bcanalyzer -dump` 的 `TRIPLE` 记录逐字节解码，如 `100,120,105,108,45,109,115,45,120,98,50` → `"dxil-ms-xb2"`；`llvm-dis` 出的 `.ll` 第一行同样 |
+| 53/53 的 `%dx.types.Handle` 是 `type { ptr }` | 同上，`.ll` 里 `%dx.types.Handle = type { ptr }` |
+| 桌面 DXIL 的句柄是 `{ i32,i32,i32,i32 }` | 公开的 DXC 输出形态；GTA6 这批不是 |
+
+这两条说明的是**"这批输入不是桌面输入"**，仅此而已。
+
+### 17.2 三条证伪
+
+**证伪 A：`cs_48`（编得过）与 `cs_49`（编不过）的 triple 完全相同。**
+
+```
+cs_48_len4500.bin    llvm-dis=ok   TRIPLE='dxil-ms-xb2'
+cs_49_len38248.bin   llvm-dis=ok   TRIPLE='dxil-ms-xb2'
+cs_01_len5136.bin    llvm-dis=ok   TRIPLE='dxil-ms-xb2'
+cs_53_len5284.bin    llvm-dis=ok   TRIPLE='dxil-ms-xb2'
+```
+
+同一 triple、一个编得过一个编不过 ⇒ **triple 不是"编得过/编不过"的判别量**。锅回到程序块里
+（§15.3 那份指纹就是为这一步备的）。
+
+**证伪 B：Intel 在独立进程里编过了 48/53，而这 48 个全都是 xb2。**
+如果"驱动不支持 xb2"是通则，48 个也不该过。所以"xb2 ⇒ 编不过"作为通则不成立。
+
+**证伪 C：161 个日志里没有任何驱动对 triple / 句柄形态的抱怨。**
+```
+grep -l "xb2\|dxil-ms\|triple" build/*.log   → 唯一命中 build/trn.log，
+                                               而那是十六进制巧合（偏移 0xb2000 里的 "xb2"）
+grep -ho "0x887A000[0-9A-F]\|E_INVALIDARG\|DXGI_ERROR_[A-Z_]*" → 只有 E_INVALIDARG ×256、0x887A0005 ×30
+```
+没有 "unsupported triple"、没有 "memory based descriptor"、没有 validator 报错文本。
+也就是说：**"驱动抱怨过 xb2"这条证据根本不存在**（不是我没找到，是日志里就没有）。
+
+### 17.3 结论怎么用
+
+- `dxil-ms-xb2` + `{ ptr }`：**当定性说明用**（"这不是给桌面驱动写的模块"），可以写进结论
+- **不要**当"某几个 shader 崩的原因"用 —— 三条证伪都指向程序块或进程内条件
+- 真要继续往下，判别量只有两个候选：①程序块内容（cs_49 的 `rawBufferLoad.i64 ×48` + `tertiary.*` 密集）
+  ②§30 的四条单变量（`*e` 写回 / 16 GiB 预留 / 描述符 arena / 槽 133）
+
+### 17.4 交叉：victory 的 `host.dxil` 是**桌面 triple**，主机 ABI 的解释套不过去
+
+用同一套 `llvm-bcanalyzer -dump` 解 `TRIPLE` 记录（`host.dxil` 是 DXBC 容器，`DXIL` 段 `+24` 起是 bitcode）：
+
+```
+/tmp/vm/shaders2/compute-5d113aa6830760b6.host.dxil  →  triple = "dxil-ms-dx"
+240 个 host.dxil 全查：triple 全是 dxil-ms-dx，没有一个 xb2
+```
+
+所以：**他们那份崩溃的 host DXIL 是桌面目标模块**，"memory-based ABI / xb2"这条解释**不适用于 victory**，
+两边必须分开归因（他们那条是 typed UAV 类型推导，我们这条是主机 ABI 输入）。
+
+### 17.5 顺带查出的一个真实畸形（给他们，不是判别量）
+
+240 个 `host.dxil` 的 datalayout 全部是：
+
+```
+e-m:e-p:32:32-i1:32-i8:32-i16:32-i32:32-i64:64-f16:32-f32:32-f64:64-n8:16:32:64
+```
+
+注意 `i8:32 / i16:32 / f16:32`（GTA6 那批是正常的 `i8:8 / i16:16 / f16:16`）。
+**LLVM 23 直接拒绝这个 datalayout**，最小复现：
+
+```llvm
+; a.ll
+target datalayout = "e-m:e-p:32:32-i1:32-i8:32-i16:32-i32:32-i64:64-f16:32-f32:32-f64:64-n8:16:32:64"
+define void @f(){ret void}
+```
+```
+$ llvm-as a.ll -o /dev/null
+a.ll:1:21: error: i8 must be 8-bit aligned
+```
+这就是 `llvm-dis` 读不了他们 host 模块的原因（`bcanalyzer` 能读块结构，`llvm-dis` 在 datalayout 上炸）。
+
+判读：
+- **不是判别量** —— 240/240 都有，而只崩了一个（纪律同 RTS0：全体一致的性质解释不了个别失败）
+- **是真畸形** —— 任何走 LLVM `DataLayout` 前端的编译路径都会在这一行报错/中止；"校验通过"这类结论
+  在修掉它之前都值得复核一遍
