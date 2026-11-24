@@ -515,42 +515,73 @@ inline void install_g_write_watchpoint() {
 // ---------------------------------------------------------------------------
 // 用内存 patch 取代"异常里改 Rip"。
 //
-// 之前在 VEH 里对 game+0x247AF2D 的 int3 做 `Rip += 1` 跳到下一跳。虽然能把
-// 断言变成无害，但它走的是**异常路径**：可能与正常执行路径在栈/不变量处理上不同，
-// 实测在 48 个 PSO 之后出现 0xC0000409（fail-fast，栈检查失败）。
+// 把指定的 int3（0xCC）就地改成 nop（0x90）：检查照常执行、断言不再触发，
+// 后续指令一个字节都不偏移，也不走异常路径。
 //
-// 更干净的做法是把那条 `int3`（0xCC）就地改成 `nop`（0x90）：
-// 检查照常执行、断言不再触发，后续指令一个字节都不偏移。
-// 开关：XBGTASIX_PATCH_ASSERT=247AF2D（或 1）。
+// 支持多个地址（逗号分隔），因为这类"内层函数返回 false -> 外层断言"是成对出现的：
+//   内层 0x247AF2D（2 MiB 跨度不变量）
+//   外层 0x19F4F58（`test al,al / jne ok / int3`，检查内层的返回值）
+// 开关：XBGTASIX_PATCH_ASSERT=247AF2D,19F4F58
 // ---------------------------------------------------------------------------
 inline void patch_game_assert() {
-    char env[64] = {0};
+    char env[128] = {0};
     if (GetEnvironmentVariableA("XBGTASIX_PATCH_ASSERT", env, sizeof(env)) == 0) return;
     if (env[0] == '0') return;
-    if (env[0] != '1' && std::strstr(env, "247AF2D") == nullptr) return;
-
     HMODULE exe = GetModuleHandleW(nullptr);
     if (!exe) return;
-    auto* target = reinterpret_cast<unsigned char*>(reinterpret_cast<char*>(exe) + 0x247AF2DULL);
-    DWORD old_protect = 0;
-    if (!VirtualProtect(target, 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
-        logf("[xbgtasix] patch 断言：VirtualProtect 失败 err=%lu", GetLastError());
-        return;
-    }
-    const unsigned char original = *target;
-    if (original != 0xCC) {
+    auto base = reinterpret_cast<unsigned long long>(exe);
+
+    // 逐项解析（逗号/分号/空格分隔）；'1' 单独出现表示用默认列表。
+    const char* p = env;
+    char token[32] = {0};
+    int patched = 0, already = 0, missing = 0;
+    auto handle_one = [&](const char* tok) {
+        unsigned long long rva = 0;
+        if (tok[0] == '1' && tok[1] == '\0') {
+            rva = 0x247AF2DULL;   // 默认：内层那条
+        } else if (tok[0] == '0' && tok[1] == 'x') {
+            rva = std::strtoull(tok, nullptr, 16);
+        } else {
+            rva = std::strtoull(tok, nullptr, 16);
+        }
+        if (!rva) return;
+        auto* target = reinterpret_cast<unsigned char*>(base + rva);
+        DWORD old_protect = 0;
+        if (!VirtualProtect(target, 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            logf("[xbgtasix] patch 断言：0x%llX 处 VirtualProtect 失败 err=%lu", rva,
+                 GetLastError());
+            return;
+        }
+        if (*target != 0xCC) {
+            DWORD tmp = 0;
+            VirtualProtect(target, 1, old_protect, &tmp);
+            if (*target == 0x90) { ++already; }
+            else {
+                ++missing;
+                logf("[xbgtasix] patch 断言：0x%llX 处不是 int3（实际 0x%02X），跳过", rva,
+                     static_cast<unsigned>(*target));
+            }
+            return;
+        }
+        *target = 0x90;
         DWORD tmp = 0;
         VirtualProtect(target, 1, old_protect, &tmp);
-        logf("[xbgtasix] patch 断言：game+0x247AF2D 处不是 int3（实际 0x%02X），跳过",
-             static_cast<unsigned>(original));
-        return;
+        FlushInstructionCache(GetCurrentProcess(), target, 1);
+        ++patched;
+        logf("[xbgtasix] ★ 已把 game+0x%llX 的 int3 patch 成 nop", rva);
+    };
+    while (*p) {
+        if (*p == ',' || *p == ';' || *p == ' ') {
+            if (token[0]) { handle_one(token); token[0] = 0; }
+        } else if (static_cast<std::size_t>(p - env) < sizeof(env) - 1) {
+            const std::size_t n = std::strlen(token);
+            if (n + 1 < sizeof(token)) { token[n] = *p; token[n + 1] = 0; }
+        }
+        ++p;
     }
-    *target = 0x90;   // int3 -> nop
-    DWORD tmp = 0;
-    VirtualProtect(target, 1, old_protect, &tmp);
-    FlushInstructionCache(GetCurrentProcess(), target, 1);
-    logf("[xbgtasix] ★ 已把 game+0x247AF2D 的 int3(0xCC) patch 成 nop(0x90)"
-         "（XBGTASIX_PATCH_ASSERT）—— 检查照常执行、断言不再触发，无异常路径副作用");
+    if (token[0]) handle_one(token);
+    logf("[xbgtasix] patch 断言汇总：新 patch %d 处，已是 nop %d 处，非 int3 %d 处",
+         patched, already, missing);
 }
 
 void maybe_install_veh() {
