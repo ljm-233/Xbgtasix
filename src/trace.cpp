@@ -343,6 +343,35 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
             logf("[xbgtasix]   陷阱前 rsi=0x%llX rcx=0x%llX -> 用 rcx 恢复 rsi 并跳到 +0x247AF2E",
                  static_cast<unsigned long long>(info->ContextRecord->Rsi),
                  static_cast<unsigned long long>(info->ContextRecord->Rcx));
+            // 可选实验：给游戏那块"瞬时块"播种（g_1475E6FF0 = game+0x75E6FF0）。
+            // 目的只是测试"释放路径是否只缺一个非空基址"，不是修复：
+            // 守卫式里 g 是加项，播种不能让它通过（已用算术证明），只能让跳过守卫后的
+            // 释放路径有东西可用。默认关闭，必须显式点名。
+            {
+                char tb[32] = {0};
+                if (GetEnvironmentVariableA("XBGTASIX_TRANSIENT_BLOCK", tb, sizeof(tb)) > 0 &&
+                    tb[0] == '1') {
+                    const unsigned long long base =
+                        reinterpret_cast<unsigned long long>(addr) - rva;
+                    auto* g = reinterpret_cast<unsigned long long*>(base + 0x75E6FF0);
+                    MEMORY_BASIC_INFORMATION gm{};
+                    if (VirtualQuery(g, &gm, sizeof(gm)) && gm.State == MEM_COMMIT &&
+                        !(gm.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+                        if (*g == 0) {
+                            void* blk = VirtualAlloc(nullptr, 2u << 20, MEM_COMMIT | MEM_RESERVE,
+                                                     PAGE_READWRITE);
+                            *g = reinterpret_cast<unsigned long long>(blk);
+                            logf("[xbgtasix] 实验：已为瞬时块播种 g=%p（2 MiB，仅测试释放路径）",
+                                 blk);
+                        } else {
+                            logf("[xbgtasix] 实验：g 已非空（0x%llX），不覆盖",
+                                 static_cast<unsigned long long>(*g));
+                        }
+                    } else {
+                        logf("[xbgtasix] 实验：g 所在页不可读，放弃播种");
+                    }
+                }
+            }
             info->ContextRecord->Rsi = info->ContextRecord->Rcx;
             info->ContextRecord->Rip = reinterpret_cast<unsigned long long>(addr) - rva + 0x247AF2E;
             return EXCEPTION_CONTINUE_EXECUTION;
