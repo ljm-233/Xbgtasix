@@ -250,6 +250,20 @@ __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, 
                            "%llX %llX %llX %llX %llX %llX %llX %llX",
                            config, head[0], head[1], head[2], head[3], head[4], head[5], head[6],
                            head[7]);
+            // 逐项走 4 条 32 字节记录，看是不是 {va, flag/count, next, pad} 的形状
+            for (int i = 0; i < 3; ++i) {
+                auto* e = reinterpret_cast<const unsigned long long*>(head[i]);
+                MEMORY_BASIC_INFORMATION m3{};
+                if (e && VirtualQuery(reinterpret_cast<LPCVOID>(head[i]), &m3, sizeof(m3)) &&
+                    m3.State == MEM_COMMIT && !(m3.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+                    for (int k = 0; k < 4; ++k) {
+                        xbgtasix::logf("[d3d12_xs]   逐项 config[%d][%d] @%p: va=0x%llX f=0x%llX "
+                                       "next=0x%llX pad=0x%llX", i, k,
+                                       static_cast<const void*>(e + k * 4), e[k * 4], e[k * 4 + 1],
+                                       e[k * 4 + 2], e[k * 4 + 3]);
+                    }
+                }
+            }
             // 跟随第一层指针（前 3 个），每个 dump 32 字节 —— 看它到底要注册什么区间
             for (int i = 0; i < 3; ++i) {
                 auto* q = reinterpret_cast<const unsigned long long*>(head[i]);

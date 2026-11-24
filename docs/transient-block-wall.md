@@ -187,3 +187,54 @@ __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, 
 4. 复跑，观察 `g_1475E6FF0` 是否开始被写入
 
 这条线索比"补瞬时块基址"健康得多：它在**修真实的语义**，不是掩盖不变量。
+
+## 9. 2026-11-24 追加：config 不是统一的区间数组
+
+按 32 字节步长逐项 dump 后，形状被证伪：
+
+```
+config[0][0]: va=0x8000000100000000 f=0x1 next=0x...  pad=0x0     <- 像 {va, flag, ptr, 0}
+config[0][1]: va=0x11 ...
+config[1][0]: va=0x8000000000000000 f=0xE00E1EE0CF0E1A1 ...
+config[1][3]: va=0x735F656D61672F2E ...                            <- 这是 UTF-16 文本！
+```
+
+把 `config[1]` 那组 qword 按 UTF-16LE 解出来，是可辨认的**模块路径片段**：
+
+```
+"Windows\ApiPortectio..."        (疑似 Windows\ApiProtection\...)
+"./game_scarlett_master.exe" 的片段
+```
+
+结论：
+
+1. `config` 里**混着两类内容**：`0x8000000000000000` 基址的主机 GPU VA，
+   以及模块路径字符串。所以它不是"统一长度的区间数组"。
+2. 我按 32 字节步长遍历的假设**错误**，读出来的"记录"其实是相邻的不同数据。
+3. 要正确解析，需要 `D3D12ConfigureVirtualMemoryX` 的**结构定义**：
+   优先查 GDK 头文件（`D:/GTA6/gdk/include_clean`）里是否已有该类型；
+   其次用"长度字段 + 指针链"试探（每次只信任能在两个指针处自洽的假设）。
+
+### 修正后的下一步
+
+1. **先在 GDK 头里找结构定义**（`grep -rn ConfigureVirtualMemory`）—— 有定义就不用猜
+2. 若头里没有，改成"只读第一层 64 字节 + 校验"的保守进程：
+   不假设步长，只记录 `(va, 0x8000... 前缀)` 的项，作为后续登记表的种子
+3. 登记表本身的实现（GPU VA → 区间）可以**独立于结构解析**先做：
+   `D3D12ConfigureVirtualMemoryX` 把能识别的 VA 端点记进表，
+   `XMemVirtualQuery` 能查到；结构解析清楚后再补全字段语义
+
+### 已有文档里的旁证（重要）
+
+`docs/leonida-crossref.md:138-146` 早就记过一条相关事实：
+
+> 标题于 `game+0x1E1D01B` 触发 int3，所属函数只引用两个导入
+> `d3d12_xs.dll!D3D12ConfigureVirtualMemoryX` 与 `xmem.dll!XMemVirtualAlloc`（后者 6 次）。
+> **`D3D12ConfigureVirtualMemoryX` 返回之后紧跟的断言对返回值和分配结果有硬要求，
+> 我们现在"记日志 + 返回 S_OK"是恰好没炸，不是对了。**
+
+这与本轮的观察互相印证：该函数的**返回值**和它之后那次分配的**结果**都被游戏严格检查，
+所以"空实现 + S_OK"是当前一切诡异路径的可能源头之一。
+
+补充事实：GDK 头文件（`D:/GTA6/gdk/include_clean`）里**没有** `ConfigureVirtualMemory`
+的结构定义，参考实现也没有实现它 —— 结构与语义只能靠真机取证。
