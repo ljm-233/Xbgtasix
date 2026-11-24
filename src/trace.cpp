@@ -512,6 +512,47 @@ inline void install_g_write_watchpoint() {
          static_cast<unsigned long long>(ctx.Dr7));
 }
 
+// ---------------------------------------------------------------------------
+// 用内存 patch 取代"异常里改 Rip"。
+//
+// 之前在 VEH 里对 game+0x247AF2D 的 int3 做 `Rip += 1` 跳到下一跳。虽然能把
+// 断言变成无害，但它走的是**异常路径**：可能与正常执行路径在栈/不变量处理上不同，
+// 实测在 48 个 PSO 之后出现 0xC0000409（fail-fast，栈检查失败）。
+//
+// 更干净的做法是把那条 `int3`（0xCC）就地改成 `nop`（0x90）：
+// 检查照常执行、断言不再触发，后续指令一个字节都不偏移。
+// 开关：XBGTASIX_PATCH_ASSERT=247AF2D（或 1）。
+// ---------------------------------------------------------------------------
+inline void patch_game_assert() {
+    char env[64] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_PATCH_ASSERT", env, sizeof(env)) == 0) return;
+    if (env[0] == '0') return;
+    if (env[0] != '1' && std::strstr(env, "247AF2D") == nullptr) return;
+
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (!exe) return;
+    auto* target = reinterpret_cast<unsigned char*>(reinterpret_cast<char*>(exe) + 0x247AF2DULL);
+    DWORD old_protect = 0;
+    if (!VirtualProtect(target, 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        logf("[xbgtasix] patch 断言：VirtualProtect 失败 err=%lu", GetLastError());
+        return;
+    }
+    const unsigned char original = *target;
+    if (original != 0xCC) {
+        DWORD tmp = 0;
+        VirtualProtect(target, 1, old_protect, &tmp);
+        logf("[xbgtasix] patch 断言：game+0x247AF2D 处不是 int3（实际 0x%02X），跳过",
+             static_cast<unsigned>(original));
+        return;
+    }
+    *target = 0x90;   // int3 -> nop
+    DWORD tmp = 0;
+    VirtualProtect(target, 1, old_protect, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), target, 1);
+    logf("[xbgtasix] ★ 已把 game+0x247AF2D 的 int3(0xCC) patch 成 nop(0x90)"
+         "（XBGTASIX_PATCH_ASSERT）—— 检查照常执行、断言不再触发，无异常路径副作用");
+}
+
 void maybe_install_veh() {
     static bool done = false;
     if (done) return;
@@ -521,6 +562,7 @@ void maybe_install_veh() {
     AddVectoredExceptionHandler(1, on_fatal);
     logf("[xbgtasix] 已安装异常钩子（XBGTASIX_VEH=1）");
     install_g_write_watchpoint();
+    patch_game_assert();
 }
 
 void unimpl(const char* api) {
