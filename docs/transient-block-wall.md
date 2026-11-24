@@ -354,3 +354,50 @@ game+0x247AF2D 的 "跨度 <= 2 MiB-1" 守卫恒假（begin=0, end=64MiB, g=0，
   跳过会破坏后续链表不变量，两者都有实测）
 - 真正的入口只有一条：**让瞬时块机制按规定启动**，即补上
   `D3D12ConfigureVirtualMemoryX` 的真实登记语义（`config` 结构仍缺定义）
+
+## 13. 2026-11-24 追加：调用点被 IAT 解析钉死（并纠正一处我自己的算错）
+
+### 工具修正
+
+之前对 RVA `0x5F3D60` 反汇编得到空输出，我一度判断"objdump 对高 RVA 静默失败"——
+**这个判断是错的**，实际是我把 RVA 当 VA 算错了一位：
+`base(0x140000000) + RVA(0x5F3D60) = 0x1405F3D60`，我却传了 `0x145F3D60`（落在镜像外）。
+
+为此新增 `tools/disasm_rva.py`：**只收 RVA**，自己换算 VA 并按节切字节再反汇编，
+从接口上杜绝"RVA/VA 混用"。用法：
+
+```
+python tools/disasm_rva.py <exe> 0x247AF2D 0x80
+```
+
+### 调用点归属（决定性证据）
+
+`0x1E1CFE0` 处 `call 0x145F3FD60`，而 `0x145F3FD60` 是一条**导入 thunk**：
+
+```asm
+145f3fd60:  ff 25 a2 3e 85 00   jmp *0x853ea2(%rip)   # IAT 0x146793C08
+```
+
+解析 PE 导入表后，IAT `0x6793C08`（RVA）对应：
+
+```
+d3d12_xs.dll!D3D12ConfigureVirtualMemoryX
+```
+
+于是第 11 节的因果检验链条完全闭合：
+
+```
+0x1E1CFE0  call [IAT -> D3D12ConfigureVirtualMemoryX]   <- 我们的导出
+0x1E1CFE5  test eax,eax
+0x1E1CFE7  jns  ok
+0x1E1CFE9  int3                                           <- 返回负数即断言
+```
+
+**结论**：游戏对这个导出的返回值有硬要求（必须非负），且随后要用它配置出来的
+GPU 地址空间。我们要做的是"真的把 config 登记进去"，而不是返回失败的实验。
+
+### 下一轮
+
+用 `tools/disasm_rva.py` 反汇编 `0x1E1CF60` 所在函数（已确认只引用两个导入），
+从它构造 config 的指令里读出**真实结构布局**（哪些偏移是 VA、哪些是计数/指针），
+再据此实现登记。
