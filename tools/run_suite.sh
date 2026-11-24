@@ -135,7 +135,7 @@ run_py() {
   out=$(cd "$PWD" && timeout 300 python "$script" "$@" 2>&1); rc=$?
   local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
   local key verdict
-  key=$(echo "$out" | grep -oE 'PASS（无缺失）|加载成功 [0-9]+ / 失败 [0-9]+|FAIL[^"]{0,30}' | tail -1)
+  key=$(echo "$out" | grep -oE 'PASS（无缺失）|加载成功 [0-9]+ / 失败 [0-9]+|自测: [0-9]+ 个用例，失败 [0-9]+ 个 -> (PASS|FAIL)|检查 [0-9]+ 个文件，违规 [0-9]+ 个 -> (PASS|FAIL)|FAIL[^"]{0,30}' | tail -1)
   if [ $rc -eq 0 ]; then
     if has_evidence "$out"; then
       verdict="PASS"; pass=$((pass + 1));
@@ -168,6 +168,11 @@ run_one t18 t18_package.exe "$CFG"
 run_one t19 t19_save.exe "$CFG"
 run_one t20 t20_taskqueue2.exe
 run_one t21 t21_user.exe
+# 合规护栏（模式 B）：静态白名单 + 运行时落点闸门
+run_py p1 tools/policy.py --selftest
+run_py p2 tools/policy.py --check-repo
+run_py p3 tools/repo_guard.py --selftest
+
 if [ -d "$PKG" ]; then
   run_one t22 t22_extras.exe "$CFG" "$PKG"
 else
@@ -192,10 +197,17 @@ run_one t37 t37_system_ui.exe
 run_one t38 t38_xboxui.exe --shot suite/xboxui.bmp
 run_one t39 t39_host_tool.exe
 run_one t40 t40_taskqueue3.exe
-run_one t41 t41_d3d12_device_abi.exe   # 曾是 known-fail（代理转发器 bug），已修好转正
+run_one t41 t41_d3d12_device_abi.exe
+run_one t44 t44_diff.exe
+run_one t45 t45_census.exe   # 曾是 known-fail（代理转发器 bug），已修好转正
 run_one t42 t42_launcher_backup.exe
 run_known_fail t43 "WIP: host-stall 检测，测试自报 2 项失败（GPT 在进行中）" t43_host_stall.exe
 run_one t15 t15_budget.exe
+
+# 合规护栏（模式 B）：静态白名单 + 运行时落点闸门
+run_py p1 tools/policy.py --selftest
+run_py p2 tools/policy.py --check-repo
+run_py p3 tools/repo_guard.py --selftest
 
 if [ -d "$PKG" ]; then
   run_py t16 tools/check_real_dlls.py "$PKG"

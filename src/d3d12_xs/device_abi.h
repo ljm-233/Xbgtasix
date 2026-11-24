@@ -245,6 +245,12 @@ inline HRESULT WINAPI frame_statistics_x(DeviceProxy*, UINT64 token, UINT type,
 // （实测日志里出现 a=0x18ede4d0000（看着像描述符 arena 地址）b=... c=0xffffffff，
 // 却不知道它属于哪个槽）。签名统一按 4 个 u64 收参数 —— 对"不知道签名"的桩这是唯一
 // 安全的做法；但**不能**用它替代已知签名的方法（返回值类型不同，见每个已建模槽位）。
+//
+// ⚠ 谁来实现主机 PSO 创建（60–67 这一段里的 graphics/compute pipeline state）：
+//   真实的 `CreateGraphics/ComputePipelineState` 在这一层就是一次**驱动编译**，冷缓存
+//   几十秒。必须用 `xbgtasix::host_stall::scope` 把它包起来（见 include/xbgtasix/host_stall.h），
+//   否则标题的开机 hang check 会在 30 s 后把进程杀掉（它数的是"主线程没进展的轮数"，
+//   而驱动编译在我们线程里，它看不见进展）。参考 Leonida PR #7858 的同一机制。
 template <std::size_t N>
 HRESULT WINAPI device_extension_stub_n(DeviceProxy*, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
                                        UINT64 d = 0) {
@@ -699,7 +705,14 @@ uintptr_t WINAPI forward_slot(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0, ui
     using Fn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                              uintptr_t, uintptr_t, uintptr_t, uintptr_t);
     const auto pc_vtable = *reinterpret_cast<void***>(proxy->pc);
-    auto fn = reinterpret_cast<Fn>(pc_vtable[N]);
+    // ⚠️ 未定论的开放问题：静态反汇编显示"主机槽 = 桌面槽 + 4"（9 个点交叉验证：
+    // 8=CreateCommandQueue/PC4、14=CreateDescriptorHeap/PC10、15=IncrementSize/PC11、
+    // 19=UAV/PC15、20=RTV/PC16、21=DSV/PC17、25=AllocInfo/PC21、26=CustomHeap/PC22、
+    // 36=CreateFence/PC32），但**实测按 -4 转发会让设备在更早处被移除**（0x887a0005），
+    // 而同号转发能推进到 game+0x247AF2D。两者矛盾，暂按同号（能跑通的状态），
+    // 待逐槽用 call-site RVA + 参数断言确认后再改。见 docs/host-vtable-offset.md。
+    const std::size_t pc_index = N;
+    auto fn = reinterpret_cast<Fn>(pc_vtable[pc_index]);
     return fn(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
 }
 
@@ -1036,6 +1049,23 @@ inline D3D12_RESOURCE_ALLOCATION_INFO* WINAPI get_allocation_info_x(
                        static_cast<unsigned long long>(info.Alignment));
     }
     return out;
+}
+
+// 主机槽 15 = GetDescriptorHandleIncrementSize（桌面槽 11）。
+// 实测调用点 game+0x2478E2F 把返回值存进全局 0x1475E7000，之后既当描述符步进
+// （`add %rax,%rdi`）又当 slot 70 后 `clwb` 的回写长度。同号透传会打到桌面
+// CreateUnorderedAccessView 返回 S_OK=0 → **步进变成 0 → 16 个描述符全写同一地址**。
+// 标题自己的描述符 arena 是按 64 B/条目记账的（802816 项 x 64），所以按 0x40 返回。
+inline UINT WINAPI get_descriptor_increment_x(DeviceProxy* self, D3D12_DESCRIPTOR_HEAP_TYPE type) {
+    constexpr UINT kHostIncrement = 0x40;
+    const UINT pc_value = static_cast<ID3D12Device*>(self->pc)->GetDescriptorHandleIncrementSize(type);
+    static std::atomic<int> budget{16};
+    if (budget.fetch_sub(1) > 0) {
+        xbgtasix::logf("[d3d12_xs] 槽15 GetDescriptorHandleIncrementSize(type=%d) -> 0x%x"
+                       "（桌面值 0x%x；标题按 64B 记账）",
+                       static_cast<int>(type), kHostIncrement, pc_value);
+    }
+    return kHostIncrement;
 }
 
 template <std::size_t N>

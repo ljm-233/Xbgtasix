@@ -178,6 +178,15 @@ def main():
         pass
 
     out = os.path.abspath(a.out)
+    # 落点闸门（模式 B 的运行时闸）：派生数据不许落回源码树。
+    # 例外：本仓库的 build/ 是构建产物目录，显式放行（见 docs/asset-policy.md）。
+    try:
+        import repo_guard  # 同目录
+        repo_guard.ensure_outside_repo(out)
+    except ImportError:
+        pass
+    except Exception as e:
+        raise SystemExit("落点被合规闸拒绝：%s（详见 docs/asset-policy.md）" % e)
     if ready(out):
         print("GDK 已就绪: %s" % out)
         return 0

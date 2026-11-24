@@ -554,6 +554,14 @@ echo "== t41_d3d12_device_abi.exe"
     -L"$OUT" -ld3d12_xs -ldxgi -ldxguid -o "$OUT/t41_d3d12_device_abi.exe"
 
 # 主机侧停顿 -> guest Sleep 的记账（需 xmem.dll 的 DllMain 装 IAT 钩子）
+echo "== t44_diff.exe"
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t44_diff/main.cpp \
+    -L"$OUT" -ld3d12_xs -ldxguid -ldxgi -ld3d12 -o "$OUT/t44_diff.exe"
+
+echo "== t45_census.exe"
+"$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t45_census/main.cpp \
+    -o "$OUT/t45_census.exe"
+
 echo "== t43_host_stall.exe"
 "$CXX" "${FLAGS[@]}" "${LDFLAGS_TESTS[@]}" tests/t43_host_stall/main.cpp \
     -L"$OUT" -lxmem -o "$OUT/t43_host_stall.exe"
