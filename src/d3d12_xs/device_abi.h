@@ -1877,12 +1877,14 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
                                                   UINT64 c = 0, UINT64 d = 0, UINT64 e = 0,
                                                   UINT64 f = 0, UINT64 g = 0, UINT64 h = 0,
                                                   UINT64 i = 0, UINT64 j = 0, UINT64 k = 0,
-                                                  UINT64 l = 0) {
+                                                  UINT64 l = 0, UINT64 m = 0, UINT64 n = 0,
+                                                  UINT64 o = 0, UINT64 p = 0) {
     (void)b; (void)c; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l;
+    (void)m; (void)n; (void)o; (void)p;
     auto* desc = reinterpret_cast<const D3D12_COMPUTE_PIPELINE_STATE_DESC*>(a);
     auto* riid = reinterpret_cast<const IID*>(d);
     static std::atomic<int> calls{0};
-    const int n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const int seq = calls.fetch_add(1, std::memory_order_relaxed) + 1;
 
     // pso62 防御：只有 desc/riid/字节码都"看起来可读"时才去碰驱动。
     // 没有这层校验时，任何拿垃圾指针调用本槽的代码（包括测试）都会把驱动带崩。
@@ -1902,7 +1904,7 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
         desc->CS.BytecodeLength > 0 && desc->CS.BytecodeLength < (64u << 20) &&
         (desc->pRootSignature == nullptr || readable(desc->pRootSignature, 8));
     if (!desc_ok) {
-        if (n <= 12)
+        if (seq <= 12)
             xbgtasix::logf("[d3d12_xs] 槽62 拒绝：desc/字节码不可读（desc=%p len=%llu）",
                            static_cast<const void*>(desc),
                            desc ? static_cast<unsigned long long>(desc->CS.BytecodeLength) : 0ULL);
@@ -1917,13 +1919,45 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
         hr = static_cast<ID3D12Device*>(self->pc)->CreateComputePipelineState(
             &pc, *riid, reinterpret_cast<void**>(&pso));
     }
-    if (n <= 12) {
+    if (seq <= 12) {
         xbgtasix::logf("[d3d12_xs] 槽62 compute PSO #%d：desc=%p shader=%p len=%llu -> hr=0x%08lx pso=%p",
-                       n, static_cast<const void*>(desc),
+                       seq, static_cast<const void*>(desc),
                        desc ? desc->CS.pShaderBytecode : nullptr,
                        desc ? static_cast<unsigned long long>(desc->CS.BytecodeLength) : 0ULL,
                        static_cast<unsigned long>(hr), static_cast<void*>(pso));
+        xbgtasix::logf("[d3d12_xs] 槽62 全部参数: a=0x%llx b=0x%llx c=0x%llx d=0x%llx e=0x%llx "
+                       "f=0x%llx g=0x%llx h=0x%llx i=0x%llx j=0x%llx k=0x%llx l=0x%llx",
+                       static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
+                       static_cast<unsigned long long>(c), static_cast<unsigned long long>(d),
+                       static_cast<unsigned long long>(e), static_cast<unsigned long long>(f),
+                       static_cast<unsigned long long>(g), static_cast<unsigned long long>(h),
+                       static_cast<unsigned long long>(i), static_cast<unsigned long long>(j),
+                       static_cast<unsigned long long>(k), static_cast<unsigned long long>(l));
+        xbgtasix::logf("[d3d12_xs] 槽62 参数 13-16: m=0x%llx n=0x%llx o=0x%llx p=0x%llx",
+                       static_cast<unsigned long long>(m), static_cast<unsigned long long>(n),
+                       static_cast<unsigned long long>(o), static_cast<unsigned long long>(p));
     }
+    // 实验：12/16 参 dump 里没有任何写栈指针，但 e 与 p 同值、o = e+0x18，
+    // 形态像一个"上下文/输出槽"。按 XBGTASIX_PSO62_OUT=*e 把 PSO 写进 *e 试试。
+    {
+        char om[16] = {0};
+        GetEnvironmentVariableA("XBGTASIX_PSO62_OUT", om, sizeof(om));
+        // **必须显式开启**（XBGTASIX_PSO62_OUT='*e'）。
+        // 实测开启后：*e 原本恒为 0，写入后游戏前进到 2627 行并越过 XboxBvhBuilder 崩溃。
+        // 但默认开启出现过一次 0xC0000409（fail-fast），怀疑 e 并非每次都是输出槽，
+        // 无条件写会破坏调用方内存 —— 所以保持 opt-in，不拿默认行为冒险。
+        if (om[0] == '*' && SUCCEEDED(hr) && pso) {
+            auto* slot = reinterpret_cast<void**>(e);
+            if (readable(slot, sizeof(void*))) {
+                void* before = *slot;
+                *slot = pso;
+                xbgtasix::logf("[d3d12_xs] 槽62 写回 *e：%p -> %p", before, static_cast<void*>(pso));
+            } else {
+                xbgtasix::logf("[d3d12_xs] 槽62 写回 *e 失败：e=%p 不可写", static_cast<void*>(slot));
+            }
+        }
+    }
+
     char mode[16] = {0};
     GetEnvironmentVariableA("XBGTASIX_PSO62_RET", mode, sizeof(mode));
     if (mode[0] == 'h') return SUCCEEDED(hr) ? static_cast<std::uintptr_t>(S_OK)
