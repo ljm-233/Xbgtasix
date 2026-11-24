@@ -236,8 +236,37 @@ __declspec(dllexport) HRESULT WINAPI D3D12XboxCreateDevice(IUnknown* adapter, vo
 }
 
 __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, void* config) {
+    // 取证：这个函数目前是空实现，但游戏靠它注册显存/虚拟内存区间。
+    // 如果它影响了游戏对"瞬时内存块大小"的选择，这里必须看到参数形状。
+    if (config) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        const bool readable = VirtualQuery(config, &mbi, sizeof(mbi)) != 0 &&
+                              mbi.State == MEM_COMMIT &&
+                              (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+        if (readable) {
+            unsigned long long head[8]{};
+            std::memcpy(head, config, sizeof(head));
+            xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX config=%p 前 64 字节: "
+                           "%llX %llX %llX %llX %llX %llX %llX %llX",
+                           config, head[0], head[1], head[2], head[3], head[4], head[5], head[6],
+                           head[7]);
+            // 跟随第一层指针（前 3 个），每个 dump 32 字节 —— 看它到底要注册什么区间
+            for (int i = 0; i < 3; ++i) {
+                auto* q = reinterpret_cast<const unsigned long long*>(head[i]);
+                MEMORY_BASIC_INFORMATION m2{};
+                if (!q || VirtualQuery(reinterpret_cast<LPCVOID>(head[i]), &m2, sizeof(m2)) == 0 ||
+                    m2.State != MEM_COMMIT || (m2.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+                    xbgtasix::logf("[d3d12_xs]   config[%d]=0x%llX（不可读）", i, head[i]);
+                    continue;
+                }
+                xbgtasix::logf("[d3d12_xs]   config[%d]=0x%llX -> 0x%llX 0x%llX 0x%llX 0x%llX",
+                               i, head[i], q[0], q[1], q[2], q[3]);
+            }
+        } else {
+            xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX config=%p（不可读）", config);
+        }
+    }
     (void)device;
-    (void)config;
     xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX：PC 由驱动管理显存，返回 S_OK");
     return S_OK;
 }
