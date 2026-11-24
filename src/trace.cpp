@@ -183,9 +183,14 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     // 0xE06D7363 = MSVC 的 C++ 异常（throw）。它同样是 first-chance 可拦的，
     // 而游戏在 PSO 之后就是用 throw 走错误路径的 —— 不记它就没有抛出点。
     constexpr DWORD kCppException = 0xE06D7363UL;
+    // 再加两类"安全失败"：0xC0000409 栈缓冲溢出/__fastfail、0xC0000374 堆损坏。
+    // 它们不走 SEH 常规路径（__fastfail 直接 int 0x29），但作为异常仍可被 VEH 看到，
+    // 给出地址就能定位是哪段代码触发的。
+    constexpr DWORD kFastFail = 0xC0000409UL;
+    constexpr DWORD kHeapCorruption = 0xC0000374UL;
     if (code != EXCEPTION_BREAKPOINT && code != EXCEPTION_ACCESS_VIOLATION &&
         code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW &&
-        code != kCppException) {
+        code != kCppException && code != kFastFail && code != kHeapCorruption) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     // C++ 异常的抛出点由下面统一的符号化逻辑打印（地址 = ExceptionAddress）。

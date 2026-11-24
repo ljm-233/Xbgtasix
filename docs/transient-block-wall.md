@@ -758,3 +758,46 @@ D3D12SerializeVersionedRootSignature v=1.1: 原始 flags=0x03000000
 在拿到确定签名前，这一行为保持 opt-in（`XBGTASIX_PSO62_OUT='*e'`），不默认开启。
 
 全套：51 PASS / 2 SKIP / 0 FAIL / 1 已知失败。
+
+## 22. ★ 2026-11-24：槽 62 签名**已确证**（不是经验猜测了）
+
+反汇编 `XboxBvhBuilder.dll+0xC480..+0xC4E6`（就是调用我们槽 62 的那段）：
+
+```asm
+mov  (%rcx),%rax          ; rax = 设备 vtable
+mov  %r9,%rdi             ; ★ rdi 保存输出指针（后面 *(rdi) 就是 PSO）
+mov  0xc0(%rsp),%rbx
+...
+mov  %rdx,0x38(%rsp)      ; 局部：desc
+xor  %r8d,%r8d            ; arg3 = 0
+mov  0x1f0(%rax),%r10     ; r10 = vtable[0x1F0/8 = 62]
+lea  0x38(%rsp),%rdx      ; arg2 = &desc
+mov  %r9,0x28(%rsp)       ; ★ arg6 = 输出指针
+lea  <IID>,%rax
+mov  %rax,0x20(%rsp)      ; arg5 = IID
+xor  %r9d,%r9d            ; arg4 = 0
+call *%r10
+test %eax,%eax ; js <失败分支>
+mov  (%rdi),%rcx          ; ★ 读回 PSO：若为 0 就空指针崩
+mov  (%rcx),%rax
+call *0x30(%rax)          ; vtable 槽 6
+```
+
+对照我们的 16 参 dump：`a=desc b=0 c=0 d=IID e=输出指针`。
+
+**结论：`e` 就是 `ppPSO`，上一轮的"经验发现"被静态确证了。**
+
+### 仍存在的现象
+
+- 写回后：12（实际 48）次 PSO 创建全部成功，日志 2626 行
+- 但最终退出码仍是 `0xC0000409`（fail-fast / 栈检查失败），且**该码没有被 VEH 作为异常捕获**
+  （已把 0xC0000409 / 0xC0000374 加进过滤，仍无记录 → 说明它来自别的路径或第 9 个之后的异常）
+- 槽 62 的 IID 实测为 `{765A30F3-F624-4C6F-A828-ACE948622445}`，加了 IID 守卫后仍写回，
+  说明不是"IID 不匹配却写了"
+
+### 下一步（不必再猜的地方）
+
+1. 把 VEH 的 `count >= 8` 上限提高（或只对 fail-fast 不限次），确认 0xC0000409 是否被看到
+2. 若是我们的跳过断言（`int3` resync）破坏了调用方的栈/不变量，应改走"patch 该断言"路线：
+   把 `int3` 换成 `jmp +1`（`EB 01`），让检查本身不触发，而不是在异常里改 Rip
+3. 若 fail-fast 来自游戏自身的安全检查，需要记录它的触发地址再决定
