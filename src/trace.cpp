@@ -240,6 +240,27 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
         }
         dump("rsi", c->Rsi);
         dump("rdi", c->Rdi);
+
+        // 故障指令**自己的**栈帧：有些断言比较的是 [rsp+K] 里的两个值（例如
+        // "这个跨度必须落在 2 MB 以内"），寄存器里根本看不到，只有它的栈窗口能回答。
+        // 用 ContextRecord->Rsp（故障那一刻的 rsp），不是 VEH 现在的 rsp。
+        // 逐 qword 做 VirtualQuery，读到未提交页就停，绝不赌"栈总是可读"。
+        if (c->Rsp) {
+            char line[768] = {0};
+            int used = 0;
+            for (int i = 0; i < 20; ++i) {
+                const auto addr = c->Rsp + static_cast<unsigned long long>(i) * 8;
+                MEMORY_BASIC_INFORMATION m{};
+                if (VirtualQuery(reinterpret_cast<const void*>(addr), &m, sizeof(m)) == 0) break;
+                if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) break;
+                const int n = snprintf(line + used, sizeof(line) - static_cast<size_t>(used),
+                                       " +0x%02X=%llx", i * 8,
+                                       *reinterpret_cast<const unsigned long long*>(addr));
+                if (n <= 0 || used + n >= static_cast<int>(sizeof(line))) break;
+                used += n;
+            }
+            if (used > 0) logf("[xbgtasix] 故障栈帧%s", line);
+        }
     }
 
     // 同时 dump 调用栈（模块+RVA）：断言点本身信息很少，栈才能说明"谁把它逼到这里"。
