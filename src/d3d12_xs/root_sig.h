@@ -218,6 +218,29 @@ using SerializeVersionedFn =
 using SerializeFn =
     HRESULT(WINAPI*)(const D3D12_ROOT_SIGNATURE_DESC*, D3D_ROOT_SIGNATURE_VERSION, ID3DBlob**, ID3DBlob**);
 
+// 消费端再剥一次：序列化时我们把主机位写回了 blob，但桌面
+// `CreateRootSignature` 不收带主机位的 blob（实测 0x80004005 E_FAIL）。
+// 所以在把 blob 交给桌面之前，把 RTS0 段里的主机位清掉。
+// 返回 true 表示确实剥了位（blob 不是合法 DXBC / 没有 RTS0 时返回 false，
+// 调用方原样透传即可，不会误改任何非根签名数据）。
+inline bool strip_blob_for_pc(const void* data, std::size_t size, std::uint32_t* bits_out,
+                              std::size_t* at_out) {
+    Rts0View view{};
+    if (!find_rts0(data, size, view)) return false;
+    const std::size_t at = view.body_off + kRts0FlagsOffset;
+    if (at + 4 > size) return false;
+    std::uint32_t original = 0;
+    std::memcpy(&original, static_cast<const std::uint8_t*>(data) + at, 4);
+    const std::uint32_t bits = xbox_bits(original);
+    if (bits == 0) return false;
+    const std::uint32_t pc = pc_flags(original);
+    // 调用方传进来的是可写副本（我们自己的拷贝），这里直接改。
+    std::memcpy(const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(data)) + at, &pc, 4);
+    if (bits_out) *bits_out = bits;
+    if (at_out) *at_out = at;
+    return true;
+}
+
 inline const char* version_name(std::uint32_t v) {
     switch (v) {
         case D3D_ROOT_SIGNATURE_VERSION_1_0: return "1.0";
