@@ -712,3 +712,49 @@ D3D12SerializeVersionedRootSignature v=1.1: 原始 flags=0x03000000
 1. 用 NVIDIA 跑，抓 C++ 异常的抛出点（需要装 C++ 异常钩子或看最后一次成功调用之后的行为）
 2. 对 Intel 的 IGC 崩溃，记录是哪个 shader（长度/校验和）触发，必要时按长度跳过以绕开驱动 bug
 3. 检查接下来的槽：slot 60（graphics PSO）至今 0 次调用 —— 要等 compute 这一批走完
+
+## 21. 2026-11-24 追加：C++ 异常被纳入观测，并做了"驱动异常收敛"
+
+### 观测到抛出点
+
+把 `0xE06D7363`（MSVC C++ 异常）纳入 VEH 过滤后，NVIDIA 上的抛出栈：
+
+```
+#3  KERNELBASE+0xC56CA      <- RaiseException
+#4  ucrtbase+0xAE836
+#5  D3D12Core+0x11612       <- 桌面 D3D12 运行时
+#6  D3D12Core+0x81FAC
+#7  D3D12Core+0x5EFA7
+#8  d3d12_xs.dll+0x5D020    <- 我们的层
+#9  game+0x1E86853          <- 标题调用点（槽 133 那一族）
+```
+
+即：**桌面 D3D12 在少数路径上抛 C++ 异常而不是返回 HRESULT**，而异常穿透到游戏
+会让它直接走错误路径。
+
+### 已做：在调用驱动的边界上收敛异常
+
+新增 `catch_deep()`，把 `std::bad_alloc` -> `E_OUTOFMEMORY`、其它 -> `E_FAIL`，
+并接到槽 133（CreatePlacedResource / CreateCommittedResource）、
+槽 127（CreateCommittedResource2）、槽 62（CreateComputePipelineState）。
+
+### 实测（NVIDIA）
+
+| 配置 | 行数 | PSO 数 | 退出码 |
+|---|---|---|---|
+| 写 `*e` | 2622 | 12 | `0xC0000409`（fail-fast） |
+| 不写 `*e` | 2535 | 1 | `0xE06D7363`（异常） |
+
+- 写 `*e` 能稳定推进到 12 个 PSO（复现），但最终 `0xC0000409`（fail-fast）
+  **进一步坐实了"`e` 并非每次都是输出槽"的怀疑** —— 无条件写会破坏内存。
+- 不写 `*e` 时第 1 个 PSO 之后游戏就走了错误路径。
+
+### 结论与下一步
+
+`*e` 只是**经验上有效**，还不是确定了签名的实现。要真正确认，需要：
+1. 反汇编标题侧调用点 `game+0x1E8684C` 一族，看它把哪个寄存器/栈槽当作 `ppPSO`
+2. 或用一次性写断点：只在"该指针当前为空且随后被游戏读取"时才写
+
+在拿到确定签名前，这一行为保持 opt-in（`XBGTASIX_PSO62_OUT='*e'`），不默认开启。
+
+全套：51 PASS / 2 SKIP / 0 FAIL / 1 已知失败。

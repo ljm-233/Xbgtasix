@@ -180,10 +180,15 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     if (count++ >= 8) return EXCEPTION_CONTINUE_SEARCH;
     const DWORD code = info->ExceptionRecord->ExceptionCode;
     // 只报"致命类"：断言断点与访问冲突
+    // 0xE06D7363 = MSVC 的 C++ 异常（throw）。它同样是 first-chance 可拦的，
+    // 而游戏在 PSO 之后就是用 throw 走错误路径的 —— 不记它就没有抛出点。
+    constexpr DWORD kCppException = 0xE06D7363UL;
     if (code != EXCEPTION_BREAKPOINT && code != EXCEPTION_ACCESS_VIOLATION &&
-        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW) {
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW &&
+        code != kCppException) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
+    // C++ 异常的抛出点由下面统一的符号化逻辑打印（地址 = ExceptionAddress）。
     void* addr = info->ExceptionRecord->ExceptionAddress;
     HMODULE mod = nullptr;
     char name[256] = "<unknown>";
