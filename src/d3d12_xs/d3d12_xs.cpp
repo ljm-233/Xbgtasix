@@ -299,6 +299,21 @@ inline void register_gpu_va_ranges(void* config) {
 }
 
 __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, void* config) {
+    // ⚠ ABI 修正：反汇编 0x1E1CF60 的调用点（0x1E1CFDA..0x1E1CFE0）显示
+    //      mov %rdi,%rcx          ; rcx = config（rsp+0x30，32 字节栈结构）
+    //      mov %eax,0x4(%rdi)     ; config+4 = u32
+    //      call [IAT -> 本函数]   ; rdx 没有被设置（残留值）
+    // 即**只有一个参数，在 rcx**。我们之前把 config 读在 rdx，读到的是垃圾 ——
+    // 上一轮 dump 的"8 个指针"因此不可信。这里以 rcx 为准，rdx 仅作为对照记录。
+    void* config_in_rcx = device;   // 第一个参数才是 config
+    if (config_in_rcx != config) {
+        static std::atomic<int> n{0};
+        if (n.fetch_add(1, std::memory_order_relaxed) < 8) {
+            xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX ABI：rcx=%p（真 config）"
+                           " rdx=%p（残留，忽略）", config_in_rcx, config);
+        }
+    }
+    config = config_in_rcx;
     // 取证：这个函数目前是空实现，但游戏靠它注册显存/虚拟内存区间。
     // 如果它影响了游戏对"瞬时内存块大小"的选择，这里必须看到参数形状。
     if (config) {
