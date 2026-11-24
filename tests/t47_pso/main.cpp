@@ -62,6 +62,7 @@ namespace {
 
 int g_checks = 0;
 int g_failures = 0;
+bool g_dump = false;  // --dump：把捕获到的桩日志打到 stdout（给人看的样例）
 
 void check(bool ok, const char* what) {
     ++g_checks;
@@ -164,7 +165,7 @@ D3D12_COMPUTE_PIPELINE_STATE_DESC make_compute_desc() {
 }
 
 // ---------------------------------------------------------------- 槽位调用
-using detail_t = xbgtasix::d3d12::detail;
+namespace detail_t = xbgtasix::d3d12::detail;
 
 using PsoSlotFn = HRESULT(WINAPI*)(detail_t::DeviceProxy*, UINT64, UINT64, UINT64, UINT64, UINT64,
                                    UINT64, UINT64, UINT64);
@@ -242,6 +243,10 @@ void check_graphics_dump(detail_t::DeviceProxy& proxy) {
     check(log_has("slot=60 b=0x2222333344445555 不可读"), "不可读指针记为'不可读'并跳过 dump");
     check(log_has("slot=60 e=0xaaaaaaaaaaaaaaaa 不可读"), "非规范地址不会崩，只记'不可读'");
     check(log_has("形状自检=通过"), "slot 60 对指向桌面 desc 的参数判'形状自检通过'");
+    if (g_dump) {
+        std::printf("----- 桩日志样例：slot 60（构造调用，desc 指向本进程栈上的假 desc）-----\n%s",
+                    g_log.c_str());
+    }
 }
 
 // ---------------------------------------------------------------- 4) 形状自检
@@ -418,6 +423,10 @@ void check_other_pso_slots(detail_t::DeviceProxy& proxy) {
     pso_slot<62>()(&proxy, reinterpret_cast<UINT64>(&compute), 0, 0, 0, 0, 0, 0, 0);
     check(log_has("slot=62 a=0x") && log_has("COMPUTE_PIPELINE_STATE_DESC"),
           "slot 62 对计算 desc 参数给出形状自检结论");
+    if (g_dump) {
+        std::printf("----- 桩日志样例：slot 62（构造调用，desc 指向本进程栈上的假计算 desc）-----\n%s",
+                    g_log.c_str());
+    }
 }
 
 // ---------------------------------------------------------------- 6) 桌面转发
@@ -492,7 +501,10 @@ void check_forwarded_pso_path() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--dump") == 0) g_dump = true;
+    }
     std::printf("[t47] 主机 PSO 槽参数 dump 桩验收（不启动游戏、不使用游戏数据）\n");
 
     detail_t::DeviceProxy proxy{};  // pc 为空：所有"真实创建"路径都会被安全跳过

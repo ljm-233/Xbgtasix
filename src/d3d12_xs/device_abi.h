@@ -600,6 +600,10 @@ inline PsoShapeResult check_graphics_pso_shape(const void* p) {
                                  kBlend + offsetof(D3D12_BLEND_DESC, IndependentBlendEnable),
                                  d.BlendState.IndependentBlendEnable);
         for (UINT i = 0; i < 8; ++i) {
+            // IndependentBlendEnable 为 FALSE 时只有 RT[0] 生效，RT[1..7] 允许为 0
+            // （很多标题就是这么初始化的）——只校验"真正会被用到"的那一份，
+            // 否则合法 desc 会被误判，日志反而误导下一个人。
+            if (i != 0 && !d.BlendState.IndependentBlendEnable) continue;
             const auto& rt = d.BlendState.RenderTarget[i];
             const std::size_t b = kRt + static_cast<std::size_t>(i) * kRtStride;
             if (rt.BlendEnable > 1)
@@ -684,6 +688,8 @@ inline PsoShapeResult check_graphics_pso_shape(const void* p) {
         constexpr std::size_t kBase =
             offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, DepthStencilState);
         const auto& ds = d.DepthStencilState;
+        // DepthEnable / StencilEnable 为 FALSE 时对应功能不用，标题常把相关字段留 0；
+        // 这种 desc 桌面是收的，所以只在功能开启时校验对应枚举（避免误判合法 desc）。
         if (ds.DepthEnable > 1)
             return pso_shape_bad(PsoShape::kBadDepthStencil,
                                  kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, DepthEnable),
@@ -692,8 +698,9 @@ inline PsoShapeResult check_graphics_pso_shape(const void* p) {
             return pso_shape_bad(PsoShape::kBadDepthStencil,
                                  kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, DepthWriteMask),
                                  ds.DepthWriteMask);
-        if (ds.DepthFunc < D3D12_COMPARISON_FUNC_NEVER ||
-            ds.DepthFunc > D3D12_COMPARISON_FUNC_ALWAYS)
+        if (ds.DepthEnable &&
+            (ds.DepthFunc < D3D12_COMPARISON_FUNC_NEVER ||
+             ds.DepthFunc > D3D12_COMPARISON_FUNC_ALWAYS))
             return pso_shape_bad(PsoShape::kBadDepthStencil,
                                  kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, DepthFunc),
                                  ds.DepthFunc);
@@ -705,7 +712,7 @@ inline PsoShapeResult check_graphics_pso_shape(const void* p) {
         const std::size_t face_offsets[] = {
             kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, FrontFace),
             kBase + offsetof(D3D12_DEPTH_STENCIL_DESC, BackFace)};
-        for (int f = 0; f < 2; ++f) {
+        for (int f = 0; f < 2 && ds.StencilEnable; ++f) {
             const auto& face = *faces[f];
             const std::size_t b = face_offsets[f];
             const D3D12_COMPARISON_FUNC func = face.StencilFunc;
