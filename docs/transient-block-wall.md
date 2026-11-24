@@ -801,3 +801,48 @@ call *0x30(%rax)          ; vtable 槽 6
 2. 若是我们的跳过断言（`int3` resync）破坏了调用方的栈/不变量，应改走"patch 该断言"路线：
    把 `int3` 换成 `jmp +1`（`EB 01`），让检查本身不触发，而不是在异常里改 Rip
 3. 若 fail-fast 来自游戏自身的安全检查，需要记录它的触发地址再决定
+
+## 23. ★★★ 2026-11-24：找到 PSO 之后的真实缺口 —— 返回的对象必须是**代理**，不能是裸桌面对象
+
+### 证据
+
+槽 62 只有**一个调用点**（`XboxBvhBuilder.dll+0xC4E4`，模块内相对地址），
+调用后它立刻：
+
+```asm
+call *%r10            ; 我们的槽 62
+test %eax,%eax ; js <失败分支>
+mov  (%rdi),%rcx      ; rcx = 我们写进 *e 的对象
+mov  %rbx,%rdx
+mov  (%rcx),%rax      ; rax = 该对象的 vtable
+call *0x30(%rax)      ; ★ 调 vtable 槽 6
+```
+
+随后在 `XboxBvhBuilder+0xC525` 抛 C++ 异常（实测：第 1 个 PSO 之后立刻发生）。
+
+**关键**：`*e` 里我们放的是**桌面 `ID3D12PipelineState`**。它的 vtable 槽 6 是桌面接口的
+方法（`GetPrivateData` 之类），而调用方按**主机接口**理解槽 6 —— 于是行为完全错位，
+随后抛异常。
+
+### 结论
+
+和 device / queue / command list 一样，**PSO 也需要一层代理**：
+- 对外：主机 vtable（槽号与主机语义一致）
+- 对内：持有桌面 `ID3D12PipelineState`
+- `QueryInterface/AddRef/Release` 要维持正确的引用计数
+
+我们目前直接返回裸桌面对象，这是设计缺口，不是参数错误。
+
+### 已验证/已否定的东西（本轮到目前）
+
+| 项 | 结论 |
+|---|---|
+| 槽 62 调用点数量 | 1 个（`+0xC4E4`，XboxBvhBuilder） |
+| IID | `{765A30F3-F624-4C6F-A828-ACE948622445}`（与桌面 ID3D12PipelineState 同名 IID 一致） |
+| 只允许"当前为空"才写 | ✗ 会退步（下次复用输出槽拿到旧对象）→ 已改为允许覆盖 |
+| 返回裸桌面对象 | ✗ 调用方按主机 vtable 用 → 抛异常（本轮定位） |
+
+### 下一步
+
+实现 `PsoProxy`：桌面 PSO 包一层主机 vtable 代理（参照现有 `CommandListProxy` 的形式），
+槽 62 返回代理而不是裸对象；必要时给槽 6 等热点方法做显式映射。
