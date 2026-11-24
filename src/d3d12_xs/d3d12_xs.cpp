@@ -235,6 +235,69 @@ __declspec(dllexport) HRESULT WINAPI D3D12XboxCreateDevice(IUnknown* adapter, vo
     return *device ? hr : E_OUTOFMEMORY;
 }
 
+// ---------------------------------------------------------------------------
+// GPU VA 登记表（保守版）
+//
+// 事实：游戏通过 D3D12ConfigureVirtualMemoryX 把它的 GPU 虚拟地址空间布局交给我们，
+// 并且**硬依赖这个调用成功**（返回失败会立刻在 game+0x1E1CFE9 断言）。
+// 结构与语义在 GDK 头和参考实现里都没有定义，只能真机取证。
+//
+// 这里先做**不做结构假设**的版本：把 config 开头那段按 64 位扫描，
+// 凡是"高 16 位为 0x8000"的值（主机 GPU VA 基址的特征）登记成区间起点，
+// 并统计相邻 VA 的差值——差值稳定就说明找到了区间粒度。
+// 这一步不做任何副作用，只为下一步（真正登记 + XMemVirtualQuery 回报）提供数据。
+// ---------------------------------------------------------------------------
+struct GpuVaRange {
+    unsigned long long base;
+    unsigned long long next;   // 相邻登记值的差（0 表示未知）
+};
+inline std::vector<GpuVaRange>& gpu_va_registry() {
+    static std::vector<GpuVaRange> r;
+    return r;
+}
+
+inline void register_gpu_va_ranges(void* config) {
+    auto& reg = gpu_va_registry();
+    if (!config) return;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(config, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+        return;
+    }
+    // 保守：只看 config 结构本身的前 0x100 字节（它不是区间数组，混着指针与文本，
+    // 所以这里只按"值形态"挑，不按步长遍历）。
+    // config 本身存的是指针；0x8000... 的 VA 在指针指向的结构里。
+    // 所以对"config 的 8 个指针"各跟进一层，扫描目标结构的前 0x80 字节。
+    auto scan_words = [&reg](const unsigned long long* q, std::size_t words, int depth) {
+        unsigned long long prev = 0;
+        for (std::size_t i = 0; i < words; ++i) {
+            const unsigned long long v = q[i];
+            if ((v >> 48) != 0x8000ULL) continue;      // 只认 0x8000.... 前缀
+            if ((v & 0xFFFFULL) != 0) continue;        // 基址应页对齐
+            bool dup = false;
+            for (const auto& e : reg) if (e.base == v) { dup = true; break; }
+            if (dup) continue;
+            const unsigned long long delta = prev ? (v - prev) : 0;
+            reg.push_back(GpuVaRange{v, delta});
+            xbgtasix::logf("[d3d12_xs] GPU VA 登记[%zu] base=0x%llX（层 %d，与上一项差 0x%llX）",
+                           reg.size() - 1, v, depth, delta);
+            prev = v;
+        }
+    };
+    const auto* q = static_cast<const unsigned long long*>(config);
+    const std::size_t kWords = 0x40 / sizeof(unsigned long long);
+    scan_words(q, kWords, 0);
+    for (std::size_t i = 0; i < kWords; ++i) {
+        const unsigned long long ptr = q[i];
+        if ((ptr >> 48) != 0 || ptr == 0) continue;    // 只跟进用户态可读指针
+        MEMORY_BASIC_INFORMATION m2{};
+        if (!VirtualQuery(reinterpret_cast<LPCVOID>(ptr), &m2, sizeof(m2))) continue;
+        if (m2.State != MEM_COMMIT || (m2.Protect & (PAGE_NOACCESS | PAGE_GUARD | PAGE_READONLY))) continue;
+        scan_words(reinterpret_cast<const unsigned long long*>(ptr), 0x10, 1);
+    }
+    xbgtasix::logf("[d3d12_xs] GPU VA 登记表：共 %zu 项", reg.size());
+}
+
 __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, void* config) {
     // 取证：这个函数目前是空实现，但游戏靠它注册显存/虚拟内存区间。
     // 如果它影响了游戏对"瞬时内存块大小"的选择，这里必须看到参数形状。
@@ -290,7 +353,8 @@ __declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, 
             return E_NOTIMPL;
         }
     }
-    xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX：PC 由驱动管理显存，返回 S_OK");
+    register_gpu_va_ranges(config);
+    xbgtasix::logf("[d3d12_xs] D3D12ConfigureVirtualMemoryX：已登记 GPU VA 区间，返回 S_OK");
     return S_OK;
 }
 

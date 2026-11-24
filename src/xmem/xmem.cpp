@@ -254,6 +254,16 @@ __declspec(dllexport) int __cdecl XMemVirtualQuery(HANDLE process, const void* a
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
+    // 取证：游戏会不会拿主机 GPU VA（0x8000... 前缀）来问？如果问，说明它期望
+    // 这些区间在"设备层"是已知的；我们按普通 Win32 查询必然答"不存在"。
+    {
+        const auto a = reinterpret_cast<unsigned long long>(address);
+        if ((a >> 48) == 0x8000ULL) {
+            static std::atomic<int> n{0};
+            const int k = n.fetch_add(1, std::memory_order_relaxed);
+            if (k < 32) xbgtasix::logf("[xmem] 查询的是主机 GPU VA：0x%llX（第 %d 次）", a, k + 1);
+        }
+    }
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQueryEx(process, address, &mbi, sizeof(mbi)) == 0) return 0;
     std::memset(out, 0, sizeof(*out));
