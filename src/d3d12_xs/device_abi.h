@@ -2060,6 +2060,34 @@ inline HRESULT WINAPI slot74_ok(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0, U
     return S_OK;
 }
 
+// 主机槽 86：调用点 game+0x2479A87 `call *0x2b0(%rax)`，形态
+//   (rcx=device, rdx=?, r8=<.rdata 指针，疑似 IID>, r9=<可写局部，疑似 out>)
+// 像一个"创建型"调用。语义未知：先记录 IID 与 out，再返回 S_OK 试探游戏是否只查成败。
+inline HRESULT WINAPI slot86_probe(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
+                                   UINT64 d = 0, UINT64 e = 0, UINT64 f = 0, UINT64 g = 0,
+                                   UINT64 h = 0) {
+    (void)self; (void)b; (void)c; (void)f; (void)g; (void)h;
+    static std::atomic<int> n{0};
+    if (n.fetch_add(1, std::memory_order_relaxed) < 6) {
+        char guid[64] = "<不可读>";
+        MEMORY_BASIC_INFORMATION m{};
+        if (c && VirtualQuery(reinterpret_cast<LPCVOID>(c), &m, sizeof(m)) && m.State == MEM_COMMIT &&
+            !(m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+            const auto* q = reinterpret_cast<const unsigned char*>(c);
+            std::snprintf(guid, sizeof(guid), "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                          *reinterpret_cast<const unsigned int*>(q),
+                          *reinterpret_cast<const unsigned short*>(q + 4),
+                          *reinterpret_cast<const unsigned short*>(q + 6), q[8], q[9], q[10], q[11],
+                          q[12], q[13], q[14], q[15]);
+        }
+        xbgtasix::logf("[d3d12_xs] 槽86 调用 a=0x%llx b=0x%llx c=%s d=0x%llx -> S_OK（试探）",
+                       static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
+                       guid, static_cast<unsigned long long>(d));
+    }
+    (void)a; (void)d; (void)e;
+    return S_OK;
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);

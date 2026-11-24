@@ -177,7 +177,9 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     // 只记一次会漏：第一个异常可能是可恢复的（例如 xmem 的按需提交 AV），
     // 它把额度用掉，真正致命的那次就不打印了。改成前 N 次都记。
     static int count = 0;
-    if (count++ >= 8) return EXCEPTION_CONTINUE_SEARCH;
+    // 上限从 8 提到 96：真实运行里 first-chance 事件很多（C++ throw、可恢复 AV 等），
+    // 原来的 8 太早把额度用完，导致真正致命的那次没被记录。
+    if (count++ >= 96) return EXCEPTION_CONTINUE_SEARCH;
     const DWORD code = info->ExceptionRecord->ExceptionCode;
     // 只报"致命类"：断言断点与访问冲突
     // 0xE06D7363 = MSVC 的 C++ 异常（throw）。它同样是 first-chance 可拦的，
