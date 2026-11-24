@@ -2034,11 +2034,30 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
         }
     }
 
+    // **必须返回 HRESULT**（默认）。调用点 14000c4e6 是 `js <失败分支>`
+    // （失败分支直接 throw），所以 EAX 只有非负才算成功。
+    // 之前默认返回 PSO 指针，低 32 位常 >= 0x80000000 -> 被当成负数 -> 必走失败分支投异常。
+    // 对象通过 *e 交给调用方，不经返回值。
     char mode[16] = {0};
     GetEnvironmentVariableA("XBGTASIX_PSO62_RET", mode, sizeof(mode));
-    if (mode[0] == 'h') return SUCCEEDED(hr) ? static_cast<std::uintptr_t>(S_OK)
-                                             : static_cast<std::uintptr_t>(hr);
-    return reinterpret_cast<std::uintptr_t>(pso);   // 默认：RAX 返回对象
+    if (mode[0] == 'p') return reinterpret_cast<std::uintptr_t>(pso);   // 对照用，已知会失败
+    return static_cast<std::uintptr_t>(SUCCEEDED(hr) ? hr : hr);
+}
+
+// 主机槽 74：游戏在同一处 `call *0x250(%rax)`（0x250/8 = 74）后
+// `test eax,eax / jns ok / int3` —— **必须返回非负**，否则整个初始化断言。
+// 语义未知，先按"记录参数 + 返回 S_OK"处理（游戏只检查成败）。
+inline HRESULT WINAPI slot74_ok(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
+                                UINT64 d = 0, UINT64 e = 0, UINT64 f = 0, UINT64 g = 0,
+                                UINT64 h = 0) {
+    (void)self; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
+    static std::atomic<int> n{0};
+    if (n.fetch_add(1, std::memory_order_relaxed) < 8) {
+        xbgtasix::logf("[d3d12_xs] 槽74 调用 a=0x%llx b=0x%llx c=0x%llx d=0x%llx -> S_OK",
+                       static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
+                       static_cast<unsigned long long>(c), static_cast<unsigned long long>(d));
+    }
+    return S_OK;
 }
 
 template <std::size_t N>
@@ -2076,6 +2095,7 @@ Slot device_slot() {
     // 主机扩展槽（>= 44）在 PC 设备上**不存在**，按同号转发会把参数喂给别的方法
     // （实测 slot 70 直接崩在 D3D12Core）。未实现的一律走"明确失败 + 记一次"，
     // 让游戏走它自己的降级/报错路径，而不是在驱动内部炸掉。
+    if constexpr (N == 74) return reinterpret_cast<Slot>(&slot74_ok);
     if constexpr (N >= 44) return reinterpret_cast<Slot>(&device_extension_stub_n<N>);
     if (slot_probe_on()) return reinterpret_cast<Slot>(&slot_probe_forward<N>);  // 仅诊断用
     return reinterpret_cast<Slot>(&forward_slot<N>);
