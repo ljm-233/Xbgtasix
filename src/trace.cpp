@@ -206,6 +206,22 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     // 定点采集：game+0x247AF2D 是"跨度 <= 2 MiB-1"不变量断言。
     // 断言式：([rsp+0x78] - [rsp+0x70]) + qword[game+0x75E6FF0] <= 0x1FFFFF
     // 这里把三个操作数、减法结果与最终和全部打出来，并显式判断无符号回绕。
+    if (code == EXCEPTION_SINGLE_STEP) {
+        // 数据断点命中：Rip 是"写指令的下一条"。
+        // 读回 g 的当前值，并把命中点报成 模块+RVA。
+        unsigned long long written = 0;
+        HMODULE exe_now = GetModuleHandleW(nullptr);
+        if (exe_now) {
+            std::memcpy(&written,
+                        reinterpret_cast<const void*>(
+                            reinterpret_cast<unsigned long long>(exe_now) + 0x75E6FF0ULL),
+                        sizeof(written));
+        }
+        logf("[xbgtasix] ★ g 写断点命中！写指令结束于 %s+0x%llX，写后 g=0x%llX", name, rva,
+             written);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
     if (code == EXCEPTION_BREAKPOINT && rva == 0x247AF2D) {
         const CONTEXT* c = info->ContextRecord;
         auto read_q = [](unsigned long long addr, unsigned long long* out) -> bool {
@@ -333,6 +349,22 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     //   * 大声记录"掩盖了游戏自身的不变量"
     //   * 恢复 rsi（0x247AF35 要用它，现场的 rsi 已被冲成小整数）
     // ---------------------------------------------------------------------
+    if (code == EXCEPTION_SINGLE_STEP) {
+        // 数据断点命中：Rip 是"写指令的下一条"。
+        // 读回 g 的当前值，并把命中点报成 模块+RVA。
+        unsigned long long written = 0;
+        HMODULE exe_now = GetModuleHandleW(nullptr);
+        if (exe_now) {
+            std::memcpy(&written,
+                        reinterpret_cast<const void*>(
+                            reinterpret_cast<unsigned long long>(exe_now) + 0x75E6FF0ULL),
+                        sizeof(written));
+        }
+        logf("[xbgtasix] ★ g 写断点命中！写指令结束于 %s+0x%llX，写后 g=0x%llX", name, rva,
+             written);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
     if (code == EXCEPTION_BREAKPOINT && rva == 0x247AF2D) {
         char env[256] = {0};
         const DWORD n = GetEnvironmentVariableA("XBGTASIX_SKIP_GAME_ASSERT", env, sizeof(env));
@@ -383,15 +415,47 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
                 GetEnvironmentVariableA("XBGTASIX_TRAP_RSI", mode, sizeof(mode));
                 const unsigned long long base0 =
                     reinterpret_cast<unsigned long long>(addr) - rva;
-                if (mode[0] == 'i') {           // 统一：用 scope id
+                if (mode[0] == 'n') {    // ★ 默认：**不改 rsi**（实测这才是对的，见下）
+                    logf("[xbgtasix]   陷阱：不修改 rsi（rsi=0x%llX 本就是 pop 需要的键；"
+                         "改成 rcx 会打断链表查找并在 0x5C8FA96 崩）",
+                         static_cast<unsigned long long>(info->ContextRecord->Rsi));
+                } else if (mode[0] == 't') {   // 按游戏 TLS 路径取回（实测与现场 rsi 相同）
+                    // 游戏 0x144DE8620 的取法：
+                    //   tls_array = gs:0x58
+                    //   idx       = *(u32*)0x146E08B2C
+                    //   blk       = *(void**)(tls_array + idx*8)
+                    //   thread    = *(void**)(blk + 0x410)
+                    void* thread_obj = nullptr;
+                    const auto tls_array = reinterpret_cast<unsigned long long>(
+                        __readgsqword(0x58));
+                    const auto idx = *reinterpret_cast<const unsigned int*>(base0 + 0x6E08B2C);
+                    if (tls_array && idx < 4096) {
+                        const auto blk = *reinterpret_cast<const unsigned long long*>(
+                            tls_array + static_cast<unsigned long long>(idx) * 8);
+                        if (blk) {
+                            thread_obj = *reinterpret_cast<void**>(
+                                static_cast<char*>(reinterpret_cast<void*>(blk)) + 0x410);
+                        }
+                    }
+                    if (thread_obj) {
+                        info->ContextRecord->Rsi =
+                            reinterpret_cast<unsigned long long>(thread_obj);
+                        logf("[xbgtasix]   陷阱：已按 TLS 取回线程对象 %p（原来 rsi=0x%llX）",
+                             thread_obj,
+                             static_cast<unsigned long long>(info->ContextRecord->Rsi));
+                    } else {
+                        info->ContextRecord->Rsi = info->ContextRecord->Rcx;
+                        logf("[xbgtasix]   陷阱：TLS 取回失败，退回 rsi=rcx");
+                    }
+                } else if (mode[0] == 'i') {    // 用 scope id（错误，仅对照）
                     info->ContextRecord->Rsi = base0 + 0x56A2A60;
                     info->ContextRecord->Rdx = info->ContextRecord->Rcx;
                     logf("[xbgtasix]   陷阱：rsi=scope id(game+0x56A2A60) rdx=rcx");
                 } else if (mode[0] == 'n') {    // 不改
                     logf("[xbgtasix]   陷阱：不修改 rsi/rdx（对照）");
-                } else {                        // 默认：rcx
+                } else if (mode[0] == 'c') {   // 显式要求：rsi=rcx（已知会崩，仅对照）
                     info->ContextRecord->Rsi = info->ContextRecord->Rcx;
-                    logf("[xbgtasix]   陷阱：rsi=rcx");
+                    logf("[xbgtasix]   陷阱：rsi=rcx（对照用，已知会在 0x5C8FA96 崩）");
                 }
             }
             info->ContextRecord->Rip = reinterpret_cast<unsigned long long>(addr) - rva + 0x247AF2E;
@@ -403,6 +467,41 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
     return EXCEPTION_CONTINUE_SEARCH;   // 继续原处理，不改变游戏行为
 }
 
+// ---------------------------------------------------------------------------
+// 硬件写断点：监视 game+0x75E6FF0（瞬时块基址 g）有没有被写过。
+//
+// 这是整条瞬时块线索里最后一块未知：静态反汇编说它的唯一写点在同族 thunk 的
+// `0x1456A2ACA` 处，而真机上 g 恒为 0。用 x86-64 的 Dr0/Dr7 在**当前线程**上
+// 装一个 8 字节写断点，写一旦发生就触发 #DB，我们在 VEH 里记录 Rip（写指令的下一条）
+// 和写入的值，从而确认这条路径到底有没有走过。
+//
+// 只装当前线程（游戏的主线程在建窗口/初始化阶段就是它）；其它线程不覆盖。
+// Dr7: L0=1(bit0)、RW0=01(写, bits16-17)、LEN0=11(8 字节, bits18-19) -> 0x000D0001
+// ---------------------------------------------------------------------------
+inline void install_g_write_watchpoint() {
+    char env[16] = {0};
+    if (GetEnvironmentVariableA("XBGTASIX_WATCH_G", env, sizeof(env)) == 0 || env[0] != '1') return;
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (!exe) return;
+    const auto target = reinterpret_cast<unsigned long long>(exe) + 0x75E6FF0ULL;
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    HANDLE th = GetCurrentThread();
+    if (!GetThreadContext(th, &ctx)) {
+        logf("[xbgtasix] 写断点：取线程上下文失败 err=%lu", GetLastError());
+        return;
+    }
+    ctx.Dr0 = target;
+    ctx.Dr7 = 0x000D0001ULL;      // 8 字节写断点，局部使能 0
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!SetThreadContext(th, &ctx)) {
+        logf("[xbgtasix] 写断点：设置失败 err=%lu", GetLastError());
+        return;
+    }
+    logf("[xbgtasix] 已对 game+0x75E6FF0（g）装硬件写断点：地址=0x%llX Dr7=0x%llX", target,
+         static_cast<unsigned long long>(ctx.Dr7));
+}
+
 void maybe_install_veh() {
     static bool done = false;
     if (done) return;
@@ -411,6 +510,7 @@ void maybe_install_veh() {
     if (GetEnvironmentVariableA("XBGTASIX_VEH", buf, sizeof(buf)) == 0 || buf[0] != '1') return;
     AddVectoredExceptionHandler(1, on_fatal);
     logf("[xbgtasix] 已安装异常钩子（XBGTASIX_VEH=1）");
+    install_g_write_watchpoint();
 }
 
 void unimpl(const char* api) {
