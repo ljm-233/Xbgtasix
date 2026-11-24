@@ -280,21 +280,25 @@ HRESULT WINAPI device_extension_stub_n(DeviceProxy*, UINT64 a = 0, UINT64 b = 0,
         // 光有指针值认不出方法。主机把"结构体 in/out"塞进参数里（实测 slot 70 的两个
         // 参数相隔 0x40），把前 32 B 打出来，才有机会从字段反推它是哪一个方法。
         // 逐个 VirtualQuery，未提交就跳过 —— 绝不为一条日志去读野指针。
-        auto dump32 = [&](const char* tag, UINT64 addr) {
+        // 0x40 字节（实测 slot 70 的两个结构相隔 0x40，按 64 B 打全），分两行。
+        auto dump64 = [&](const char* tag, UINT64 addr) {
             if (addr < 0x10000) return;
             MEMORY_BASIC_INFORMATION m{};
             if (VirtualQuery(reinterpret_cast<const void*>(addr), &m, sizeof(m)) == 0) return;
             if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return;
             const auto* p = reinterpret_cast<const unsigned char*>(addr);
-            char hex[3 * 32 + 1] = {0};
-            for (int i = 0; i < 32; ++i) {
-                snprintf(hex + i * 3, 4, "%02x ", static_cast<unsigned>(p[i]));
+            for (int half = 0; half < 2; ++half) {
+                char hex[3 * 32 + 1] = {0};
+                for (int i = 0; i < 32; ++i) {
+                    snprintf(hex + i * 3, 4, "%02x ", static_cast<unsigned>(p[half * 32 + i]));
+                }
+                xbgtasix::logf("[d3d12_xs]   slot=%zu %s+0x%02X@%p: %s", N, tag, half * 32,
+                               reinterpret_cast<const void*>(addr + half * 32), hex);
             }
-            xbgtasix::logf("[d3d12_xs]   slot=%zu %s@%p: %s", N, tag,
-                           reinterpret_cast<const void*>(addr), hex);
         };
-        dump32("a", a);
-        dump32("b", b);
+        dump64("a", a);
+        dump64("b", b);
+        dump64("c", c);
     }
     // 诊断开关（默认关）：把未建模槽一律当成功，用来回答"这个槽在不在崩溃路径上"。
     // 只用于实验，**不是**修复手段——项目规则是"明确失败"，不是伪造成功。
@@ -1797,13 +1801,28 @@ inline D3D12_RESOURCE_ALLOCATION_INFO* WINAPI get_allocation_info_x(
 inline UINT WINAPI get_descriptor_increment_x(DeviceProxy* self, D3D12_DESCRIPTOR_HEAP_TYPE type) {
     constexpr UINT kHostIncrement = 0x40;
     const UINT pc_value = static_cast<ID3D12Device*>(self->pc)->GetDescriptorHandleIncrementSize(type);
+    // 实验开关（默认关）：0x40 这个值当初是为了让"标题按 64 B/条目记账"的 arena 对上，
+    // 但它被**无条件**用于所有堆类型。实测 slot 70 的目标句柄里两个描述符索引相隔 0x20，
+    // 与 0x40 矛盾，所以这里可以按驱动真值走一段，用崩溃点是否移动来判定。
+    //   XBGTASIX_INCREMENT_PC=1 -> 全部用驱动值
+    //   XBGTASIX_INCREMENT_PC=2 -> 只有非 CBV_SRV_UAV 堆用驱动值
+    static const int mode = [] {
+        const char* v = std::getenv("XBGTASIX_INCREMENT_PC");
+        return v ? std::atoi(v) : 0;
+    }();
+    UINT answer = kHostIncrement;
+    if (mode == 1) {
+        answer = pc_value;
+    } else if (mode == 2 && type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
+        answer = pc_value;
+    }
     static std::atomic<int> budget{16};
     if (budget.fetch_sub(1) > 0) {
         xbgtasix::logf("[d3d12_xs] 槽15 GetDescriptorHandleIncrementSize(type=%d) -> 0x%x"
-                       "（桌面值 0x%x；标题按 64B 记账）",
-                       static_cast<int>(type), kHostIncrement, pc_value);
+                       "（桌面值 0x%x；原策略 64B；实验模式=%d）",
+                       static_cast<int>(type), answer, pc_value, mode);
     }
-    return kHostIncrement;
+    return answer;
 }
 
 // 消费端根签名剥离：序列化时我们把主机位写回了 blob（主机侧反序列化器需要），
