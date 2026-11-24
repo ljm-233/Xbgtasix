@@ -1,5 +1,6 @@
 D3D12CreateDevice
 D3D12SerializeVersionedRootSignature
+D3D12SerializeRootSignature
 D3D12CreateRootSignatureDeserializer
 D3D12GetDebugInterface
 D3D12XboxCreateDevice
