@@ -144,3 +144,46 @@ FATAL 异常 0xC0000005 at game_scarlett_master.exe+0x5C8FA96
 跑一次真机，把**崩溃前所有查询的返回值**按时间序列比对：
 找出"如果换个值就不会走大块路径"的那一个，再按主机语义修正它。
 这比继续在守卫附近打转有效得多。
+
+## 8. 2026-11-24 追加：`D3D12ConfigureVirtualMemoryX` 收的是**主机 GPU VA 区间**，而我们是空实现
+
+给这个函数加了参数取证后，真机输出：
+
+```
+D3D12ConfigureVirtualMemoryX config=0x...  前 64 字节:
+    1FBADD1A180 1FBADD1C0D0 1FBADD25CA0 1FBADD27000
+    1FBADD2C3E0 1FBADD2D540 1FBADD2C500 1FBADD2F2D0
+
+  config[0]=0x...A180 -> 0x8000000100000000 0x1 <ptr> 0x0
+  config[1]=0x...C0D0 -> 0x8000000000000000 0xE00270ACB5001B2 ...
+  config[2]=0x...E800 -> 0x8000000000000000 <ptr> 0x0 ...
+```
+
+特征非常明确：**首字段是 `0x8000000000000000` 基址的主机 GPU 虚拟地址**
+（`0x8000_0001_0000_0000`、`0x8000_0000_0000_0000`），后面跟着类别/长度/下一级指针。
+
+也就是说：游戏通过这个调用把它的**GPU 虚拟地址空间布局**交给设备层登记。
+我们现在的实现是：
+
+```cpp
+__declspec(dllexport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* device, void* config) {
+    xbgtasix::logf("... PC 由驱动管理显存，返回 S_OK");
+    return S_OK;      // 什么都没登记
+}
+```
+
+于是游戏侧那张"GPU VA → 分配记录"的表**从未被播种**。这与第 6 节观察到的
+`g_1475E6FF0`（瞬时块基址）恒为 0 高度吻合：那个机制按地址查记录，
+而记录表是空的。
+
+### 下一轮的具体动作
+
+1. 把这 8 个指针指向的结构**完整解析**（现在只 dump 了 4 个 qword）：
+   判断每一项是 `{va, count, next_ptr, ...}` 还是别的形状（用长度 + 指针链验证）
+2. 在 `xmem` 里建一张 **GPU VA → 区间** 登记表，`D3D12ConfigureVirtualMemoryX`
+   把配置逐项登记进去
+3. 让 `XMemVirtualQuery` / 地址换算路径能查到这些区间（主机语义：地址属于已登记
+   的图形区间时，报回主机口径的属性）
+4. 复跑，观察 `g_1475E6FF0` 是否开始被写入
+
+这条线索比"补瞬时块基址"健康得多：它在**修真实的语义**，不是掩盖不变量。
