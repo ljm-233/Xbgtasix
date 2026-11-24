@@ -211,11 +211,31 @@ int main(int argc, char** argv) {
         const int N = 2000;
         const double t0 = now_ms();
         int done = 0;
+        int run_fail = 0;                       // XAsyncRun 返回失败
+        int wait_fail = 0;                      // XAsyncGetStatus 非 S_OK
+        HRESULT first_run_hr = S_OK;
+        HRESULT first_wait_hr = S_OK;
         for (int i = 0; i < N; ++i) {
             Blk b{};
-            if (SUCCEEDED(XAsyncRun(&b, reinterpret_cast<void*>(&async_noop)))) {
-                if (XAsyncGetStatus(&b, true) == S_OK) ++done;
+            const HRESULT hr_run = XAsyncRun(&b, reinterpret_cast<void*>(&async_noop));
+            if (SUCCEEDED(hr_run)) {
+                const HRESULT hr_wait = XAsyncGetStatus(&b, true);
+                if (hr_wait == S_OK) {
+                    ++done;
+                } else {
+                    if (!wait_fail) first_wait_hr = hr_wait;
+                    ++wait_fail;
+                }
+            } else {
+                if (!run_fail) first_run_hr = hr_run;
+                ++run_fail;
             }
+        }
+        if (run_fail || wait_fail) {
+            xbgtasix::logf("[t29] 异步失败明细：run_fail=%d（首个 hr=0x%08lX） "
+                           "wait_fail=%d（首个 hr=0x%08lX）",
+                           run_fail, static_cast<unsigned long>(first_run_hr), wait_fail,
+                           static_cast<unsigned long>(first_wait_hr));
         }
         const double dt = (now_ms() - t0) * 1000.0 / N;
         record("异步：XAsyncRun + wait 往返", dt, "us/次");
