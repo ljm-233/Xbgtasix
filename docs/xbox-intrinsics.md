@@ -162,3 +162,67 @@ PATH=/tmp/mingw-wrap:$PATH ninja -C build libs/d3d12core/d3d12core.dll
   cs_15/18/39/40/46 上一致）。其余符号只见到一次或几次，未逐个核。
 - 34/53 里那 19 条驱动拒绝的**真实原因**：现在符号语义是零占位，判读没有意义。
 - `TypedLoad.i32` 返回的 `{i32×5}` 每个分量是什么：未查。
+
+---
+
+## 8. 2026-11-25 下午：A 族打通，22/53（原 9/53）
+
+### 8.1 关键结论：`OpConvertUToPtr(PhysicalStorageBuffer)` 这条路成立
+
+`xbox.global_load_dword*_with_cache` 翻成 `OpConvertUToPtr` + `OpLoad`，**Mesa 接受**：
+
+```
+cs_03  0x80070057 -> 0x00000000  ok
+cs_04  0x80070057 -> 0x00000000  ok
+cs_06  （store_dwordx3）ok      cs_35（atomic add/sub/fmin/fmax） ok
+```
+
+为什么能成立（源码核过，不是猜）：
+
+| 事实 | 出处 |
+|---|---|
+| vkd3d 给每个 buffer 都加 `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` | `libs/vkd3d/resource.c:252` |
+| `ID3D12Resource::GetGPUVirtualAddress()` 返回的就是 `vkGetBufferDeviceAddress` 的值 | `resource.c:4938`、`:2677` |
+| dxil-spirv 支持 PhysicalStorageBuffer 寻址模型（含 capability/extension 声明） | `spirv_module.cpp:410-418` |
+
+也就是说：**游戏从 vkd3d 拿到的 GPU VA 本来就是 Vulkan 设备地址**，所以裸地址解引用是可行的 ——
+不需要在 shim 里另建一套 VA 表。（这一条和我们最初对 victory 的判断相反：victory 那边
+`gpu_address` 返回的是 CPU 指针，那是它自己的实现选择；我们这条链路不存在那个问题。）
+
+### 8.2 但 `XBGTASIX_FORCE_BDA` 不是免费的
+
+vkd3d 原本只在"有 RAW_VA 绑定或根描述符"时才开 physical storage（`dxil.c:1630`）；
+我们的根签名两者都没有，所以要靠环境变量无条件打开。代价实测：
+
+```
+23 条 shader 从「未实现符号」变成「dxil-spirv: Failed to emit instruction」
+（cs 12-19, 21-26, 30, 31, 34, 41-43, 45, 47, 53）
+```
+
+因为寻址模型是**模块级**的，一开就影响所有描述符访问的 lowering。
+**正式做法必须是"按 shader 决定"**：预扫该模块声明的函数里有没有 `xbox.global_*`，
+有才开。落点在 `dxil_spv_c.cpp` 解析完成之后、`begin_converter_pass` 之前。
+
+### 8.3 选择子不是常量（推翻了我自己前面的话）
+
+同一个符号会给不同选择子：`global_load_dword_with_cache` 见过 `0x164`（cs_03）、`0x166`（cs_04）、
+`0x167`（cs_05/33）、`0x16c`（cs_s_load）。语义由**符号名**（读几个 dword）决定，
+选择子是"缓存策略/变体"，Vulkan 侧由内存模型承担。所以按 `0x160..0x16f` 这一档接受，
+每个新值首次出现打一条日志留痕；超出这一档明确失败。
+
+### 8.4 当前分布（Cold cache，Intel Mesa，FORCE_BDA=1）
+
+| 结果 | 条数 | 说明 |
+|---|---:|---|
+| ok | **22** | cs 02 03 04 06 07 09 10 11 20 27 28 33 35 36 37 38 39 44 46 48 49 52 |
+| `Unhandled instruction!` | 5 | bitcode 记录缺口（cs 01 08 29 50 51），与符号无关 |
+| `Failed to convert function` | 23 | **FORCE_BDA 的副作用**，按 shader 开关后应能回收大部分 |
+| 驱动拒绝（hr 0） | 3 | cs 05（用了浮点原子）、cs 32、cs 40 |
+
+### 8.5 下一步（两条都不大）
+
+1. **按 shader 开 BDA**（预扫声明函数名）→ 回收那 23 条。
+2. **浮点原子**：`OpAtomicFMinEXT/FMaxEXT` 要靠 `VK_EXT_shader_atomic_float`
+   （capability `AtomicFloat32MinMaxEXT` = 5612）。vkd3d 侧要确认该 feature 已启用；
+   cs_05 现在是"翻译通过、驱动拒收"，就是这一步。
+3. `V_ALIGNBYTE_B32` 语义未定（AMD 的字节对齐指令），要单独查，不猜。

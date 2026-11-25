@@ -9,7 +9,7 @@
  
    # dxil-utils
 --- vkd3d-src/subprojects/dxil-spirv/dxil_converter.cpp	2026-11-24 19:06:29.000000000 +0800
-+++ vkd3d-patch/subprojects/dxil-spirv/dxil_converter.cpp	2026-11-25 12:31:10.578699900 +0800
++++ vkd3d-patch/subprojects/dxil-spirv/dxil_converter.cpp	2026-11-25 13:17:24.498467100 +0800
 @@ -25,6 +25,7 @@
  #include "opcodes/converter_impl.hpp"
  #include "opcodes/opcodes_dxil_builtins.hpp"
@@ -18,8 +18,21 @@
  #include "opcodes/dxil/dxil_common.hpp"
  #include "opcodes/dxil/dxil_workgraph.hpp"
  #include "opcodes/dxil/dxil_geometry.hpp"
-@@ -6582,6 +6583,11 @@
+@@ -6580,8 +6581,24 @@
+ 		{
+ 			// lib_6_6 sometimes emits llvm.lifetime.begin/end for some bizarre reason.
  			// Just ignore ...
++			//
++			// 但**有返回值**的 llvm.* 绝不能忽略：结果 id 会永远没有定义，
++			// SPIR-V 留悬空引用，驱动不给原因直接拒管线（cs_05/cs_32/cs_40 实测）。
++			if (emit_llvm_intrinsic_instruction(*this, *call_inst))
++				return true;
++			if (!called_function->getReturnType()->isVoidTy())
++			{
++				LOGE("Unhandled llvm intrinsic with a result: %s\n",
++				     called_function->getName().data());
++				return false;
++			}
  			return true;
  		}
 +		else if (is_xbox_intrinsic(called_function))
@@ -30,7 +43,7 @@
  		else
  		{
  			return emit_call_instruction(*this, *call_inst);
-@@ -8561,8 +8567,12 @@
+@@ -8561,8 +8578,12 @@
  			if (const auto *call_inst = llvm::dyn_cast<llvm::CallInst>(&inst))
  			{
  				auto *fn = call_inst->getCalledFunction();
@@ -44,7 +57,7 @@
  				{
  					gather_function_dependencies(fn, funcs);
  				}
-@@ -8586,6 +8596,9 @@
+@@ -8586,6 +8607,9 @@
  		if (leaf_func == func || leaf_func == execution_mode_meta.patch_constant_function)
  			continue;
  
@@ -54,3 +67,40 @@
  		if (leaf_func->empty())
  		{
  			LOGE("Function '%s' is declared but has no definition.\n", get_function_name(leaf_func).c_str());
+--- vkd3d-src/libs/vkd3d-shader/dxil.c	2026-11-24 20:02:26.000000000 +0800
++++ vkd3d-patch/libs/vkd3d-shader/dxil.c	2026-11-25 12:56:07.121574300 +0800
+@@ -21,6 +21,19 @@
+ #define DXIL_SPV_ENABLE_EXPERIMENTAL_WORKGRAPHS
+ #define DXIL_SPV_ENABLE_EXPERIMENTAL_MULTIVIEW
+ #include "vkd3d_shader_private.h"
++
++/* 1 = 无条件开 physical storage buffer（实验用，用环境变量 XBGTASIX_FORCE_BDA 控制） */
++static int vkd3d_force_bda_experiment(void)
++{
++    static int cached = -1;
++    if (cached < 0)
++    {
++        const char *v = getenv("XBGTASIX_FORCE_BDA");
++        cached = (v && *v == '1') ? 1 : 0;
++    }
++    return cached;
++}
++#define VKD3D_FORCE_BDA_EXPERIMENT vkd3d_force_bda_experiment()
+ #include "vkd3d_utf8.h"
+ #include "vkd3d_string.h"
+ #include <inttypes.h>
+@@ -1626,8 +1639,13 @@
+         root_constant_words = num_root_descriptors * 2;
+     root_constant_words -= num_root_descriptors * 2;
+ 
++    /* Xbgtasix 实验：主机的 `xbox.global_*_with_cache` 用 64 位裸地址访问，
++     * 要翻成 OpConvertUToPtr(PhysicalStorageBuffer)，整个模块必须切到
++     * PhysicalStorageBuffer64 寻址模型。vkd3d 原本只在"有 RAW_VA 绑定或根描述符"时
++     * 才开（我们的根签名两者都没有），这里先无条件打开做一次可行性实验。
++     * 若这条能过，正式做法是"只在见到 xbox 裸地址访问时打开"。 */
+     if ((ret = vkd3d_dxil_converter_set_options(converter, shader_interface_info, compiler_args, quirks,
+-            spirv->meta.hash, NULL, raw_va_binding_count || num_root_descriptors)))
++            spirv->meta.hash, NULL, VKD3D_FORCE_BDA_EXPERIMENT || raw_va_binding_count || num_root_descriptors)))
+         goto end;
+ 
+     remap_userdata.shader_interface_info = shader_interface_info;
