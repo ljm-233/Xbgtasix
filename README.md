@@ -1,4 +1,4 @@
-# Xbgtasix
+# Xbgtasix 最关键！
 
 [![ci](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml/badge.svg)](https://github.com/ljm-233/Xbgtasix/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
