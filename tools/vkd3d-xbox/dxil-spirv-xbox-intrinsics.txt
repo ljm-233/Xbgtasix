@@ -9,7 +9,7 @@
  
    # dxil-utils
 --- vkd3d-src/subprojects/dxil-spirv/dxil_converter.cpp	2026-11-24 19:06:29.000000000 +0800
-+++ vkd3d-patch/subprojects/dxil-spirv/dxil_converter.cpp	2026-11-25 13:17:24.498467100 +0800
++++ vkd3d-patch/subprojects/dxil-spirv/dxil_converter.cpp	2026-11-25 13:23:43.967435300 +0800
 @@ -25,6 +25,7 @@
  #include "opcodes/converter_impl.hpp"
  #include "opcodes/opcodes_dxil_builtins.hpp"
@@ -27,7 +27,7 @@
 +			// SPIR-V 留悬空引用，驱动不给原因直接拒管线（cs_05/cs_32/cs_40 实测）。
 +			if (emit_llvm_intrinsic_instruction(*this, *call_inst))
 +				return true;
-+			if (!called_function->getReturnType()->isVoidTy())
++			if (call_inst->getType()->getTypeID() != llvm::Type::TypeID::VoidTyID)
 +			{
 +				LOGE("Unhandled llvm intrinsic with a result: %s\n",
 +				     called_function->getName().data());
@@ -67,6 +67,42 @@
  		if (leaf_func->empty())
  		{
  			LOGE("Function '%s' is declared but has no definition.\n", get_function_name(leaf_func).c_str());
+@@ -9236,6 +9260,27 @@
+ 	return false;
+ }
+ 
++// Xbgtasix：主机 `xbox.global_*` 是 64 位裸地址访问，翻译成 OpLoad/OpStore/OpAtomic*
++// 需要 PhysicalStorageBuffer64 寻址模型，而寻址模型是**模块级**的（见 spirv_module.cpp）。
++// vkd3d 只在"有 RAW_VA 绑定或根描述符"时才开（libs/vkd3d-shader/dxil.c），
++// 我们的根签名两者都没有。所以按**本模块声明了哪些外部函数**来决定，
++// 粒度是"每个 shader 一份"，避免无条件打开把别的描述符 lowering 一起改掉。
++static bool module_declares_xbox_raw_va_access(const llvm::Module &module)
++{
++	for (auto *func : module)
++	{
++		const char *name = func->getName().data();
++		if (!name || strncmp(name, "xbox.global_", 12) != 0)
++			continue;
++		if (strncmp(name, "xbox.global_load_", 17) == 0 ||
++		    strncmp(name, "xbox.global_store_", 18) == 0 ||
++		    strncmp(name, "xbox.global_atomic_", 19) == 0 ||
++		    strncmp(name, "xbox.s_load_", 12) == 0)
++			return true;
++	}
++	return false;
++}
++
+ ConvertedFunction Converter::Impl::convert_entry_point()
+ {
+ 	ConvertedFunction result = {};
+@@ -9296,6 +9341,7 @@
+ 
+ 	bool need_bda =
+ 		options.physical_storage_buffer ||
++		module_declares_xbox_raw_va_access(module) ||
+ 		(execution_model_lib_target &&
+ 		 execution_model == spv::ExecutionModelGLCompute);
+ 
 --- vkd3d-src/libs/vkd3d-shader/dxil.c	2026-11-24 20:02:26.000000000 +0800
 +++ vkd3d-patch/libs/vkd3d-shader/dxil.c	2026-11-25 12:56:07.121574300 +0800
 @@ -21,6 +21,19 @@

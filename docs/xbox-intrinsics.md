@@ -226,3 +226,23 @@ vkd3d 原本只在"有 RAW_VA 绑定或根描述符"时才开 physical storage�
    （capability `AtomicFloat32MinMaxEXT` = 5612）。vkd3d 侧要确认该 feature 已启用；
    cs_05 现在是"翻译通过、驱动拒收"，就是这一步。
 3. `V_ALIGNBYTE_B32` 语义未定（AMD 的字节对齐指令），要单独查，不猜。
+
+### 8.6 按 shader 开 BDA（做完）：31/53
+
+`XBGTASIX_FORCE_BDA` 那种全局打开换成**按模块自己的声明**判断：`need_bda` 多一条判据 ——
+本模块是否声明了 `xbox.global_load_*` / `xbox.global_store_*` / `xbox.global_atomic_*` /
+`xbox.s_load_*` 中的任何一个。粒度是每个 shader 一份。
+
+| 跑法 | ok |
+|---|---:|
+| 参考（未打补丁） | 9 |
+| 全局 FORCE_BDA + 已实现符号 | 22 |
+| **按 shader 开 BDA + 已实现符号** | **31** |
+
+新增回收 9 条（cs 05 21 22 23 24 25 26 32 40），**无回退**。
+cs_05 是浮点原子那条：`OpAtomicFMinEXT/FMaxEXT` 在 Intel Mesa 上**不额外要求** feature
+就编过了（capability 5612 已声明）；NVIDIA 侧未验。
+
+**剩下 22 条**：17 条 `Failed to convert function`（用到还没实现的 `s_load_dword_with_cache` /
+`LaneSwizzle` / `ReadLane` / `GetLaneID` / `Ballot64` / `MakeUniform` / `V_ALIGNBYTE_B32` /
+`TypedLoad.i32`），5 条 bitcode 记录缺口。
