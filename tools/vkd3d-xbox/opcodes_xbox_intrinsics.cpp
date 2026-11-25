@@ -223,6 +223,50 @@ bool emit_med3(Converter::Impl &impl, const llvm::CallInst &inst)
 	return true;
 }
 
+
+// 追一层值的来源（最多 4 跳），用来判断 A 族的 i64 地址是
+// "某个描述符调用直接给的" 还是 "算出来的裸地址"。
+String describe_origin(const llvm::Value *value, int depth = 0)
+{
+	char buf[64];
+	if (!value)
+		return String("<null>");
+	if (depth >= 4)
+		return String("...");
+	if (const auto *call = llvm::dyn_cast<llvm::CallInst>(value))
+		return String("call:") + get_xbox_intrinsic_name(call->getCalledFunction());
+	if (const auto *arg = llvm::dyn_cast<llvm::Argument>(value))
+	{
+		snprintf(buf, sizeof(buf), "argument#%u", arg->getArgNo());
+		return String(buf);
+	}
+	if (const auto *bin = llvm::dyn_cast<llvm::BinaryOperator>(value))
+	{
+		snprintf(buf, sizeof(buf), "binary(op%u)", static_cast<unsigned>(bin->getOpcode()));
+		return String(buf) + "(" + describe_origin(bin->getOperand(0), depth + 1) + ", " +
+		       describe_origin(bin->getOperand(1), depth + 1) + ")";
+	}
+	if (const auto *inst = llvm::dyn_cast<llvm::Instruction>(value))
+	{
+		if (llvm::isa<llvm::CastInst>(inst))
+			return String("cast(") + describe_origin(inst->getOperand(0), depth + 1) + ")";
+		if (llvm::isa<llvm::GetElementPtrInst>(inst))
+			return String("gep(") + describe_origin(inst->getOperand(0), depth + 1) + ")";
+		if (llvm::isa<llvm::LoadInst>(inst))
+			return String("load(") + describe_origin(inst->getOperand(0), depth + 1) + ")";
+		if (llvm::isa<llvm::ExtractValueInst>(inst))
+			return String("extractvalue(") + describe_origin(inst->getOperand(0), depth + 1) + ")";
+		if (llvm::isa<llvm::PHINode>(inst) && inst->getNumOperands() >= 1)
+			return String("phi(") + describe_origin(inst->getOperand(0), depth + 1) + ")";
+		return String("inst");
+	}
+#ifdef HAVE_LLVMBC
+	return String("ssa");
+#else
+	return String("ssa");
+#endif
+}
+
 // 未实现的符号：打一次签名（含每个实参是常量还是 SSA），然后明确失败。
 void log_unimplemented(const llvm::CallInst &inst, const String &name)
 {
@@ -253,8 +297,13 @@ void log_unimplemented(const llvm::CallInst &inst, const String &name)
 			LOGE_INNER("[xbox-intrinsic]   arg%u = const 0x%llx\n", i,
 			           static_cast<unsigned long long>(ci->getUniqueInteger().getZExtValue()));
 		else
-			LOGE_INNER("[xbox-intrinsic]   arg%u = ssa(%s)\n", i,
+		{
+			// 追一层来源：A 族的 i64 地址到底是"哪儿算出来的"，
+			// 决定它能不能在翻译期还原成一个描述符。
+			LOGE_INNER("[xbox-intrinsic]   arg%u = %s (%s)\n", i,
+			           describe_origin(arg).c_str(),
 			           describe_type(arg->getType()).c_str());
+		}
 	}
 }
 } // namespace

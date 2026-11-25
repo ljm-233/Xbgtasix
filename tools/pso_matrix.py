@@ -213,10 +213,18 @@ def run_one(exe, stage_d3d12, cs, rs, icd, tmp_pairs):
     pair_path.write_text("%s\t%s\n" % (wpath(cs), wpath(rs)),
                          encoding="utf-8")
     cmd = ["wine", str(exe), "--d3d12", wpath(stage_d3d12), "--pairs", wpath(pair_path)]
+    # vkd3d 会把编好的 PSO 写进 cwd 的 vkd3d-proton.cache。**这会把矩阵污染掉**：
+    # 上一次（比如诊断模式下）编过的管线会被下次直接命中，于是"没实现也能 ok"。
+    # 所以每条 shader 都跑在自己的空目录里，缓存永远是冷的。
+    run_cwd = tmp_pairs / ("cwd_%s" % cs.stem)
+    run_cwd.mkdir(exist_ok=True)
+    for stale in run_cwd.glob("vkd3d-proton.cache"):
+        stale.unlink()
+
     t0 = time.time()
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, env=run_env(icd),
-                            timeout=PER_SHADER_TIMEOUT, cwd=str(OUTDIR / "bin"))
+                            timeout=PER_SHADER_TIMEOUT, cwd=str(run_cwd))
         rc, out, err = r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         rc, out, err = 124, "", "timeout"
