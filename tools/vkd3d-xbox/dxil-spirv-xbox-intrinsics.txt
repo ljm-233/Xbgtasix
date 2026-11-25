@@ -1,0 +1,56 @@
+--- vkd3d-src/subprojects/dxil-spirv/meson.build	2026-11-24 19:06:29.000000000 +0800
++++ vkd3d-patch/subprojects/dxil-spirv/meson.build	2026-11-25 12:31:10.576699900 +0800
+@@ -80,6 +80,7 @@
+   'opcodes/dxil/dxil_mesh.cpp',
+   'opcodes/dxil/dxil_workgraph.cpp',
+   'opcodes/opcodes_llvm_builtins.cpp',
++  'opcodes/opcodes_xbox_intrinsics.cpp',
+   'opcodes/opcodes_dxil_builtins.cpp',
+ 
+   # dxil-utils
+--- vkd3d-src/subprojects/dxil-spirv/dxil_converter.cpp	2026-11-24 19:06:29.000000000 +0800
++++ vkd3d-patch/subprojects/dxil-spirv/dxil_converter.cpp	2026-11-25 12:31:10.578699900 +0800
+@@ -25,6 +25,7 @@
+ #include "opcodes/converter_impl.hpp"
+ #include "opcodes/opcodes_dxil_builtins.hpp"
+ #include "opcodes/opcodes_llvm_builtins.hpp"
++#include "opcodes/opcodes_xbox_intrinsics.hpp"
+ #include "opcodes/dxil/dxil_common.hpp"
+ #include "opcodes/dxil/dxil_workgraph.hpp"
+ #include "opcodes/dxil/dxil_geometry.hpp"
+@@ -6582,6 +6583,11 @@
+ 			// Just ignore ...
+ 			return true;
+ 		}
++		else if (is_xbox_intrinsic(called_function))
++		{
++			// 主机外部内建：就地翻译，不生成 OpFunctionCall。
++			return emit_xbox_intrinsic(*this, *call_inst);
++		}
+ 		else
+ 		{
+ 			return emit_call_instruction(*this, *call_inst);
+@@ -8561,8 +8567,12 @@
+ 			if (const auto *call_inst = llvm::dyn_cast<llvm::CallInst>(&inst))
+ 			{
+ 				auto *fn = call_inst->getCalledFunction();
++				// xbox.* 是主机专有的外部内建（只有声明）。它们不是"要被链接的函数"，
++				// 而是在调用点就地翻译成 SPIR-V（见 emit_xbox_intrinsic），
++				// 所以不能进依赖集合 —— 否则会被当成 leaf 函数、报"declared but has no definition"。
+ 				if (strncmp(fn->getName().data(), "dx.op", 5) != 0 &&
+-				    strncmp(fn->getName().data(), "llvm.", 5) != 0)
++				    strncmp(fn->getName().data(), "llvm.", 5) != 0 &&
++				    !is_xbox_intrinsic(fn))
+ 				{
+ 					gather_function_dependencies(fn, funcs);
+ 				}
+@@ -8586,6 +8596,9 @@
+ 		if (leaf_func == func || leaf_func == execution_mode_meta.patch_constant_function)
+ 			continue;
+ 
++		if (is_xbox_intrinsic(leaf_func))
++			continue;   // 在调用点翻译，不需要函数体（见 emit_xbox_intrinsic）
++
+ 		if (leaf_func->empty())
+ 		{
+ 			LOGE("Function '%s' is declared but has no definition.\n", get_function_name(leaf_func).c_str());
