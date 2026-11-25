@@ -353,6 +353,13 @@ d3d12_xs.cpp 的 D3D12CreateDevice：只在选 Vkd3d 时检查 d3d12core.dll 是
 
 ### MVG-2（1–2 天，**信息量最大**）：把 53 个真实 shader + 17 个根签名在 Linux 上重放
 
+> **已完成（2026-11-25）→ [pso-matrix.md](pso-matrix.md)**
+> 结果：**9/53 编过**，Intel 与 NVIDIA 逐条相同（含同一批错误码）→ 失败与驱动无关，卡在
+> dxil-spirv。缺口是可枚举的：**13 个 `xbox.*` 主机外部符号**（`*_with_cache` 族 7 个、
+> wave/通道族 3 个、整数辅助 3 个）+ **一类 LLVM bitcode 记录**（5 条）。
+> 工具：`tools/pso_matrix.py`（跑表，可重入）、`tools/pso_matrix/pso_matrix.cpp`（PE 侧）、
+> `tools/pso_matrix_classify.py`（三档分类）。表在 `build/pso_matrix/`。
+
 **为什么这条比 MVG-1 更值钱**：它**不需要 exe**，而且直接回答"Vulkan 路线能不能吃下游戏着色器"。
 现有 Windows 侧的证据是矛盾的：`transient-block-wall.md` §29 说"WARP 编过 48/53"，
 `rts0-analysis.md` §10.3 又查出**那一版 t49 根本没用 WARP**（`igd12um64xeh.dll` 出现 75 次、
