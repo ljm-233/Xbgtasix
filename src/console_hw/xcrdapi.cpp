@@ -156,6 +156,11 @@ const GUID kIidFactoryXRef = {0xFB3B54AC, 0xBF82, 0x463A, {0xB7, 0x77, 0x73, 0x1
 // 子对象 IID（来自 abi.rs）
 const GUID kIidFileX = {0x43704F9F, 0x27C6, 0x4A9F, {0x88, 0x15, 0xD1, 0x65, 0x27, 0x89, 0x4D, 0xF4}};
 const GUID kIidQueueX = {0xA3F6649A, 0x8C2C, 0x4B3A, {0x8B, 0x6E, 0x10, 0x18, 0x6A, 0x04, 0xB9, 0xBC}};
+// 实测：game_scarlett_master.exe 在 fiDeviceDirectStorage 构造里请求的队列 IID 是这一个
+// （反汇编 game+0x28C95C7 之前的 `lea 0x...(%rip),%r8` -> .rdata 0x62FC7F8 那张 GUID 表），
+// 与参考实现那版 kIidQueueX 不同：{3C02CB0C-C050-4195-99A1-A1CE94BA33C5}。
+// 同属 IDStorageQueueX 家族，按同一份实现接住。
+const GUID kIidQueueX2604 = {0x3C02CB0C, 0xC050, 0x4195, {0x99, 0xA1, 0xA1, 0xCE, 0x94, 0xBA, 0x33, 0xC5}};
 const GUID kIidStatusArrayX = {0xCD66D752, 0x2786, 0x44F7, {0x90, 0x70, 0xE2, 0xA6, 0xFD, 0xAD, 0x3F, 0x1B}};
 // PC DirectStorage 的工厂 IID：明确拒绝，并在日志里说清原因（这条是排障关键信息）
 const GUID kIidFactoryPc = {0x6924EA0C, 0xC3CD, 0x4826, {0xB1, 0x0A, 0xF6, 0x4F, 0x4E, 0xD9, 0x27, 0xC1}};
@@ -1098,7 +1103,8 @@ HRESULT queue_qi(QueueObj* o, const GUID* riid, void** ppv) {
     char t[40];
     iid_text(riid, t, sizeof(t));
     if (riid == nullptr) return static_cast<HRESULT>(kE_POINTER);
-    if (iid_eq(riid, kIidUnknown) || iid_eq(riid, kIidQueueX) || !is_other_known_iid(riid, kIidQueueX)) {
+    if (iid_eq(riid, kIidUnknown) || iid_eq(riid, kIidQueueX) || iid_eq(riid, kIidQueueX2604) ||
+        !is_other_known_iid(riid, kIidQueueX)) {
         queue_add_ref(o);
         *ppv = o;
         xl("IDStorageQueueX::QueryInterface(slot0) riid=%s -> S_OK queue=%p", t, static_cast<void*>(o));
@@ -1923,7 +1929,33 @@ HRESULT factory_set_staging_buffer_size(FactoryObj*, uint32_t size) {
 }
 
 XCRD_TRAP(factory_trap9, FactoryObj, "IDStorageFactoryX", 9)
-XCRD_TRAP(factory_trap10, FactoryObj, "IDStorageFactoryX", 10)
+
+// 槽 10：游戏在 CreateStatusArray 之后**紧接着**调它，拿到的返回值被存进数组并立刻判空，
+// 为 0（E_NOTIMPL 的负值让上层走到断言）就在 game+0x28CB836 int3。
+// 语义未知，所以先只做取证：把调用方返回地址和四个寄存器参数打出来，
+// 再拿这个 RVA 去反汇编看它要求什么形状（不要靠猜结果类型）。
+// 结论（2026-11-26 反汇编 game+0x28C9462 后确认）：槽 10 就是**主机的 CreateQueue**。
+// 证据：
+//   1) 调用方先把一个 0x18 字节结构按主机 DSTORAGE_QUEUE_DESC 布局填好
+//      （+0x00 SourceType / +0x08 u16 Capacity / +0x0a i8 Priority / +0x10 名字指针 / +0x18 1），
+//      与 factory_create_queue 里那份布局注释逐字段吻合；
+//   2) r8 指向 .rdata 里的一张 GUID 表（0x62FC7F8）—— 队列 IID，
+//      紧邻的 0x62FC7E8 正是 CreateStatusArray 用的那个 IID（已在真机日志里对上）；
+//   3) r9 = 新建对象 +0x18，是 ppv 输出槽；
+//   4) 整个游戏**从不调用槽 3**（日志里 CreateQueue(slot3) 计数 0），它用的是这个槽位。
+// 所以这里直接转给已经实现的 factory_create_queue（CPU 文件后端 + 自带 inflate）。
+int32_t __stdcall factory_slot10_probe(FactoryObj*, void* a1, void* a2, void* a3, void* a4) {
+    const void* caller = __builtin_return_address(0);
+    // 反汇编调用点（game+0x28C95CA）：
+    //     mov (%rcx),%rax / call *0x50(%rax)   <- 槽 10
+    //     test %eax,%eax / jns ok / int3       <- 返回值必须是非负 HRESULT
+    // 调用前调用方填了一个结构（rdx+0x00/+0x08/+0x0a/+0x10/+0x18），所以 a1 是入参描述。
+    // 语义仍未知：这里只保证"非负返回"，并把参数记下来，让下一堵墙露出来。
+    (void)caller;
+    // 复用槽 3 的实现：desc = a1, riid = a2, ppv = a3
+    return static_cast<int32_t>(factory_create_queue(nullptr, a1, static_cast<const GUID*>(a2),
+                                                    reinterpret_cast<void**>(a3)));
+}
 XCRD_TRAP(factory_trap11, FactoryObj, "IDStorageFactoryX", 11)
 XCRD_TRAP(factory_trap12, FactoryObj, "IDStorageFactoryX", 12)
 XCRD_TRAP(factory_trap13, FactoryObj, "IDStorageFactoryX", 13)
@@ -1940,7 +1972,8 @@ const FactoryVtbl kFactoryVtbl = {factory_qi,
                                   factory_set_debug_flags,
                                   factory_set_staging_buffer_size,
                                   factory_trap9,
-                                  factory_trap10,
+                                  reinterpret_cast<int32_t(__stdcall*)(FactoryObj*)>(
+                                      &factory_slot10_probe),
                                   factory_trap11,
                                   factory_trap12,
                                   factory_trap13,

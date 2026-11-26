@@ -450,6 +450,65 @@ LONG WINAPI on_fatal(PEXCEPTION_POINTERS info) {
              reinterpret_cast<void*>(c->Rcx), reinterpret_cast<void*>(c->Rdx),
              reinterpret_cast<void*>(c->Rsi), reinterpret_cast<void*>(c->Rdi),
              reinterpret_cast<void*>(c->R8), reinterpret_cast<void*>(c->R9));
+        // 模块归属：崩溃点/寄存器里的指针落在哪个模块、模块内偏移多少。
+        // 没有这个，"vtable 槽为 0"这类现场只能靠猜是谁的对象。
+        auto where = [](const char* tag, unsigned long long addr) {
+            if (!addr) { logf("[xbgtasix]   %s = 0（空指针）", tag); return; }
+            HMODULE mod = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    reinterpret_cast<LPCWSTR>(addr), &mod) || !mod) {
+                logf("[xbgtasix]   %s = %p（不在任何已加载模块内）", tag,
+                     reinterpret_cast<void*>(addr));
+                return;
+            }
+            wchar_t full[MAX_PATH] = {0};
+            GetModuleFileNameW(mod, full, MAX_PATH);
+            const wchar_t* base = wcsrchr(full, L'\\');
+            char name[128] = {0};
+            WideCharToMultiByte(CP_UTF8, 0, base ? base + 1 : full, -1, name, sizeof(name), nullptr, nullptr);
+            logf("[xbgtasix]   %s = %p -> %s+0x%llX", tag, reinterpret_cast<void*>(addr), name,
+                 static_cast<unsigned long long>(
+                     addr - reinterpret_cast<unsigned long long>(mod)));
+        };
+        where("Rip", c->Rip);
+        where("Rax", c->Rax);
+        where("Rcx", c->Rcx);
+        // 解引用 Rcx 前必须确认它可读：VEH 里踩到野指针会变成嵌套异常，现场全毁。
+        {
+            unsigned long long deref = 0;
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (c->Rcx && VirtualQuery(reinterpret_cast<void*>(c->Rcx), &mbi, sizeof(mbi)) == sizeof(mbi) &&
+                mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0) {
+                deref = *reinterpret_cast<unsigned long long*>(c->Rcx);
+            }
+            where("[Rcx]", deref);
+        }
+        where("Rdx", c->Rdx);
+        // 如果 Rcx 是一个 COM 对象，把它的 vtable 前 12 项打出来：
+        // "槽 9 读到 0"这类现场，知道 vtable 有几项、哪几项非空，就能反推是哪个接口。
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            const auto* obj = reinterpret_cast<const unsigned long long*>(c->Rcx);
+            if (c->Rcx && VirtualQuery(reinterpret_cast<void*>(c->Rcx), &mbi, sizeof(mbi)) == sizeof(mbi) &&
+                mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0) {
+                const auto vt = *reinterpret_cast<void* const* const*>(c->Rcx);
+                MEMORY_BASIC_INFORMATION vmbi{};
+                if (vt && VirtualQuery(vt, &vmbi, sizeof(vmbi)) == sizeof(vmbi) && vmbi.State == MEM_COMMIT &&
+                    !(vmbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+                    char line[512] = {0};
+                    size_t used = 0;
+                    for (int i = 0; i < 12; ++i) {
+                        const auto fn = reinterpret_cast<const unsigned long long*>(vt)[i];
+                        used += snprintf(line + used, sizeof(line) - used, "%s0x%llx", i ? " " : "",
+                                         static_cast<unsigned long long>(fn));
+                        if (used >= sizeof(line) - 32) break;
+                    }
+                    logf("[xbgtasix]   对象 %p 的 vtable@%p 前 12 项：%s", reinterpret_cast<void*>(c->Rcx),
+                         vt, line);
+                }
+            }
+        }
         auto dump = [](const char* tag, unsigned long long addr) {
             if (!addr) return;
             MEMORY_BASIC_INFORMATION mbi{};
@@ -834,6 +893,74 @@ void* ctx_from_teb() {
     return *reinterpret_cast<void**>(static_cast<unsigned char*>(block) + 0x7F0);
 }
 
+// ---------------------------------------------------------------------------
+// ExitProcess 钩子：短跑是"游戏自己 exit(3)"，日志里看不到原因。
+// 这里把 kernel32!ExitProcess 的前 12 字节改成 `mov rax,imm64; jmp rax`，
+// 跳到我们的记录函数：打印调用栈（模块+偏移）后再调原函数。
+// ---------------------------------------------------------------------------
+typedef void(WINAPI* ExitProcessFn)(UINT);
+static ExitProcessFn g_exit_orig = nullptr;
+
+static void WINAPI exit_hook(UINT code) {
+    void* frames[24] = {};
+    const USHORT n = RtlCaptureStackBackTrace(1, 24, frames, nullptr);
+    logf("[xbgtasix] ★ ExitProcess(%u) 被调用，调用栈：", code);
+    for (USHORT i = 0; i < n && i < 8; ++i) {
+        HMODULE mod = nullptr;
+        unsigned long long rva = reinterpret_cast<unsigned long long>(frames[i]);
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(frames[i]), &mod) && mod) {
+            rva -= reinterpret_cast<unsigned long long>(mod);
+        }
+        wchar_t wpath[MAX_PATH] = {0};
+        const char* base = "?";
+        char ansi[MAX_PATH] = {0};
+        if (mod && GetModuleFileNameW(mod, wpath, MAX_PATH)) {
+            const wchar_t* slash = wcsrchr(wpath, L'\\');
+            if (WideCharToMultiByte(CP_UTF8, 0, slash ? slash + 1 : wpath, -1, ansi, MAX_PATH,
+                                    nullptr, nullptr) > 0) {
+                base = ansi;
+            }
+        }
+        logf("[xbgtasix]   exit#%u %s+0x%llX", i, base, rva);
+    }
+    if (g_exit_orig) g_exit_orig(code);
+}
+
+static void install_exit_hook() {
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    if (!k32) return;
+    auto* target = reinterpret_cast<unsigned char*>(GetProcAddress(k32, "ExitProcess"));
+    if (!target) return;
+    DWORD old = 0;
+    if (!VirtualProtect(target, 12, PAGE_EXECUTE_READWRITE, &old)) return;
+    static unsigned char saved[12] = {};
+    std::memcpy(saved, target, 12);
+    // ⚠ 必须做 trampoline：直接把 g_exit_orig 指向被打过补丁的入口 = 无限递归
+    // （实测表现为 877 次 ExitProcess、栈里全是 XCRDAPI+0xB21F，进程以 0x7C 退出）。
+    {
+        auto* tramp = static_cast<unsigned char*>(
+            VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        if (!tramp) return;
+        std::memcpy(tramp, saved, 12);                 // 原 12 字节
+        tramp[12] = 0x48;                              // mov rax, imm64
+        tramp[13] = 0xB8;
+        const auto back = reinterpret_cast<unsigned long long>(target + 12);
+        std::memcpy(tramp + 14, &back, 8);
+        tramp[22] = 0xFF;                              // jmp rax
+        tramp[23] = 0xE0;
+        FlushInstructionCache(GetCurrentProcess(), tramp, 32);
+        g_exit_orig = reinterpret_cast<ExitProcessFn>(tramp);
+    }
+    unsigned char patch[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
+    const auto addr = reinterpret_cast<unsigned long long>(&exit_hook);
+    std::memcpy(patch + 2, &addr, 8);
+    std::memcpy(target, patch, 12);
+    VirtualProtect(target, 12, old, &old);
+    logf("[xbgtasix] 已挂 ExitProcess 钩子（记录 exit 调用栈）");
+}
+
 void install_ctx_write_watchpoint() {
     char env[8] = {0};
     if (GetEnvironmentVariableA("XBGTASIX_WATCH_CTX", env, sizeof(env)) == 0 || env[0] != '1') return;
@@ -1015,12 +1142,106 @@ void install_int3_probes() {
     if (armed) logf("[xbgtasix] int3 探针汇总：新装 %d 个", armed);
 }
 
+// ---------------------------------------------------------------------------
+// AMD 专用指令 CLZERO 的仿真（0x0F 0x01 0xFC = CLZERO RAX）
+//
+// 为什么必须有：标题是给 Xbox（Zen）编译的，里面的"清一条 cache line"用的是
+// **AMD 独有的 CLZERO**。本机是 Intel，执行到就 #UD -> 0xC000001D。
+// 实测现场：崩溃点 game+0x4E8AA70，前后是
+//     1428eaa73  add $0x40,%rax
+//     1428eaa77  cmp %r10,%rax
+//     1428eaa7a  jb  0x1428eaa70     ← 循环体只有这一条 3 字节指令
+// 语义就是"把 [RAX & ~63] 起的 64 字节清零"，按这个仿真即可（不改游戏代码）。
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 空调用仿真：`call` 的目标是 0 时，等价于"这个方法返回 0(S_OK)"。
+//
+// 为什么要它：主机对象（例如 ID3D12CommandAllocator，桌面 vtable 只有 9 项）被游戏
+// 按**主机布局**访问槽 9 时，读到的是 0，于是 RIP 变 0、进程 0xC0000005。
+// 给对象包代理是更"正确"的做法，但实测会破坏 vkd3d 的类型假设（分配器交回
+// CreateCommandList/Reset 时死得更早）。所以这里退一步：不动对象布局，
+// 只把这**一次调用**当作成功返回，让游戏自己继续走，看下一堵墙。
+//
+// 判据严格三连：异常码是 AV、访问类型是"执行"(8)、故障地址是 0，且 RIP 也为 0。
+// 任何一条不满足就不接管（绝不掩盖别的崩溃）。
+// ---------------------------------------------------------------------------
+static LONG WINAPI on_null_call(PEXCEPTION_POINTERS info) {
+    auto* rec = info->ExceptionRecord;
+    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    if (rec->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
+    if (rec->ExceptionInformation[0] != 8 || rec->ExceptionInformation[1] != 0)
+        return EXCEPTION_CONTINUE_SEARCH;
+    auto* ctx = info->ContextRecord;
+    if (ctx->Rip != 0) return EXCEPTION_CONTINUE_SEARCH;
+
+    const auto* sp = reinterpret_cast<const ULONG_PTR*>(ctx->Rsp);
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!sp || VirtualQuery(sp, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    const ULONG_PTR ret = *sp;          // call 压进去的返回地址
+    if (!ret) return EXCEPTION_CONTINUE_SEARCH;
+
+    static unsigned seen = 0;
+    if (seen++ < 16) {
+        HMODULE mod = nullptr;
+        unsigned long long rva = ret;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(ret), &mod) && mod) {
+            rva = ret - reinterpret_cast<ULONG_PTR>(mod);
+        }
+        logf("[xbgtasix] 空调用仿真：目标=0 调用方=+0x%llX 对象Rcx=%p Rdx=%p -> 当作返回 S_OK(0)",
+             rva, reinterpret_cast<void*>(ctx->Rcx), reinterpret_cast<void*>(ctx->Rdx));
+    }
+
+    ctx->Rip = ret;      // 直接"返回"到调用之后
+    ctx->Rsp += 8;       // 弹出返回地址
+    ctx->Rax = 0;        // 返回值 = S_OK
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static LONG WINAPI on_illegal_instruction(PEXCEPTION_POINTERS info) {
+    if (info->ExceptionRecord->ExceptionCode != (DWORD)0xC000001DL) return EXCEPTION_CONTINUE_SEARCH;
+    auto* ctx = info->ContextRecord;
+    const auto* rip = reinterpret_cast<const unsigned char*>(ctx->Rip);
+    if (!rip || IsBadReadPtr(rip, 3)) return EXCEPTION_CONTINUE_SEARCH;
+    if (rip[0] != 0x0F || rip[1] != 0x01 || rip[2] != 0xFC) return EXCEPTION_CONTINUE_SEARCH;
+    // CLZERO rax：清零 [rax & ~0x3F] 的 64 字节
+    auto* line = reinterpret_cast<unsigned char*>(static_cast<uintptr_t>(ctx->Rax) & ~uintptr_t(0x3F));
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(line, &mbi, sizeof(mbi)) == sizeof(mbi) && mbi.State == MEM_COMMIT &&
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0) {
+        std::memset(line, 0, 0x40);
+        static unsigned n = 0;
+        if (n++ < 8) {
+            logf("[xbgtasix] 仿真 CLZERO（AMD 专用）于 %p：清零 %p 起 64 字节", rip, line);
+        }
+        ctx->Rip += 3;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    logf("[xbgtasix] CLZERO 仿真失败：目标 %p 不可写（%s）", line, "跳过会破坏语义");
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 void maybe_install_veh() {
     static bool done = false;
     if (done) return;
     done = true;
     char buf[8] = {0};
     if (GetEnvironmentVariableA("XBGTASIX_VEH", buf, sizeof(buf)) == 0 || buf[0] != '1') return;
+    AddVectoredExceptionHandler(1, on_null_call);           // 空调用 -> 当成功返回
+    AddVectoredExceptionHandler(1, on_illegal_instruction);  // CLZERO 等主机指令仿真
+    // 诊断钩子：默认关闭。实测挂上之后运行会在 `<unknown>+0x820008` 崩（0xC0000005），
+    // 怀疑 ExitProcess 被打 12 字节补丁影响了别的路径（或补丁期间其它线程正执行它）。
+    // 需要看 exit 栈时：XBGTASIX_EXIT_HOOK=1
+    {
+        char b[8] = {0};
+        if (GetEnvironmentVariableA("XBGTASIX_EXIT_HOOK", b, sizeof(b)) > 0 && b[0] == '1') {
+            install_exit_hook();
+        }
+    }
     AddVectoredExceptionHandler(1, on_fatal);
     logf("[xbgtasix] 已安装异常钩子（XBGTASIX_VEH=1）");
     install_g_write_watchpoint();

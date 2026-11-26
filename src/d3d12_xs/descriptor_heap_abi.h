@@ -136,13 +136,17 @@ struct DescriptorHeapProxy {
 //   游戏拿它来建视图时，我们要换算成 PC 堆里的真实地址：
 //       真实 = pc_real_base + (virtual - virtual_base)
 // ---------------------------------------------------------------------------
+// 标题的描述符记账步长（实测：arena 802816 项 x 64 B，即 64 字节/条目）。
+inline constexpr UINT kHostDescriptorStride = 0x40;
+
 struct DescriptorHandleMap {
     SIZE_T virtual_base;      // 返回给游戏的 CPU 句柄基址（标题 arena 里）
     SIZE_T virtual_size;
     SIZE_T real_base;         // PC 堆的 CPU 基址
     UINT64 virtual_gpu_base;  // 返回给游戏的 GPU 句柄（同样的 arena 地址）
     UINT64 real_gpu_base;     // PC 堆的 GPU 基址
-    UINT increment;           // 该堆的描述符步长（PC 上通常 32）
+    UINT increment;           // 该堆在驱动里的描述符步长（PC 上通常 32）
+    UINT host_increment;      // 标题按多少字节/条目记账（实测 64）
 };
 
 inline std::vector<DescriptorHandleMap>& handle_maps() {
@@ -157,6 +161,9 @@ inline D3D12_CPU_DESCRIPTOR_HANDLE translate_cpu(D3D12_CPU_DESCRIPTOR_HANDLE h) 
     // 并不是索引 ABI。句柄换算只应基于**确认过的 arena 地址范围**做偏移转换。
     for (const auto& m : handle_maps()) {
         if (h.ptr >= m.virtual_base && h.ptr < m.virtual_base + m.virtual_size) {
+            // 实验记录：改成"按索引换算（host 64B -> 驱动 32B）"后运行早退到 ~2600 行
+            // （退出码 1/3），回退成差值搬运能回到 1.27 万行。
+            // 结论：句柄寻址整体还没对齐，单改这一处只会更糟；等槽 15 的真实语义定下来再一起改。
             D3D12_CPU_DESCRIPTOR_HANDLE out{};
             out.ptr = m.real_base + (h.ptr - m.virtual_base);
             return out;
@@ -249,11 +256,13 @@ inline HRESULT create_descriptor_heap_proxy(ID3D12Device* pc, IUnknown* xbox_dev
     if (proxy) proxy->virtual_cpu_base = virtual_base;
     if (proxy && virtual_base) {
         const UINT inc = pc->GetDescriptorHandleIncrementSize(desc->Type);
+        // 标题按 64 B/条目记账（arena 802816 项 x 64），驱动按 inc（实测 32）。
+        // 两边步长不同 ⇒ 句柄必须**按索引**换算，不能拿差值直接搬。
         handle_maps().push_back(DescriptorHandleMap{
-            virtual_base, static_cast<SIZE_T>(adjusted.NumDescriptors) * inc,
+            virtual_base, static_cast<SIZE_T>(adjusted.NumDescriptors) * kHostDescriptorStride,
             heap->GetCPUDescriptorHandleForHeapStart().ptr,
             static_cast<UINT64>(virtual_base),   // GPU 句柄也用同一 arena 值
-            heap->GetGPUDescriptorHandleForHeapStart().ptr, inc});
+            heap->GetGPUDescriptorHandleForHeapStart().ptr, inc, kHostDescriptorStride});
     }
     if (!proxy) {
         heap->Release();

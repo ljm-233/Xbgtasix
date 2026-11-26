@@ -361,8 +361,30 @@ LONG WINAPI lazy_commit_handler(PEXCEPTION_POINTERS info) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     void* addr = reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1]);
+    {
+        // 每次处理都记一条（前 12 次）：只有知道"哪一次没提交成功、为什么"，
+        // 才能判断是区间没登记、还是分布在别的保留块里。
+        static std::atomic<unsigned> n{0};
+        if (n.fetch_add(1, std::memory_order_relaxed) < 12) {
+            const bool ok = commit_page_covering(addr);
+            xbgtasix::logf("[xmem] 懒提交尝试 addr=%p -> %s", addr, ok ? "已提交" : "不在已登记区间");
+            if (ok) return EXCEPTION_CONTINUE_EXECUTION;
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+    }
     if (commit_page_covering(addr)) {
         return EXCEPTION_CONTINUE_EXECUTION;   // 页已提交，重试这条指令
+    }
+    // 没覆盖到：把故障地址和访问类型打出来，否则现场只有寄存器、看不出是哪个地址越界。
+    {
+        const ULONG_PTR rw = info->ExceptionRecord->NumberParameters > 0
+                                 ? info->ExceptionRecord->ExceptionInformation[0]
+                                 : 0;
+        static std::atomic<unsigned> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+            xbgtasix::logf("[xmem] AV 不在已登记区间内：addr=%p 访问类型=%llu（0=读 1=写 8=执行）", addr,
+                           static_cast<unsigned long long>(rw));
+        }
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -586,7 +608,25 @@ __declspec(dllexport) int __cdecl XMemAllocatePhysicalPages(uint64_t flags, size
     }
     if (n == 0) return 1;
 
-    void* block = VirtualAlloc(nullptr, n * kPhysPage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // 实验记录（2026-11-26）：改成"只预留 + 按需提交"能省下 710 MB，
+    // 但**代价是确定性退步**——三次运行全部停在 7652 行、退出码 3（稳定复现），
+    // 而一次性提交能跑到 1.27 万行。可见标题对这块物理页有"已落地"的假设
+    // （或对提交时机敏感）。所以退回一次性提交；内存问题另想办法。
+    // 想再试：XBGTASIX_PHYS_LAZY=1
+    static const bool lazy_phys = []() {
+        char b[8] = {0};
+        return GetEnvironmentVariableA("XBGTASIX_PHYS_LAZY", b, sizeof(b)) > 0 && b[0] == '1';
+    }();
+    void* block = lazy_phys
+                      ? VirtualAlloc(nullptr, n * kPhysPage, MEM_RESERVE, PAGE_READWRITE)
+                      : VirtualAlloc(nullptr, n * kPhysPage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (block && lazy_phys) {
+        std::lock_guard<std::mutex> lock(g_res_mu);
+        g_reserved.push_back(Region{static_cast<uint8_t*>(block), n * kPhysPage});
+        if (!g_veh_installed.exchange(true)) {
+            AddVectoredExceptionHandler(1, lazy_commit_handler);
+        }
+    }
     if (!block) {
         xbgtasix::logf("[xmem] XMemAllocatePhysicalPages(%zu 页 = %.1f MB) 失败 err=%lu", n,
                        n * kPhysPage / 1048576.0, GetLastError());
@@ -671,18 +711,79 @@ __declspec(dllexport) int __cdecl XMemMapPhysicalPagesScatter(void** addresses, 
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
+    // 主机语义：page_array 里是**物理页号（PFN）**，驱动按 PFN 把物理页映进 va。
+    // 旧实现把 PFN 直接当指针去 memcpy —— 那是错的，也是 0xC0000005 的来源：
+    // 实测 XMemMapPhysicalPagesScatter(va=0x94b070000, pfn=0x9f0000) 之后
+    // ucrtbase memcpy 从 0xb21000 读 64 KB（MEM_FREE），崩在 xmem+0x3550。
+    // PC 上没有"按 PFN 取页"这回事（主机物理页在桌面侧不存在），所以：
+    //   * 不读 pfn 指向的任何地址；
+    //   * 目标页按 64 KB 清零，保证内容是确定的（不是随机残值）；
+    //   * 前若干次大声记日志，说明这是**语义缺口**，别把它当成实现完成。
+    static std::atomic<unsigned> logged{0};
     for (size_t i = 0; i < num_pages; ++i) {
-        void* va = addresses[i];
-        if (!va || !page_array) continue;
-        const uint64_t pfn = page_array[i];
-        if (!pfn) continue;
-        std::memcpy(va, reinterpret_cast<void*>(static_cast<uintptr_t>(pfn)), kPhysPage);
+        auto* va = addresses[i];
+        if (!va) continue;
+        const uint64_t pfn = page_array ? page_array[i] : 0;
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+            xbgtasix::logf("[xmem] XMemMapPhysicalPagesScatter: va=%p pfn=0x%llx -> PC 上无物理页别名，"
+                           "目标页清零（语义缺口，不是实现）",
+                           va, static_cast<unsigned long long>(pfn));
+        }
+        std::memset(va, 0, kPhysPage);
     }
     return 1;
 }
 
+// 主机上 XMemTransferMemory 是 DMA：两端都是主机物理内存，永远"可访问"。
+// PC 上两端可能是我们 MEM_RESERVE 出来、还没提交的页（24 GiB 那几块就是这样），
+// 直接 memcpy 会在跨页时 0xC0000005（实测 addr=0xb21000、读、页状态 MEM_FREE）。
+// 所以先按页把"落在我们自己保留区间里的页"提交，再判断两端是否整段可访问；
+// 不满足就返回 false 并大声记日志，绝不盲拷。
+namespace {
+
+// 返回 [p, p+size) 里有多少页已经可访问（顺带提交落在 g_reserved 里的页）。
+size_t make_pages_accessible(void* p, size_t size) {
+    auto* base = static_cast<uint8_t*>(p);
+    size_t ok = 0;
+    for (size_t off = 0; off < size; off += 0x1000) {
+        auto* a = base + off;
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (::VirtualQuery(a, &mbi, sizeof(mbi)) == sizeof(mbi) && mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0) {
+            ++ok;
+            continue;
+        }
+        if (commit_page_covering(a)) ++ok;
+    }
+    return ok;
+}
+
+}  // namespace
+
 __declspec(dllexport) bool __cdecl XMemTransferMemory(void* dst, const void* src, size_t size) { XB_XMEM_TRACE("XMemTransferMemory", size, 0);
     if (!dst || !src || !size) return false;
+
+    {
+        static std::atomic<unsigned> seen{0};
+        if (seen.fetch_add(1, std::memory_order_relaxed) < 32) {
+            xbgtasix::logf("[xmem] XMemTransferMemory(dst=%p, src=%p, size=%zu)", dst, src, size);
+        }
+    }
+
+    const size_t pages = (size + 0xFFF) / 0x1000;
+    const size_t ok_dst = make_pages_accessible(dst, size);
+    const size_t ok_src = make_pages_accessible(const_cast<void*>(src), size);
+
+    if (ok_dst != pages || ok_src != pages) {
+        static std::atomic<unsigned> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+            xbgtasix::logf("[xmem] XMemTransferMemory 拒绝：dst=%p(%zu/%zu 页可访问) src=%p(%zu/%zu 页)"
+                           " size=%zu（跨到未提交/未保留的页上）",
+                           dst, ok_dst, pages, src, ok_src, pages, size);
+        }
+        return false;
+    }
+
     std::memcpy(dst, src, size);   // 主机上是 DMA，PC 上用内存拷贝等效
     return true;
 }

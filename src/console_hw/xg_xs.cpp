@@ -207,6 +207,125 @@ extern "C" __declspec(dllexport) std::uint32_t __stdcall XGSuggestSwizzleMode(co
     return 0;
 }
 
+// ============================ 纹理计算器：探针对象 ============================
+// 为什么必须有它：游戏拿到 E_NOTIMPL（*out=null）之后**立刻**在 game+0x16F71EA
+// 解引用返回值（`mov (%rcx),%r10` / `call *0x40(%r10)` = 槽 8 = copy_into），
+// 于是 0xC0000005。也就是说"诚实失败"在这条调用点上是**不可用**的 —— 调用方不检查 out。
+//
+// 这里给的是**探针对象**，不是纹理计算器：12 槽 vtable（槽序来自参考实现 computer.rs），
+// 每个槽记一行"第几次被调 + 前两个参数"并返回 0（槽 0/1 = AddRef/Release 返回 1）。
+// 它不假装算得出主机布局 —— 返回 0 意味着布局全零，游戏若拿它去搬 texel 会得到错数据，
+// 所以每次调用都大声记日志，且 XBGTASIX_TC_PROBE=0 能退回原来的 E_NOTIMPL。
+// 目的只有一条：把"调用序列 + 槽序 + 参数形状"采下来，再照着实现真语义。
+namespace {
+
+constexpr int kTcSlots = 12;          // add_ref, release, get_resource_layout, get_size,
+                                      // get_align, get_mip_offset, get_element_offset,
+                                      // get_texel_coordinate, copy_into, copy_from,
+                                      // tiled, view_descriptor
+constexpr int kTcAddRefSlot = 0;
+constexpr int kTcReleaseSlot = 1;
+
+alignas(16) unsigned char g_tc_object[64];
+void* g_tc_vtable[kTcSlots];
+bool g_tc_ready = false;
+std::uint32_t g_tc_slot_hits[kTcSlots];
+
+std::intptr_t tc_slot_hit(int slot, const void* a, const void* b) {
+    const std::uint32_t n = ++g_tc_slot_hits[slot];
+    if (n <= 8) {
+        tg("纹理计算器 槽%d 第 %u 次调用 a=%p b=%p（探针对象，返回 %s）", slot, n, a, b,
+           (slot == kTcAddRefSlot || slot == kTcReleaseSlot) ? "1" : "0");
+    } else if ((n % 4096) == 0) {
+        tg("纹理计算器 槽%d 已调用 %u 次", slot, n);
+    }
+    return (slot == kTcAddRefSlot || slot == kTcReleaseSlot) ? 1 : 0;
+}
+
+// 槽 8 = CopyIntoSubresource：形状由逆向证据钉死（scarlett_render_reverse
+// docs/EVIDENCE_INDEX.md 0x1416F7100 / pseudocode 03_resource_memory.cpp）：
+//     CopyIntoSubresource(this, tiledBase, plane, subresource, linear, rowPitch, slicePitch)
+// 主机上它做 swizzle（线性 -> 硬件 tiled 布局）。**我们对外报的是线性**
+// （XGSuggestSwizzleMode 恒返回 0，见导出 1 的注释），所以这里按线性语义搬：
+// 目标与源都是行主序紧凑排布，一次 memcpy slicePitch 字节即可 —— 这不是"假装成功"，
+// 是与我们自己对外声明的布局保持一致。若哪天 swizzle 模式不再是线性，这里必须重写。
+constexpr int kTcCopyIntoSlot = 8;
+
+std::intptr_t copy_into_subresource(void* dest_tiled, std::uint32_t plane,
+                                    std::uint32_t subresource, const void* src_linear,
+                                    std::uint32_t row_pitch, std::uint32_t slice_pitch) {
+    static std::uint32_t calls = 0;
+    const std::uint32_t n = ++calls;
+
+    const bool dest_ok = probe_committed(dest_tiled, slice_pitch, true);
+    const bool src_ok = probe_committed(src_linear, slice_pitch, false);
+
+    if (n <= 16 || (n % 256) == 0) {
+        tg("CopyIntoSubresource #%u dst=%p src=%p plane=%u sub=%u rowPitch=%u slicePitch=%u "
+           "(dst可写=%d src可读=%d)",
+           n, dest_tiled, src_linear, plane, subresource, row_pitch, slice_pitch,
+           dest_ok ? 1 : 0, src_ok ? 1 : 0);
+    }
+
+    if (!dest_ok || !src_ok) {
+        tg("CopyIntoSubresource #%u 跳过：%s（线性布局的 memcpy 需要两端都可访问）", n,
+           dest_ok ? "源不可读" : "目标不可写");
+        return 0;
+    }
+
+    std::memcpy(dest_tiled, src_linear, slice_pitch);
+    return 0;
+}
+
+#define XBG_TC_SLOT(n)                                                                    \
+    std::intptr_t WINAPI tc_slot_##n(const void* a, const void* b, const void* c,          \
+                                     const void* d) {                                     \
+        (void)c;                                                                          \
+        (void)d;                                                                          \
+        return tc_slot_hit(n, a, b);                                                      \
+    }
+XBG_TC_SLOT(0) XBG_TC_SLOT(1) XBG_TC_SLOT(2) XBG_TC_SLOT(3)
+XBG_TC_SLOT(4) XBG_TC_SLOT(5) XBG_TC_SLOT(6) XBG_TC_SLOT(7)
+XBG_TC_SLOT(9) XBG_TC_SLOT(10) XBG_TC_SLOT(11)
+#undef XBG_TC_SLOT
+
+// 槽 8 是 7 个参数（含 this），单独一份，不走上面那个 4 参的探针壳。
+std::intptr_t WINAPI tc_slot_8(void* self, void* dest_tiled, std::uint32_t plane,
+                               std::uint32_t subresource, const void* src_linear,
+                               std::uint32_t row_pitch, std::uint32_t slice_pitch) {
+    (void)self;
+    return copy_into_subresource(dest_tiled, plane, subresource, src_linear, row_pitch, slice_pitch);
+}
+
+void* const g_tc_slot_fns[kTcSlots] = {
+    reinterpret_cast<void*>(&tc_slot_0),  reinterpret_cast<void*>(&tc_slot_1),
+    reinterpret_cast<void*>(&tc_slot_2),  reinterpret_cast<void*>(&tc_slot_3),
+    reinterpret_cast<void*>(&tc_slot_4),  reinterpret_cast<void*>(&tc_slot_5),
+    reinterpret_cast<void*>(&tc_slot_6),  reinterpret_cast<void*>(&tc_slot_7),
+    reinterpret_cast<void*>(&tc_slot_8),  reinterpret_cast<void*>(&tc_slot_9),
+    reinterpret_cast<void*>(&tc_slot_10), reinterpret_cast<void*>(&tc_slot_11),
+};
+
+bool tc_probe_enabled() {
+    static const bool on = []() {
+        char buf[8]{};
+        const DWORD n = ::GetEnvironmentVariableA("XBGTASIX_TC_PROBE", buf, sizeof(buf));
+        return !(n > 0 && buf[0] == '0');
+    }();
+    return on;
+}
+
+void* tc_object() {
+    if (!g_tc_ready) {
+        for (int i = 0; i < kTcSlots; ++i) g_tc_vtable[i] = g_tc_slot_fns[i];
+        *reinterpret_cast<void***>(g_tc_object) = g_tc_vtable;
+        g_tc_ready = true;
+    }
+    return g_tc_object;
+}
+
+}  // namespace
+
 // ============================================================================================
 // 导出 2：XGCreateTextureComputer
 // ============================================================================================
@@ -262,6 +381,13 @@ extern "C" __declspec(dllexport) HRESULT __stdcall XGCreateTextureComputer(const
         if (detail_call(counter) || summary_call(counter)) {
             tg("XGCreateTextureComputer desc=%p 不可读 -> E_NOTIMPL (第 %u 次)", desc, counter.n);
         }
+    }
+
+    // 默认给探针对象（E_NOTIMPL 会让调用方立刻解引用 null 崩掉）；XBGTASIX_TC_PROBE=0 退回失败。
+    if (tc_probe_enabled()) {
+        *out = tc_object();
+        tg("XGCreateTextureComputer -> S_OK + 探针对象 %p（12 槽；layout 语义尚未实现）", *out);
+        return static_cast<HRESULT>(kS_OK);
     }
 
     // 明确失败，不假成功。

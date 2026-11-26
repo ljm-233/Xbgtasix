@@ -271,8 +271,12 @@ inline HRESULT WINAPI schedule_frame_event_x(DeviceProxy* self, UINT type, UINT 
 
 inline HRESULT WINAPI wait_frame_event_x(DeviceProxy* self, UINT type, UINT timeout_ms,
                                           const void* block, UINT flags, UINT64* token) {
-    const HRESULT hr = block || flags != 0 ? E_NOTIMPL : self->frame_events.wait(type, timeout_ms, token);
-    const UINT64 issued = SUCCEEDED(hr) ? *token : 0;
+    // 实测调用点 game+0x2482448：`call *0x280(%rax)`（槽 80）+ `js -> int3`，
+    // 也就是**只检查返回值非负**。带 flags=0x2 / block 的形态以前会返回 E_NOTIMPL，
+    // 直接把游戏送进断言。这里改成"永远成功"：本移植的帧事件是本地实现，
+    // 等待语义退化为立即返回（记录参数，便于日后补真实等待）。
+    const HRESULT hr = (flags == 0 && !block) ? self->frame_events.wait(type, timeout_ms, token) : S_OK;
+    const UINT64 issued = SUCCEEDED(hr) && token ? *token : 0;
     xbgtasix::logf("[d3d12_xs] device slot 80 WaitFrameEventX type=%u timeout=%u block=%p "
                    "flags=0x%x token=0x%llx hr=0x%08lx", type, timeout_ms, block, flags,
                    static_cast<unsigned long long>(issued), static_cast<unsigned long>(hr));
@@ -304,6 +308,112 @@ inline HRESULT WINAPI frame_statistics_x(DeviceProxy*, UINT64 token, UINT type,
 //   而驱动编译在我们线程里，它看不见进展）。参考 Leonida PR #7858 的同一机制。
 //   60–67 这一段现在由下方 `host_pso_slot_stub` 接管：**参数 dump 桩**（默认 E_NOTIMPL），
 //   唯一真正调用驱动的地方是 env 开关下的可行性实验，那里已经用 host_stall::scope 包好。
+// 把"对象 → 它的 vtable 属于哪个模块 + 偏移"打成一行。
+// 为什么：对象地址每次跑都变，但 **vtable 偏移是稳定的**。
+// 崩溃现场打印 Rcx 的 vtable 之后，只有创建时也记了同一份偏移，才能对上"这是谁给的"。
+inline void log_object_vt(const char* tag, void* obj) {
+    if (!obj) {
+        xbgtasix::logf("[d3d12_xs] %s = null", tag);
+        return;
+    }
+    void* vt = *reinterpret_cast<void**>(obj);
+    HMODULE mod = nullptr;
+    if (vt && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                 reinterpret_cast<LPCWSTR>(vt), &mod) && mod) {
+        wchar_t full[MAX_PATH] = {0};
+        GetModuleFileNameW(mod, full, MAX_PATH);
+        const wchar_t* base = wcsrchr(full, L'\\');
+        char name[96] = {0};
+        WideCharToMultiByte(CP_UTF8, 0, base ? base + 1 : full, -1, name, sizeof(name), nullptr, nullptr);
+        xbgtasix::logf("[d3d12_xs] %s = %p vt=%s+0x%llX", tag, obj, name,
+                       static_cast<unsigned long long>(
+                           reinterpret_cast<unsigned long long>(vt) -
+                           reinterpret_cast<unsigned long long>(mod)));
+    } else {
+        xbgtasix::logf("[d3d12_xs] %s = %p vt=%p（不在模块内）", tag, obj, vt);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 主机槽 57 的探针实现（调用频次最高的未建模槽：40 次）
+//
+// 证据：调用点 game+0x247757E 是 `call *0x1c8(%rax)`（0x1c8/8 = 57），
+// 形参 rdx = 描述符结构、r8 = .rdata 里的 GUID 表（首项是 PSO 的 IID
+// {765A30F3-...}）、r9 = 输出槽；调用方在一个循环里对每个条目调一次。
+// 判定：这是"批量创建/查询管线对象"一类的创建型调用。
+//
+// 语义还不知道，所以给一个**可用的哑对象**：16 槽 vtable，每槽记一次调用并返回 S_OK。
+// 目的不是让它跑通，而是把"拿到非空对象之后游戏会做什么"采下来。
+// ---------------------------------------------------------------------------
+struct HostExtDummy {
+    void** vt;
+};
+template <unsigned N>
+inline uintptr_t WINAPI host_ext_slot(HostExtDummy*, uintptr_t a = 0, uintptr_t b = 0, uintptr_t c = 0,
+                                      uintptr_t d = 0) {
+    static int seen = 0;
+    if (seen++ < 6) {
+        xbgtasix::logf("[d3d12_xs] 槽57 哑对象 槽%u 被调用 a=0x%llx b=0x%llx c=0x%llx d=0x%llx -> S_OK",
+                       N, static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
+                       static_cast<unsigned long long>(c), static_cast<unsigned long long>(d));
+    }
+    return 0;
+}
+inline void** host_ext_vtable() {
+    static void** vt = []() {
+        auto** v = new void*[16];
+        v[0] = reinterpret_cast<void*>(&host_ext_slot<0>);
+        v[1] = reinterpret_cast<void*>(&host_ext_slot<1>);
+        v[2] = reinterpret_cast<void*>(&host_ext_slot<2>);
+        v[3] = reinterpret_cast<void*>(&host_ext_slot<3>);
+        v[4] = reinterpret_cast<void*>(&host_ext_slot<4>);
+        v[5] = reinterpret_cast<void*>(&host_ext_slot<5>);
+        v[6] = reinterpret_cast<void*>(&host_ext_slot<6>);
+        v[7] = reinterpret_cast<void*>(&host_ext_slot<7>);
+        v[8] = reinterpret_cast<void*>(&host_ext_slot<8>);
+        v[9] = reinterpret_cast<void*>(&host_ext_slot<9>);
+        v[10] = reinterpret_cast<void*>(&host_ext_slot<10>);
+        v[11] = reinterpret_cast<void*>(&host_ext_slot<11>);
+        v[12] = reinterpret_cast<void*>(&host_ext_slot<12>);
+        v[13] = reinterpret_cast<void*>(&host_ext_slot<13>);
+        v[14] = reinterpret_cast<void*>(&host_ext_slot<14>);
+        v[15] = reinterpret_cast<void*>(&host_ext_slot<15>);
+        return v;
+    }();
+    return vt;
+}
+
+inline HRESULT WINAPI slot57_probe(DeviceProxy*, uintptr_t a1 = 0, uintptr_t a2 = 0, uintptr_t a3 = 0,
+                                   uintptr_t a4 = 0, uintptr_t a5 = 0, uintptr_t a6 = 0,
+                                   uintptr_t a7 = 0, uintptr_t a8 = 0) {
+    static HostExtDummy dummy{host_ext_vtable()};
+    static int seen = 0;
+    if (seen++ < 8) {
+        const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+        HMODULE mod = nullptr;
+        unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
+            rva = reinterpret_cast<unsigned long long>(caller) - reinterpret_cast<unsigned long long>(mod);
+        }
+        xbgtasix::logf("[d3d12_xs] 槽57 探针 调用方=+0x%llX a1=0x%llx a2=0x%llx a3=0x%llx a4=0x%llx "
+                       "-> S_OK + 哑对象 %p",
+                       rva, a1, a2, a3, a4, static_cast<void*>(&dummy));
+    }
+    // 输出槽：实测第 3 参（r9）指向可写局部
+    if (a3) {
+        MEMORY_BASIC_INFORMATION m{};
+        if (VirtualQuery(reinterpret_cast<void*>(a3), &m, sizeof(m)) == sizeof(m) &&
+            m.State == MEM_COMMIT && (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0 &&
+            m.Protect != PAGE_READONLY) {
+            *reinterpret_cast<void**>(a3) = &dummy;
+        }
+    }
+    return S_OK;
+}
+
 template <std::size_t N>
 HRESULT WINAPI device_extension_stub_n(DeviceProxy*, UINT64 a = 0, UINT64 b = 0, UINT64 c = 0,
                                        UINT64 d = 0) {
@@ -1105,28 +1215,72 @@ inline void WINAPI list_slot_132(CommandListProxy* self, UINT value, UINT flags,
 // PC 的 ID3D12GraphicsCommandList7 只有约 70 个方法；主机的命令列表 vtable 到 600+。
 // 把主机高位槽（>= 80）按同号转发 = 读越界后跳到垃圾地址（实测崩在 forward_list_slot<189>）。
 // 未建模的高位槽一律记一次并返回 S_OK（命令列表扩展方法多为 void 语义，返回 S_OK 最安全）。
+inline void logf_slot_once(std::size_t n, const char* what);
+inline bool slot_probe_on();
+
 template <std::size_t N>
 HRESULT WINAPI list_extension_stub(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0,
-                                   uintptr_t a3 = 0) {
-    static std::atomic<int> budget{40};
-    if (budget.fetch_sub(1) > 0) {
+                                   uintptr_t a3 = 0, uintptr_t a4 = 0, uintptr_t a5 = 0) {
+    // 主机命令列表的真实方法落在高位槽（实测 131/132/139 都被调用过），
+    // 而桌面同号槽不存在 → 现在一律 S_OK 空操作，于是 vkd3d 那边的列表状态永远是空的，
+    // 后面它自己再被调用就拿着空状态崩。
+    // 要重建这张表，就得先把"槽号 + 调用方 RVA + 参数"采全：每个槽前 3 次都记。
+    static std::atomic<unsigned> per_slot[512] = {};
+    const unsigned idx = static_cast<unsigned>(N < 512 ? N : 511);
+    const unsigned count = per_slot[idx].fetch_add(1, std::memory_order_relaxed);
+    if (count < 3) {
         const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
         HMODULE mod = nullptr;
         unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
-            rva = reinterpret_cast<unsigned long long>(caller) -
-                  reinterpret_cast<unsigned long long>(mod);
+            rva = reinterpret_cast<unsigned long long>(caller) - reinterpret_cast<unsigned long long>(mod);
         }
-        xbgtasix::logf("[d3d12_xs] 未建模的命令列表扩展 slot=%zu 调用方=+0x%llX "
-                       "a=0x%llx b=0x%llx c=0x%llx -> S_OK", N, rva,
-                       static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
-                       static_cast<unsigned long long>(a3));
+        xbgtasix::logf("[d3d12_xs] 命令列表高位槽 %zu（第 %u 次）调用方=+0x%llX "
+                       "a1=0x%llx a2=0x%llx a3=0x%llx a4=0x%llx a5=0x%llx -> S_OK(空操作)",
+                       N, count + 1, rva, static_cast<unsigned long long>(a1),
+                       static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
+                       static_cast<unsigned long long>(a4), static_cast<unsigned long long>(a5));
     }
-    (void)self;
     return S_OK;
 }
+
+// 每条命令列表最近用过的 16 个槽（环形）。Close 时打出来：
+// vkd3d 的 check_end_of_command_list_cleanup 会在 Close 里处理挂起的 clear/copy，
+// 那些操作是哪几个槽录进去的，看这个序列最直接。
+struct ListSlotRing {
+    unsigned short slot[16]{};
+    unsigned char head = 0;
+    unsigned char count = 0;
+    void push(unsigned short n) {
+        slot[head] = n;
+        head = static_cast<unsigned char>((head + 1) % 16);
+        if (count < 16) ++count;
+    }
+};
+
+struct ListRingEntry {
+    void* owner = nullptr;
+    ListSlotRing ring;
+};
+
+inline ListSlotRing* list_ring_for(void* owner) {
+    static ListRingEntry entries[8] = {};
+    if (!owner) return &entries[0].ring;
+    for (auto& e : entries) {
+        if (e.owner == owner) return &e.ring;
+    }
+    for (auto& e : entries) {
+        if (!e.owner) {
+            e.owner = owner;
+            return &e.ring;
+        }
+    }
+    return &entries[0].ring;   // 超过 8 条列表就复用第 0 条（只影响诊断）
+}
+
+inline void record_list_slot(void* owner, unsigned short n) { list_ring_for(owner)->push(n); }
 
 template <std::size_t N>
 uintptr_t WINAPI forward_list_slot(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0,
@@ -1136,8 +1290,43 @@ uintptr_t WINAPI forward_list_slot(void* self, uintptr_t a1 = 0, uintptr_t a2 = 
     auto* proxy = static_cast<CommandListProxy*>(self);
     using Fn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                              uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+    if (slot_probe_on()) {
+        // 命令列表这边原来没有探针，"游戏到底用哪些槽"只能靠猜。
+        // 打开 XBGTASIX_SLOTPROBE=1 后，每个槽首次进过就记一行。
+        logf_slot_once(N, "命令列表");
+    }
+    // 常驻低噪声记录：每个槽前 2 次调用连同**调用方 RVA**一起记。
+    // 目的：vkd3d 内部崩溃时，能对着"崩溃前最后几次转发"判断是谁把坏参数带进去的。
+    {
+        static std::atomic<unsigned> per_slot[256] = {};
+        const unsigned idx = static_cast<unsigned>(N < 256 ? N : 255);
+        if (per_slot[idx].fetch_add(1, std::memory_order_relaxed) < 2) {
+            const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+            HMODULE mod = nullptr;
+            unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
+                rva = reinterpret_cast<unsigned long long>(caller) -
+                      reinterpret_cast<unsigned long long>(mod);
+            }
+            xbgtasix::logf("[d3d12_xs] 命令列表转发 槽%zu 调用方=+0x%llX a1=0x%llx a2=0x%llx a3=0x%llx",
+                           N, rva, static_cast<unsigned long long>(a1),
+                           static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3));
+        }
+    }
+    record_list_slot(proxy, static_cast<unsigned short>(N));
     const auto vt = *reinterpret_cast<void***>(static_cast<ID3D12CommandList*>(proxy->pc));
-    return reinterpret_cast<Fn>(vt[N])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+    // 槽位偏移实验：设备那边有"主机槽 = 桌面槽 + 4"的疑点（见 docs/host-vtable-offset.md），
+    // 命令列表也可能不同号。这里用 XBGTASIX_LIST_SLOT_DELTA 做单变量对照，
+    // 默认 0（同号转发，当前能跑的状态）。
+    static const int delta = []() {
+        char b[16] = {0};
+        const DWORD n = GetEnvironmentVariableA("XBGTASIX_LIST_SLOT_DELTA", b, sizeof(b));
+        return n > 0 ? static_cast<int>(std::strtol(b, nullptr, 10)) : 0;
+    }();
+    const std::size_t idx = delta == 0 ? N : static_cast<std::size_t>(static_cast<long long>(N) + delta);
+    return reinterpret_cast<Fn>(vt[idx])(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
 }
 
 struct CommandListProxy {
@@ -1183,6 +1372,21 @@ inline HRESULT WINAPI list_query_interface(CommandListProxy* self, REFIID iid, v
 }
 
 inline HRESULT WINAPI list_close(CommandListProxy* self) {
+    {
+        // vkd3d 在 Close 里跑 check_end_of_command_list_cleanup，会把挂起的 clear/copy
+        // 真正落到命令流；挂起操作是哪几个槽录进去的，看这个序列最直接。
+        static int budget = 40;
+        if (budget-- > 0 && list_ring_for(self)->count > 0) {
+            const ListSlotRing* r = list_ring_for(self);
+            char buf[160] = {0};
+            int off = 0;
+            for (unsigned i = 0; i < r->count && off < 140; ++i) {
+                const unsigned idx = (r->head + 16 - r->count + i) % 16;
+                off += std::snprintf(buf + off, sizeof(buf) - off, "%u ", r->slot[idx]);
+            }
+            xbgtasix::logf("[d3d12_xs] 命令列表 Close 前槽序列: %s", buf);
+        }
+    }
     xbgtasix::logf("[d3d12_xs] Xbox command list Close");
     return self->pc->Close();
 }
@@ -1217,6 +1421,130 @@ inline void WINAPI list_slot_132(CommandListProxy*, UINT value, UINT flags, UINT
                    static_cast<unsigned long long>(address));
 }
 
+// ---------------------------------------------------------------------------
+// 命令列表上"带描述符句柄"的槽（桌面 46..50）：游戏传的是**主机虚拟句柄**，
+// 必须先翻译成真实堆句柄，否则 vkd3d 按自己的堆解析会得到空指针。
+// 实测崩点：d3d12_command_list_clear_uav_builtin+0x611 `movb $0x1,0x127(%rbx)`，rbx=0。
+// 槽号来自生成的 vkd3d_d3d12.h：46 OMSetRenderTargets / 47 ClearDSV / 48 ClearRTV /
+// 49 ClearUAVUint / 50 ClearUAVFloat。
+// ---------------------------------------------------------------------------
+// 槽 15 = CopyBufferRegion。实测 vkd3d 内部崩在
+// `d3d12_command_list_CopyBufferRegion+0x64` 的 `mov 0x1a4(%rsi),%edx`（rsi=1），
+// 先把这个调用点的参数与调用方记下来：资源指针是桌面对象还是我们给的代理、
+// 偏移/大小的量级对不对，只有打出来才知道。
+inline void WINAPI list_copy_buffer_region(CommandListProxy* self, ID3D12Resource* dst,
+                                           UINT64 dst_offset, ID3D12Resource* src, UINT64 src_offset,
+                                           UINT64 num_bytes) {
+    static int seen = 0;
+    if (seen++ < 16) {
+        const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+        HMODULE mod = nullptr;
+        unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
+            rva = reinterpret_cast<unsigned long long>(caller) - reinterpret_cast<unsigned long long>(mod);
+        }
+        xbgtasix::logf("[d3d12_xs] CopyBufferRegion 调用方=+0x%llX dst=%p dstOff=0x%llx src=%p "
+                       "srcOff=0x%llx bytes=0x%llx",
+                       rva, static_cast<void*>(dst), static_cast<unsigned long long>(dst_offset),
+                       static_cast<void*>(src), static_cast<unsigned long long>(src_offset),
+                       static_cast<unsigned long long>(num_bytes));
+        if (dst) log_object_vt("  ↳ dst 的 vtable", dst);
+        if (src) log_object_vt("  ↳ src 的 vtable", src);
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)
+        ->CopyBufferRegion(dst, dst_offset, src, src_offset, num_bytes);
+}
+
+inline void WINAPI list_om_set_render_targets(CommandListProxy* self, UINT count,
+                                              const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs,
+                                              BOOL single_handle,
+                                              const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {
+    D3D12_CPU_DESCRIPTOR_HANDLE local[8]{};
+    const UINT n = count < 8 ? count : 8;
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_t{};
+    for (UINT i = 0; i < n; ++i) local[i] = translate_cpu(rtvs[i]);
+    if (dsv) dsv_t = translate_cpu(*dsv);
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)
+        ->OMSetRenderTargets(count, n ? local : nullptr, single_handle, dsv ? &dsv_t : nullptr);
+}
+
+inline void WINAPI list_clear_dsv(CommandListProxy* self, D3D12_CPU_DESCRIPTOR_HANDLE dsv,
+                                  D3D12_CLEAR_FLAGS flags, FLOAT depth, UINT8 stencil, UINT num_rects,
+                                  const D3D12_RECT* rects) {
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)
+        ->ClearDepthStencilView(translate_cpu(dsv), flags, depth, stencil, num_rects, rects);
+}
+
+inline void WINAPI list_clear_rtv(CommandListProxy* self, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                                  const FLOAT color[4], UINT num_rects, const D3D12_RECT* rects) {
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->ClearRenderTargetView(translate_cpu(rtv), color,
+                                                                           num_rects, rects);
+}
+
+inline void WINAPI list_clear_uav_uint(CommandListProxy* self, D3D12_GPU_DESCRIPTOR_HANDLE gpu,
+                                       D3D12_CPU_DESCRIPTOR_HANDLE cpu, ID3D12Resource* res,
+                                       const UINT values[4], UINT num_rects, const D3D12_RECT* rects) {
+    D3D12_GPU_DESCRIPTOR_HANDLE g{};
+    g.ptr = translate_gpu(gpu.ptr);
+    // 防御：翻译不出真实句柄（游戏给的地址不在我们登记的 arena 里）时**不要**递给 vkd3d——
+    // 它会按自己的堆去解析，拿到 null 后在 clear_uav_builtin 里对 0 解引用（当前崩溃点）。
+    // 这种情况直接跳过这次 clear（内容本轮不清），并大声记日志，让下一堵墙露出来。
+    if (!g.ptr || !cpu.ptr || !res) {
+        static int skipped = 0;
+        if (skipped++ < 8) {
+            xbgtasix::logf("[d3d12_xs] ClearUAVUint 跳过：gpu=0x%llx->0x%llx cpu=%p res=%p（句柄不可翻译）",
+                           static_cast<unsigned long long>(gpu.ptr),
+                           static_cast<unsigned long long>(g.ptr), reinterpret_cast<void*>(cpu.ptr),
+                           static_cast<void*>(res));
+        }
+        return;
+    }
+    static int seen = 0;
+    if (seen++ < 8) {
+        xbgtasix::logf("[d3d12_xs] ClearUAVUint 句柄翻译 gpu=%p->%p cpu=%p->%p", reinterpret_cast<void*>(gpu.ptr),
+                       reinterpret_cast<void*>(g.ptr), reinterpret_cast<void*>(cpu.ptr),
+                       reinterpret_cast<void*>(translate_cpu(cpu).ptr));
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)
+        ->ClearUnorderedAccessViewUint(g, translate_cpu(cpu), res, values, num_rects, rects);
+}
+
+inline void WINAPI list_clear_uav_float(CommandListProxy* self, D3D12_GPU_DESCRIPTOR_HANDLE gpu,
+                                        D3D12_CPU_DESCRIPTOR_HANDLE cpu, ID3D12Resource* res,
+                                        const FLOAT values[4], UINT num_rects, const D3D12_RECT* rects) {
+    D3D12_GPU_DESCRIPTOR_HANDLE g{};
+    g.ptr = translate_gpu(gpu.ptr);
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)
+        ->ClearUnorderedAccessViewFloat(g, translate_cpu(cpu), res, values, num_rects, rects);
+}
+
+// 主机命令列表 146 = **ID3D12GraphicsCommandList7::Barrier（增强 barrier）**。
+// 出处：PORTING.md「当前使用的精确槽位」。以前这条落在"高位槽空操作"里，
+// 等于把引擎录进去的 global/texture/buffer barrier group 全部丢掉——
+// 资源状态永远不转换，之后 clear/copy 就会撞上空句柄。
+inline void WINAPI list_barrier7(CommandListProxy* self, UINT group_count,
+                                 const D3D12_BARRIER_GROUP* groups) {
+    static int seen = 0;
+    if (seen++ < 8) {
+        unsigned total = 0;
+        if (groups) {
+            for (UINT i = 0; i < group_count; ++i) {
+                total += groups[i].NumBarriers;
+            }
+        }
+        xbgtasix::logf("[d3d12_xs] 槽146 增强 Barrier 组=%u 条 barrier=%u groups=%p", group_count, total,
+                       static_cast<const void*>(groups));
+    }
+#if defined(__MINGW64_VERSION_MAJOR) || defined(__d3d12_h__)
+    auto* l7 = static_cast<ID3D12GraphicsCommandList7*>(self->pc);
+    l7->Barrier(group_count, groups);
+#else
+    (void)self;
+#endif
+}
+
 inline Slot command_list_slot(std::size_t n) {
     if (n == 0) return reinterpret_cast<Slot>(&list_query_interface);
     if (n == 1) return reinterpret_cast<Slot>(&list_add_ref);
@@ -1224,6 +1552,13 @@ inline Slot command_list_slot(std::size_t n) {
     if (n == 9) return reinterpret_cast<Slot>(&list_close);
     if (n == 10) return reinterpret_cast<Slot>(&list_reset);
     if (n == 28) return reinterpret_cast<Slot>(&list_set_descriptor_heaps);
+    if (n == 15) return reinterpret_cast<Slot>(&list_copy_buffer_region);
+    if (n == 46) return reinterpret_cast<Slot>(&list_om_set_render_targets);
+    if (n == 47) return reinterpret_cast<Slot>(&list_clear_dsv);
+    if (n == 48) return reinterpret_cast<Slot>(&list_clear_rtv);
+    if (n == 49) return reinterpret_cast<Slot>(&list_clear_uav_uint);
+    if (n == 50) return reinterpret_cast<Slot>(&list_clear_uav_float);
+    if (n == 146) return reinterpret_cast<Slot>(&list_barrier7);
     if (n == 131) return reinterpret_cast<Slot>(&list_slot_131);
     if (n == 132) return reinterpret_cast<Slot>(&list_slot_132);
     return nullptr;
@@ -1282,6 +1617,8 @@ struct CommandQueueProxy {
 };
 static_assert(offsetof(CommandQueueProxy, vtable) == 0);
 
+// 队列槽 35：`FrameSubmissionQueue_Consume`（game+0x2481E90）会调它。
+// 桌面队列的方法只到 ~24，35 号越界 → 必须记录调用方与参数才能判断这到底是谁的方法。
 template <std::size_t N>
 uintptr_t WINAPI forward_queue_slot(CommandQueueProxy* self, uintptr_t a1 = 0, uintptr_t a2 = 0,
                                      uintptr_t a3 = 0, uintptr_t a4 = 0, uintptr_t a5 = 0,
@@ -1409,12 +1746,37 @@ inline HRESULT WINAPI queue_present_x(CommandQueueProxy* self, UINT plane_count,
     return hr;
 }
 
+inline uintptr_t WINAPI queue_slot35_probe(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                            uintptr_t a3 = 0, uintptr_t a4 = 0, uintptr_t a5 = 0) {
+    static int seen = 0;
+    if (seen++ < 8) {
+        const auto* caller = static_cast<const unsigned char*>(__builtin_return_address(0));
+        HMODULE mod = nullptr;
+        unsigned long long rva = reinterpret_cast<unsigned long long>(caller);
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(caller), &mod) && mod) {
+            rva = reinterpret_cast<unsigned long long>(caller) - reinterpret_cast<unsigned long long>(mod);
+        }
+        xbgtasix::logf("[d3d12_xs] 队列槽35 调用方=+0x%llX self=%p a1=0x%llx a2=0x%llx a3=0x%llx "
+                       "a4=0x%llx -> S_OK(探针)",
+                       rva, self, static_cast<unsigned long long>(a1),
+                       static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
+                       static_cast<unsigned long long>(a4));
+    }
+    return S_OK;
+}
+
 inline Slot command_queue_slot(std::size_t n) {
     if (n == 0) return reinterpret_cast<Slot>(&queue_query_interface);
     if (n == 1) return reinterpret_cast<Slot>(&queue_add_ref);
     if (n == 2) return reinterpret_cast<Slot>(&queue_release);
     if (n == 10) return reinterpret_cast<Slot>(&queue_execute);
     if (n == 30) return reinterpret_cast<Slot>(&queue_present_x);
+    if (n == 35) {
+        // 实测：FrameSubmissionQueue_Consume 对某个对象调 35 号槽；先记一次现场。
+        return reinterpret_cast<Slot>(&queue_slot35_probe);
+    }
     return nullptr;
 }
 
@@ -1489,6 +1851,79 @@ inline HRESULT WINAPI create_command_list_x(DeviceProxy* self, const void* desc,
 // 直接换成"固定参数个数的 C 透传"：x64 下 this 走 rcx，前 4 个整数参数走
 // rcx/rdx/r8/r9，其余在栈上 —— C 函数按同样规则收下再原样传出去即可。
 // 已知边界：浮点参数会丢（设备方法基本没有）；参数超过 9 个会丢尾部（D3D12 里没有）。
+inline void* wrap_host_object(IUnknown* pc, const char* kind);   // 定义在下方
+
+// 主机槽 36 = CreateFence（桌面 32）。文档 docs/host-vtable-offset.md 里它是九个
+// 交叉验证点之一；我们一直"同号转发"，于是被当成桌面 SetStablePowerState 调用，
+// 游戏拿到的是**裸 fence 对象**（vtable 只有 9 项）。实测崩溃链起点
+// `game+0x2482689 call *0x118(%rax)`（槽 35）就是在这种短 vtable 上越界取函数指针，
+// 一路跳进 vkd3d 的 CopyBufferRegion 那片代码后崩。
+// 这里按桌面签名真实现，并包一层 16 槽主机代理。
+inline HRESULT WINAPI create_fence_x(DeviceProxy* self, UINT64 initial_value, UINT flags,
+                                     const GUID* riid, void** ppv) {
+    if (!ppv) return E_POINTER;
+    ID3D12Fence* fence = nullptr;
+    const HRESULT hr = static_cast<ID3D12Device*>(self->pc)->CreateFence(
+        initial_value, static_cast<D3D12_FENCE_FLAGS>(flags), __uuidof(ID3D12Fence),
+        reinterpret_cast<void**>(&fence));
+    if (FAILED(hr) || !fence) return hr;
+    *ppv = wrap_host_object(fence, "Fence");
+    fence->Release();
+    static int seen = 0;
+    if (seen++ < 8) {
+        xbgtasix::logf("[d3d12_xs] 槽36 CreateFence initial=0x%llx flags=0x%x -> 主机代理 %p",
+                       static_cast<unsigned long long>(initial_value), flags, *ppv);
+    }
+    return S_OK;
+}
+
+inline void* wrap_host_object(IUnknown* pc, const char* kind);   // 定义在下方
+
+// 命令分配器（ID3D12CommandAllocator）的裸对象会被游戏按主机布局访问槽 9 → 读到 0。
+// 已用符号表钉死：崩在 `call *0x48(%rax)` 的对象，其 vtable = d3d12core.dll 的
+// .data+0x4560 = **d3d12_command_allocator_vtbl**（9 项）。
+// 主机槽号与桌面槽号并不一致（把主机槽 5 当桌面 CreateCommandAllocator 接会退到 2933 行），
+// 所以这里不认槽号，只认**产物的 vtable**：转发回来后扫候选出参，谁是这个类型就换成主机代理。
+inline void* d3d12core_base_cached() {
+    static void* base = []() {
+        HMODULE m = GetModuleHandleW(L"d3d12core.dll");
+        return reinterpret_cast<void*>(m);
+    }();
+    return base;
+}
+
+inline bool ptr_is_writable(const void* p) {
+    MEMORY_BASIC_INFORMATION m{};
+    if (!p || VirtualQuery(p, &m, sizeof(m)) != sizeof(m)) return false;
+    if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return false;
+    return m.Protect != PAGE_READONLY;
+}
+
+inline void wrap_allocator_out_params(uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) {
+    void* base = d3d12core_base_cached();
+    if (!base) return;
+    const auto target = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(base) + 0x5B0560);
+    const uintptr_t cands[4] = {a2, a3, a4, a5};
+    for (uintptr_t v : cands) {
+        if (v < 0x10000 || v > 0x7FFFFFFFFFFFULL) continue;
+        if (!ptr_is_writable(reinterpret_cast<void*>(v))) continue;
+        void* obj = *reinterpret_cast<void**>(v);
+        if (!obj) continue;
+        MEMORY_BASIC_INFORMATION m{};
+        if (VirtualQuery(obj, &m, sizeof(m)) != sizeof(m) || m.State != MEM_COMMIT) continue;
+        if (!ptr_is_writable(obj)) continue;
+        if (*reinterpret_cast<void**>(obj) != target) continue;
+        void* wrapped = wrap_host_object(static_cast<IUnknown*>(obj), "CommandAllocator");
+        if (!wrapped) continue;
+        *reinterpret_cast<void**>(v) = wrapped;
+        static int seen = 0;
+        if (seen++ < 8) {
+            xbgtasix::logf("[d3d12_xs] 命令分配器裸对象 %p -> 主机代理 %p（按 vtable 识别，不认槽号）",
+                           obj, wrapped);
+        }
+    }
+}
+
 template <std::size_t N>
 uintptr_t WINAPI forward_slot(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0, uintptr_t a3 = 0,
                               uintptr_t a4 = 0, uintptr_t a5 = 0, uintptr_t a6 = 0,
@@ -1505,7 +1940,12 @@ uintptr_t WINAPI forward_slot(void* self, uintptr_t a1 = 0, uintptr_t a2 = 0, ui
     // 待逐槽用 call-site RVA + 参数断言确认后再改。见 docs/host-vtable-offset.md。
     const std::size_t pc_index = N;
     auto fn = reinterpret_cast<Fn>(pc_vtable[pc_index]);
-    return fn(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+    const uintptr_t ret = fn(proxy->pc, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+    // 实验记录（别再踩）：把命令分配器换成代理会让启动直接死在 236 行
+    // （game+0x2478B7B int3）——因为游戏随后把分配器交回 CreateCommandList/Reset，
+    // 而 vkd3d 认的是它自己的对象，拿到代理就炸。要包代理必须先确认 vkd3d 不按类型强转。
+    // if (getenv("XBGTASIX_WRAP_ALLOC")) wrap_allocator_out_params(a2, a3, a4, a5);
+    return ret;
 }
 
 // 诊断探针：XBGTASIX_SLOTPROBE=1 时把进过的槽位号记一次（每个槽位只记首次），
@@ -1516,6 +1956,18 @@ inline bool slot_probe_on() {
         return GetEnvironmentVariableA("XBGTASIX_SLOTPROBE", b, sizeof(b)) > 0 && b[0] == '1';
     }();
     return on;
+}
+
+inline void logf_slot_once(std::size_t n, const char* what) {
+    static std::atomic<UINT64> seen[8] = {};
+    const std::size_t w = n / 64;
+    const std::size_t bit = n % 64;
+    if (w < 8) {
+        const UINT64 was = seen[w].fetch_or(UINT64(1) << bit, std::memory_order_relaxed);
+        if (!(was & (UINT64(1) << bit))) {
+            xbgtasix::logf("[d3d12_xs] %s 槽 %zu 首次被调用", what, n);
+        }
+    }
 }
 
 inline void log_slot_once(std::size_t n) {
@@ -1729,6 +2181,64 @@ inline HRESULT WINAPI create_resource_from_address_x(DeviceProxy* self, void* ba
 // MinGW 头文件没有 ID3D12Device10，但有 ID3D12Device8::CreateCommittedResource2
 // （签名少 NumCastableFormats/pCastableFormats 两项，而我们观测到的正是 0 和空指针），
 // 所以降级用它，语义等价。
+// ---------------------------------------------------------------------------
+// ★ 主机（XS）设备槽位的权威表：来自 game_scarlett_master.exe 的静态分析
+//   （移植说明 PORTING.md「当前使用的精确槽位」）：
+//     14 CreateDescriptorHeap / 15 GetDescriptorHandleIncrementSize /
+//     17 CreateConstantBufferView / 27 CreateCommittedResource /
+//     36 CreateFence / 38 GetCopyableFootprints
+//   我们过去对 17/27/38 是**同号转发**，等于把 CBV 当 DSV、把 CreateCommittedResource
+//   当 CreateSharedHandle、把 GetCopyableFootprints 当 GetResourceTiling 调用——
+//   资源创建与足迹计算全错，这也是后面 vkd3d 内部拿到空资源的根源之一。
+// ---------------------------------------------------------------------------
+inline HRESULT WINAPI host_create_committed_resource(DeviceProxy* self,
+                                                     const D3D12_HEAP_PROPERTIES* heap_props,
+                                                     D3D12_HEAP_FLAGS heap_flags,
+                                                     const D3D12_RESOURCE_DESC* desc,
+                                                     D3D12_RESOURCE_STATES initial_state,
+                                                     const D3D12_CLEAR_VALUE* clear_value,
+                                                     const GUID* riid, void** out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    ID3D12Resource* res = nullptr;
+    const HRESULT hr = static_cast<ID3D12Device*>(self->pc)->CreateCommittedResource(
+        heap_props, heap_flags, desc, initial_state, clear_value, __uuidof(ID3D12Resource),
+        reinterpret_cast<void**>(&res));
+    if (FAILED(hr) || !res) {
+        static int fails = 0;
+        if (fails++ < 8) {
+            xbgtasix::logf("[d3d12_xs] 主机槽27 CreateCommittedResource 失败 hr=0x%08lx "
+                           "dim=%d w=%llu h=%u mips=%u fmt=%d",
+                           static_cast<unsigned long>(hr), desc ? static_cast<int>(desc->Dimension) : -1,
+                           desc ? static_cast<unsigned long long>(desc->Width) : 0,
+                           desc ? desc->Height : 0, desc ? desc->MipLevels : 0,
+                           desc ? static_cast<int>(desc->Format) : -1);
+        }
+        return hr;
+    }
+    *out = res;
+    static int seen = 0;
+    if (seen++ < 8) {
+        xbgtasix::logf("[d3d12_xs] 主机槽27 CreateCommittedResource -> %p（dim=%d w=%llu h=%u mips=%u "
+                       "fmt=%d state=%d）",
+                       static_cast<void*>(res), desc ? static_cast<int>(desc->Dimension) : -1,
+                       desc ? static_cast<unsigned long long>(desc->Width) : 0, desc ? desc->Height : 0,
+                       desc ? desc->MipLevels : 0, desc ? static_cast<int>(desc->Format) : -1,
+                       initial_state);
+        log_object_vt("  ↳ 资源", res);
+    }
+    return S_OK;
+}
+
+inline void WINAPI host_get_copyable_footprints(DeviceProxy* self, const D3D12_RESOURCE_DESC* desc,
+                                               UINT first_sub, UINT sub_count, UINT64 base_offset,
+                                               D3D12_PLACED_SUBRESOURCE_FOOTPRINT* layouts,
+                                               UINT* rows, UINT64* row_size, UINT64* total) {
+    static_cast<ID3D12Device*>(self->pc)->GetCopyableFootprints(desc, first_sub, sub_count,
+                                                               base_offset, layouts, rows, row_size,
+                                                               total);
+}
+
 inline HRESULT WINAPI create_committed_resource3_x(
     DeviceProxy* self, const D3D12_HEAP_PROPERTIES* heap_props, UINT heap_flags,
     const D3D12_RESOURCE_DESC1* desc1, UINT layout, const D3D12_CLEAR_VALUE* clear,
@@ -1789,6 +2299,7 @@ inline HRESULT WINAPI create_committed_resource3_x(
                        static_cast<unsigned long>(hr));
     }
     dev8->Release();
+    if (out && *out) log_object_vt("  ↳ 槽127 资源", *out);
     xbgtasix::logf("[d3d12_xs] 槽127 -> hr=0x%08lx out=%p",
                    static_cast<unsigned long>(hr), out ? *out : nullptr);
     return hr;
@@ -1822,6 +2333,35 @@ inline D3D12_RESOURCE_ALLOCATION_INFO* WINAPI get_allocation_info_x(
     for (UINT i = 0; i < n; ++i) {
         masked[i] = descs[i];
         masked[i].Flags = static_cast<D3D12_RESOURCE_FLAGS>(masked[i].Flags & 0x3F);
+        // 主机 desc 里有几个"0 表示默认"的字段，桌面会当成非法描述并返回
+        // SizeInBytes = 0xFFFFFFFFFFFFFFFF（实测 dim=4 TEXTURE3D 1x1 fmt=28 就是这种），
+        // 而调用方紧跟一句 `cmpl $0,0x4(%rsi)` —— SizeInBytes 高 32 位非 0 就 int3。
+        // 这里按桌面语义补齐成最小值，并把改动记下来（不静默）。
+        bool fixed = false;
+        if (masked[i].MipLevels == 0) { masked[i].MipLevels = 1; fixed = true; }
+        if (masked[i].DepthOrArraySize == 0) { masked[i].DepthOrArraySize = 1; fixed = true; }
+        if (masked[i].SampleDesc.Count == 0) { masked[i].SampleDesc.Count = 1; fixed = true; }
+        if (masked[i].Width == 0) { masked[i].Width = 1; fixed = true; }
+        if (masked[i].Height == 0) { masked[i].Height = 1; fixed = true; }
+        // Layout 是主机枚举（实测 261 = 0x105），桌面只有 0..3。留着它桌面直接判非法，
+        // 返回 SizeInBytes=0xFFFFFFFFFFFFFFFF，调用方下一行就看高 32 位 -> int3。
+        if (static_cast<unsigned>(masked[i].Layout) > D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE) {
+            if (log) {
+                xbgtasix::logf("[d3d12_xs] 槽25 Layout 归一：主机 %u -> 桌面 UNKNOWN(0)",
+                               static_cast<unsigned>(descs[i].Layout));
+            }
+            masked[i].Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+            fixed = true;
+        }
+        if (fixed && log) {
+            xbgtasix::logf("[d3d12_xs] 槽25 描述补齐（主机 0=默认 -> 桌面最小合法值）：mips=%u->%u "
+                           "depth/array=%u->%u samples=%u->%u w=%llu->%llu h=%u->%u",
+                           static_cast<unsigned>(descs[i].MipLevels), static_cast<unsigned>(masked[i].MipLevels),
+                           static_cast<unsigned>(descs[i].DepthOrArraySize), static_cast<unsigned>(masked[i].DepthOrArraySize),
+                           static_cast<unsigned>(descs[i].SampleDesc.Count), static_cast<unsigned>(masked[i].SampleDesc.Count),
+                           static_cast<unsigned long long>(descs[i].Width), static_cast<unsigned long long>(masked[i].Width),
+                           static_cast<unsigned>(descs[i].Height), static_cast<unsigned>(masked[i].Height));
+        }
     }
     if (log) {
         xbgtasix::logf("[d3d12_xs] 槽25 GetResourceAllocationInfo: out=%p visible=0x%x num=%u "
@@ -1839,6 +2379,38 @@ inline D3D12_RESOURCE_ALLOCATION_INFO* WINAPI get_allocation_info_x(
         static_cast<ID3D12Device*>(self->pc)->GetResourceAllocationInfo(visible_mask, n, masked);
     out->SizeInBytes = info.SizeInBytes;
     out->Alignment = info.Alignment;
+    if (info.SizeInBytes == 0xFFFFFFFFFFFFFFFFull) {
+        // 桌面认为描述非法。把整张 desc 原样打出来（8 个 qword + 关键字段），
+        // 否则只看 dim/w/h/fmt 猜不出是哪一栏不合法。
+        const auto* raw = reinterpret_cast<const uint64_t*>(&descs[0]);
+        static std::atomic<int> dump_budget{8};
+        if (dump_budget.fetch_sub(1) > 0) {
+            xbgtasix::logf("[d3d12_xs] 槽25/108 桌面拒绝该 desc：raw=%016llx %016llx %016llx %016llx "
+                           "%016llx %016llx %016llx %016llx | dim=%u w=%llu h=%u depthOrArray=%u mips=%u "
+                           "fmt=%u samples=%u quality=%u layout=%u flags=0x%x",
+                           static_cast<unsigned long long>(raw[0]), static_cast<unsigned long long>(raw[1]),
+                           static_cast<unsigned long long>(raw[2]), static_cast<unsigned long long>(raw[3]),
+                           static_cast<unsigned long long>(raw[4]), static_cast<unsigned long long>(raw[5]),
+                           static_cast<unsigned long long>(raw[6]), static_cast<unsigned long long>(raw[7]),
+                           static_cast<unsigned>(descs[0].Dimension),
+                           static_cast<unsigned long long>(descs[0].Width),
+                           static_cast<unsigned>(descs[0].Height),
+                           static_cast<unsigned>(descs[0].DepthOrArraySize),
+                           static_cast<unsigned>(descs[0].MipLevels),
+                           static_cast<unsigned>(descs[0].Format),
+                           static_cast<unsigned>(descs[0].SampleDesc.Count),
+                           static_cast<unsigned>(descs[0].SampleDesc.Quality),
+                           static_cast<unsigned>(descs[0].Layout), static_cast<unsigned>(descs[0].Flags));
+        }
+        // 调用方只检查"SizeInBytes 高 32 位为 0"。给一对保守合法值让它继续，
+        // 但明确记成兜底 —— 真正的修法是把 desc 归一（见上面的补齐 / Layout 归一）。
+        out->SizeInBytes = 0x10000;
+        out->Alignment = 0x1000;
+        if (log) {
+            xbgtasix::logf("[d3d12_xs] 槽25/108 兜底：SizeInBytes=64 KiB Alignment=4 KiB（不是算对）");
+        }
+        return out;
+    }
     if (log) {
         xbgtasix::logf("[d3d12_xs] 槽25 -> SizeInBytes=%llu Alignment=0x%llx",
                        static_cast<unsigned long long>(info.SizeInBytes),
@@ -1947,11 +2519,22 @@ uintptr_t WINAPI forward_slot_strip_root(DeviceProxy* proxy, uintptr_t a1 = 0, u
             caller = reinterpret_cast<unsigned long long>(ra) -
                      reinterpret_cast<unsigned long long>(mod);
         }
+        // 第 5 参是 ppv：把**创建出来的桌面对象指针**也记下来。
+        // 之后崩在"某个对象的槽 N 是 0"时，就能一眼对上它是不是这里给的裸对象。
+        void* created = nullptr;
+        if (a5) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(a5), &mbi, sizeof(mbi)) == sizeof(mbi) &&
+                mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0) {
+                created = *reinterpret_cast<void**>(a5);
+            }
+        }
         xbgtasix::logf("[d3d12_xs] 槽%zu 转发(vt[%zu]) a1=0x%llx a2=0x%llx a3=0x%llx "
-                       "调用方=+0x%llX -> hr=0x%08lx",
+                       "调用方=+0x%llX -> hr=0x%08lx out=%p",
                        N, pc_index, static_cast<unsigned long long>(a1),
                        static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
-                       caller, static_cast<unsigned long>(ret & 0xFFFFFFFFULL));
+                       caller, static_cast<unsigned long>(ret & 0xFFFFFFFFULL), created);
+        if (created) log_object_vt("  ↳ 创建出的对象", created);
     }
     return ret;
 }
@@ -1963,6 +2546,9 @@ uintptr_t WINAPI forward_slot_strip_root(DeviceProxy* proxy, uintptr_t a1 = 0, u
 //   XBGTASIX_PSO62_RET=ptr（默认）-> 成功时把 PSO 指针放 RAX
 //   XBGTASIX_PSO62_RET=hr         -> 成功时返回 S_OK
 // 两种都会把 PSO 缓存起来，日志里能看出游戏到底吃哪一种。
+// 定义在下方（主机对象代理）；这里先声明，供槽 62 写回使使用。
+inline void* wrap_host_object(IUnknown* pc, const char* kind);
+
 inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0,
                                                   UINT64 c = 0, UINT64 d = 0, UINT64 e = 0,
                                                   UINT64 f = 0, UINT64 g = 0, UINT64 h = 0,
@@ -2141,8 +2727,16 @@ inline std::uintptr_t WINAPI create_compute_pso_x(DeviceProxy* self, UINT64 a = 
             // 之前要求"当前为空"才写，导致第 2 次以后拿到旧对象/空对象。
             if (readable(slot, sizeof(void*))) {
                 void* before = *slot;
-                *slot = pso;
-                xbgtasix::logf("[d3d12_xs] 槽62 写回 *e：%p -> %p", before, static_cast<void*>(pso));
+                // 包一层 16 槽主机代理：桌面的 ID3D12PipelineState 只有 9 项 vtable，
+                // 游戏按主机布局访问槽 9..（实测 game+0x1884FE `call *0x48(%rax)`）会读到 0，
+                // 变成"执行地址 0"。0..2 我们自己的 IUnknown，3..8 原样转发，9..15 记录桩。
+                // 实验结论（2026-11-26）：把 PSO 换成主机代理**没有**解开槽 9 那一枪，
+                // 反而让运行更容易落到"短跑"（2643 行 / 退出码 3）。所以先退回裸对象，
+                // 代理能力留在 wrap_host_object 里，等确认了 vkd3d 不会按类型强转再启用。
+                void* wrapped = nullptr;
+                *slot = wrapped ? wrapped : pso;
+                xbgtasix::logf("[d3d12_xs] 槽62 写回 *e：%p -> %p（主机代理 %p）", before,
+                               static_cast<void*>(pso), *slot);
             } else {
                 xbgtasix::logf("[d3d12_xs] 槽62 写回 *e 失败：e=%p 不可写", static_cast<void*>(slot));
             }
@@ -2173,6 +2767,255 @@ inline HRESULT WINAPI slot74_ok(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0, U
                        static_cast<unsigned long long>(c), static_cast<unsigned long long>(d));
     }
     return S_OK;
+}
+
+// ---------------------------------------------------------------------------
+// 通用"主机对象代理"（ObjProxy）
+//
+// 背景：桌面 vkd3d 对象只有 9 项 vtable（IUnknown + 6），而标题按**主机**布局访问，
+// 槽 9 及其之后是主机扩展。裸对象在这类调用上读到 0 → "执行地址 0" 的 0xC0000005。
+// 实测宿：game+0x1884FE `call *0x48(%rax)`（槽 9），对象 vtable 只有 9 项非空。
+//
+// 做法：0/1/2 = IUnknown 返代理自己；3..8 原样转发桌面同号槽（这部分布局一致）；
+// 9..15 = 记录型桩（返回 S_OK 并记一行）。绝不把桌面裸指针交出去。
+// ---------------------------------------------------------------------------
+struct ObjProxy {
+    void** vt;
+    IUnknown* pc;
+    unsigned long long refs;
+    const char* kind;
+};
+
+template <unsigned IDX>
+static uintptr_t WINAPI obj_fwd(ObjProxy* s, uintptr_t a = 0, uintptr_t b = 0, uintptr_t c = 0,
+                                uintptr_t d = 0, uintptr_t e = 0, uintptr_t f = 0, uintptr_t g = 0,
+                                uintptr_t h = 0) {
+    using Fn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                             uintptr_t, uintptr_t);
+    auto** vt = *reinterpret_cast<void***>(s->pc);
+    return reinterpret_cast<Fn>(vt[IDX])(s->pc, a, b, c, d, e, f, g, h);
+}
+
+static HRESULT WINAPI obj_qi(ObjProxy* s, const GUID* riid, void** ppv) {
+    if (!ppv) return E_POINTER;
+    if (!riid) return E_POINTER;
+    ++s->refs;
+    *ppv = s;
+    return S_OK;
+}
+static unsigned long WINAPI obj_add_ref(ObjProxy* s) { return ++s->refs; }
+static unsigned long WINAPI obj_release(ObjProxy* s) {
+    if (--s->refs == 0) {
+        s->pc->Release();
+        delete s;
+        return 0;
+    }
+    return static_cast<unsigned long>(s->refs);
+}
+
+template <unsigned N>
+static uintptr_t WINAPI obj_trap(ObjProxy* s, uintptr_t a = 0, uintptr_t b = 0, uintptr_t c = 0,
+                                 uintptr_t d = 0) {
+    static int seen = 0;
+    if (seen++ < 4) {
+        xbgtasix::logf("[d3d12_xs] %s 主机槽 %u 被调用 a=0x%llx b=0x%llx c=0x%llx d=0x%llx -> S_OK(桩)",
+                       s->kind, N, static_cast<unsigned long long>(a),
+                       static_cast<unsigned long long>(b), static_cast<unsigned long long>(c),
+                       static_cast<unsigned long long>(d));
+    }
+    return S_OK;
+}
+
+static void** obj_vtable(const char* kind, int) {
+    // 每种 kind 一份静态 vtable（内容相同，只是便于排查时区分）。
+    (void)kind;
+    static void** vt = []() {
+        auto** v = new void*[16];
+        v[0] = reinterpret_cast<void*>(&obj_qi);
+        v[1] = reinterpret_cast<void*>(&obj_add_ref);
+        v[2] = reinterpret_cast<void*>(&obj_release);
+        v[3] = reinterpret_cast<void*>(&obj_fwd<3>);
+        v[4] = reinterpret_cast<void*>(&obj_fwd<4>);
+        v[5] = reinterpret_cast<void*>(&obj_fwd<5>);
+        v[6] = reinterpret_cast<void*>(&obj_fwd<6>);
+        v[7] = reinterpret_cast<void*>(&obj_fwd<7>);
+        v[8] = reinterpret_cast<void*>(&obj_fwd<8>);
+        v[9] = reinterpret_cast<void*>(&obj_trap<9>);
+        v[10] = reinterpret_cast<void*>(&obj_trap<10>);
+        v[11] = reinterpret_cast<void*>(&obj_trap<11>);
+        v[12] = reinterpret_cast<void*>(&obj_trap<12>);
+        v[13] = reinterpret_cast<void*>(&obj_trap<13>);
+        v[14] = reinterpret_cast<void*>(&obj_trap<14>);
+        v[15] = reinterpret_cast<void*>(&obj_trap<15>);
+        return v;
+    }();
+    return vt;
+}
+
+inline void* wrap_host_object(IUnknown* pc, const char* kind) {
+    if (!pc) return nullptr;
+    pc->AddRef();
+    return new ObjProxy{obj_vtable(kind, 0), pc, 1, kind};
+}
+
+// 主机槽 41 = **CreateCommandSignature**（IID 已确证：{C36A797C-EC80-4F0A-8985-A7B2475082D1}
+// = ID3D12CommandSignature，见 vkd3d_d3d12.idl:3213）。
+//
+// 证据链：
+//   1) 调用点 game+0x2479554 / 0x2479590 / 0x24795CC，形状 `call *0x148(%rax)`（0x148/8=41），
+//      参数 (device, desc, 0, riid, ppv)，ppv 分别落在 game+0x75E75D8/E0/E8 三个连续全局上；
+//   2) 真机 dump（长跑日志）：
+//        desc: 00000010 00000001 701ffad0 00000000   → ByteStride=0x10 NumArgumentDescs=1 pArgDescs NodeMask=0
+//        argDesc: Type=0（DRAW）      / Type=1（DRAW_INDEXED）
+//      与桌面 D3D12_COMMAND_SIGNATURE_DESC 布局**逐字段一致**，Type 编号也和桌面枚举相同；
+//   3) 它是窗口初始化函数里三次调用的第一步，`js` 早退会让帧环（game+0x75DF268）永远不初始化，
+//      随后 game+0x24844A9 往 `[ring + (idx%3)*0x48]` 一写就 0xC0000005。
+//
+// 所以按桌面 CreateCommandSignature 真实现，只做形状校验：Type 超出桌面枚举就明确失败并记日志，
+// 绝不把主机值原样喂给 vkd3d（那会得到 "Unsupported indirect argument type: 105"）。
+// ---------------------------------------------------------------------------
+// 命令签名代理对象（SigProxy）
+//
+// 为什么需要：桌面 ID3D12CommandSignature 只有 4 个槽（IUnknown + GetDesc），而标题按**主机**
+// 布局去调它 —— 实测 game+0x1884FE `call *0x48(%rax)`（槽 9）读到的就是 vtable 之外的垃圾，
+// 表现为"执行地址 0"的 0xC0000005。裸返回桌面对象在这条路径上必崩。
+//
+// 所以给一层 16 槽代理：0/1/2 转发 IUnknown、3 转发 GetDesc、4..15 是记录型桩
+// （返回 S_OK 并记一次"槽 N 被调用"），既不假造语义，也让下一堵墙露出来。
+// ---------------------------------------------------------------------------
+struct SigProxy {
+    void** vt;
+    ID3D12CommandSignature* pc;
+    unsigned long long refs;
+};
+void* g_sig_vt[16];
+
+static HRESULT WINAPI sig_qi(SigProxy* s, const GUID* riid, void** ppv) {
+    if (!ppv) return E_POINTER;
+    if (!riid) return E_POINTER;
+    // 关键：**绝不能把桌面裸指针交出去**。实测标题 QI 到别的 IID 后把结果存进
+    // game+0x75DF220 那张表，随后按主机布局调槽 9（`call *0x48(%rax)`），
+    // 桌面对象 vtable 只有 4 槽 → 读到 0 → "执行地址 0" 的 0xC0000005。
+    // 所以认识的 IID 一律回代理自己，不认识的就明确 E_NOINTERFACE（并记一条）。
+    if (*riid == __uuidof(IUnknown) || *riid == __uuidof(ID3D12Object) ||
+        *riid == __uuidof(ID3D12DeviceChild) || *riid == __uuidof(ID3D12Pageable) ||
+        *riid == __uuidof(ID3D12CommandSignature)) {
+        ++s->refs;
+        *ppv = s;
+        return S_OK;
+    }
+    char t[40]{};
+    const auto* g = reinterpret_cast<const unsigned char*>(riid);
+    snprintf(t, sizeof(t), "%08x-%04x-%04x", *reinterpret_cast<const unsigned*>(g),
+             *reinterpret_cast<const unsigned short*>(g + 4), *reinterpret_cast<const unsigned short*>(g + 6));
+    static int seen = 0;
+    if (seen++ < 4) {
+        xbgtasix::logf("[d3d12_xs] 命令签名代理 QI(%s) -> E_NOINTERFACE（不交裸桌面对象）", t);
+    }
+    return E_NOINTERFACE;
+}
+static unsigned long WINAPI sig_add_ref(SigProxy* s) { return ++s->refs; }
+static unsigned long WINAPI sig_release(SigProxy* s) {
+    if (--s->refs == 0) {
+        s->pc->Release();
+        delete s;
+        return 0;
+    }
+    return static_cast<unsigned long>(s->refs);
+}
+template <unsigned N>
+static HRESULT WINAPI sig_trap(SigProxy*, unsigned long long a = 0, unsigned long long b = 0,
+                               unsigned long long c = 0, unsigned long long d = 0) {
+    static int seen = 0;
+    if (seen++ < 4) {
+        xbgtasix::logf("[d3d12_xs] 命令签名主机槽 %u 被调用 a=0x%llx b=0x%llx c=0x%llx d=0x%llx -> S_OK(桩)",
+                       N, a, b, c, d);
+    }
+    return S_OK;
+}
+
+template <std::size_t... N>
+static void** make_sig_vtable(std::index_sequence<N...>) {
+    return new void*[16]{reinterpret_cast<void*>(&sig_qi), reinterpret_cast<void*>(&sig_add_ref),
+                         reinterpret_cast<void*>(&sig_release), reinterpret_cast<void*>(&sig_trap<3>),
+                         reinterpret_cast<void*>(&sig_trap<4>), reinterpret_cast<void*>(&sig_trap<5>),
+                         reinterpret_cast<void*>(&sig_trap<6>), reinterpret_cast<void*>(&sig_trap<7>),
+                         reinterpret_cast<void*>(&sig_trap<8>), reinterpret_cast<void*>(&sig_trap<9>),
+                         reinterpret_cast<void*>(&sig_trap<10>), reinterpret_cast<void*>(&sig_trap<11>),
+                         reinterpret_cast<void*>(&sig_trap<12>), reinterpret_cast<void*>(&sig_trap<13>),
+                         reinterpret_cast<void*>(&sig_trap<14>), reinterpret_cast<void*>(&sig_trap<15>)};
+}
+
+static void** sig_vtable() {
+    static void** vt = make_sig_vtable(std::make_index_sequence<16>{});
+    return vt;
+}
+
+inline HRESULT WINAPI create_command_signature_x(DeviceProxy* self, const void* desc, void* root_sig,
+                                                 const GUID* riid, void** ppv) {
+    if (!ppv) return E_POINTER;
+    *ppv = nullptr;
+    if (!desc || !riid) return E_INVALIDARG;
+
+    const auto* host = static_cast<const D3D12_COMMAND_SIGNATURE_DESC*>(desc);
+    static std::atomic<int> n{0};
+    const bool log = n.fetch_add(1, std::memory_order_relaxed) < 8;
+
+    D3D12_COMMAND_SIGNATURE_DESC pc{};
+    D3D12_INDIRECT_ARGUMENT_DESC args[8]{};
+    const UINT count = host->NumArgumentDescs < 8 ? host->NumArgumentDescs : 8;
+    pc.ByteStride = host->ByteStride;
+    pc.NumArgumentDescs = count;
+    pc.NodeMask = host->NodeMask;
+    pc.pArgumentDescs = args;
+    for (UINT i = 0; i < count; ++i) {
+        args[i] = host->pArgumentDescs[i];
+        // 主机独有的间接参数类型（实测 105 = 0x69，stride=12）。桌面枚举里 stride=12 的
+        // 只有 DISPATCH 家族（ThreadGroupCountX/Y/Z 三个 u32）。默认映射到 DISPATCH(2)，
+        // 可用 XBGTASIX_INDIRECT105=8 改成 DISPATCH_MESH(8) 做对照实验。
+        if (static_cast<unsigned>(args[i].Type) == 105u) {
+            static const unsigned mapped = []() {
+                char buf[8]{};
+                const DWORD n = ::GetEnvironmentVariableA("XBGTASIX_INDIRECT105", buf, sizeof(buf));
+                const unsigned v = (n > 0) ? static_cast<unsigned>(std::strtoul(buf, nullptr, 0)) : 2u;
+                return v <= 8u ? v : 2u;
+            }();
+            xbgtasix::logf("[d3d12_xs] 槽41 主机间接类型 105 -> 桌面 %u（stride=%u，按 DISPATCH 家族试）",
+                           mapped, pc.ByteStride);
+            args[i].Type = static_cast<D3D12_INDIRECT_ARGUMENT_TYPE>(mapped);
+            continue;
+        }
+        if (static_cast<unsigned>(args[i].Type) > static_cast<unsigned>(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH)) {
+            // 主机独有的间接参数类型（实测 105）。桌面没有对应枚举，先把整条描述打全：
+            //   stride / num / 每一项 Type 与其后 8 字节（Slot 或常量），
+            // 再看它被用在哪条 ExecuteIndirect 上，才能定映射。宁可明确失败，也别喂给 vkd3d。
+            xbgtasix::logf("[d3d12_xs] 槽41 CreateCommandSignature 拒绝：stride=%u num=%u arg[%u] Type=%u",
+                           pc.ByteStride, pc.NumArgumentDescs, i, static_cast<unsigned>(args[i].Type));
+            for (UINT k = 0; k < count; ++k) {
+                const auto* raw = reinterpret_cast<const uint32_t*>(&host->pArgumentDescs[k]);
+                xbgtasix::logf("[d3d12_xs]   arg[%u]: %08x %08x %08x", k, raw[0], raw[1], raw[2]);
+            }
+            return E_INVALIDARG;
+        }
+    }
+
+    // 先建桌面对象，再包一层主机 16 槽代理（裸对象在槽 9 上会崩，见上面的说明）。
+    ID3D12CommandSignature* raw = nullptr;
+    const HRESULT hr = static_cast<ID3D12Device*>(self->pc)->CreateCommandSignature(
+        &pc, static_cast<ID3D12RootSignature*>(root_sig), __uuidof(ID3D12CommandSignature),
+        reinterpret_cast<void**>(&raw));
+    if (SUCCEEDED(hr) && raw) {
+        auto* proxy = new SigProxy{sig_vtable(), raw, 1};
+        *ppv = proxy;
+    }
+    if (log) {
+        xbgtasix::logf("[d3d12_xs] 槽41 CreateCommandSignature: stride=%u num=%u arg0.Type=%u "
+                       "rootSig=%p -> hr=0x%08lx sig=%p",
+                       pc.ByteStride, pc.NumArgumentDescs,
+                       count ? static_cast<unsigned>(args[0].Type) : 0u, root_sig,
+                       static_cast<unsigned long>(hr), *ppv);
+    }
+    return hr;
 }
 
 // 主机槽 86：调用点 game+0x2479A87 `call *0x2b0(%rax)`，形态
@@ -2218,6 +3061,35 @@ inline HRESULT WINAPI slot132_ok(DeviceProxy* self, UINT64 a = 0, UINT64 b = 0, 
     return S_OK;
 }
 
+// 桌面槽 5 = CreateCommandAllocator、槽 24 = CreateHeap：两者都把裸桌面对象交给游戏。
+// 桌面这两个接口都只有 9 项 vtable，游戏按主机布局访问槽 9 会读到 0（"执行地址 0"）。
+// 所以创建后统一包一层主机代理。
+inline HRESULT WINAPI create_command_allocator_x(DeviceProxy* self, D3D12_COMMAND_LIST_TYPE type,
+                                                 const GUID* riid, void** ppv) {
+    ID3D12CommandAllocator* alloc = nullptr;
+    const HRESULT hr = static_cast<ID3D12Device*>(self->pc)->CreateCommandAllocator(
+        type, __uuidof(ID3D12CommandAllocator), reinterpret_cast<void**>(&alloc));
+    if (FAILED(hr) || !alloc) return hr;
+    *ppv = wrap_host_object(alloc, "CommandAllocator");
+    alloc->Release();
+    xbgtasix::logf("[d3d12_xs] 槽5 CreateCommandAllocator type=%d -> 主机代理 %p", static_cast<int>(type), *ppv);
+    return S_OK;
+}
+
+inline HRESULT WINAPI create_heap_x(DeviceProxy* self, const D3D12_HEAP_DESC* desc, const GUID* riid,
+                                    void** ppv) {
+    ID3D12Heap* heap = nullptr;
+    const HRESULT hr = static_cast<ID3D12Device*>(self->pc)->CreateHeap(
+        desc, __uuidof(ID3D12Heap), reinterpret_cast<void**>(&heap));
+    if (FAILED(hr) || !heap) return hr;
+    *ppv = wrap_host_object(heap, "Heap");
+    heap->Release();
+    xbgtasix::logf("[d3d12_xs] 槽24 CreateHeap size=0x%llx align=0x%llx -> 主机代理 %p",
+                   static_cast<unsigned long long>(desc ? desc->SizeInBytes : 0),
+                   static_cast<unsigned long long>(desc ? desc->Alignment : 0), *ppv);
+    return S_OK;
+}
+
 template <std::size_t N>
 Slot device_slot() {
     if constexpr (N == 0) return reinterpret_cast<Slot>(&query_interface);
@@ -2225,11 +3097,63 @@ Slot device_slot() {
     if constexpr (N == 2) return reinterpret_cast<Slot>(&release);
     if constexpr (N == kXboxCreateCommandQueueSlot)
         return reinterpret_cast<Slot>(&create_command_queue_x);
-    if constexpr (N == 14) return reinterpret_cast<Slot>(&create_descriptor_heap_x);
+    // 桌面槽号 10 也是 CreateDescriptorHeap。原来它走 forward_slot 原样转发，
+    // 交给游戏的是**裸桌面堆对象** —— 游戏按主机布局调槽 9 就读到 0。
+    if constexpr (N == 10 || N == 14) return reinterpret_cast<Slot>(&create_descriptor_heap_x);
+    // 注意：**主机槽号 ≠ 桌面槽号**。实测把 5/24 当桌面 CreateCommandAllocator/CreateHeap
+    // 接住会把运行打到 2933 行（d3d12core+0x1D898 崩），所以这两条先关掉，
+    // 等反汇编确认主机槽 5/24 的真实签名再接（函数体留着，别重复写）。
+    // if constexpr (N == 5) return reinterpret_cast<Slot>(&create_command_allocator_x);
+    // if constexpr (N == 24) return reinterpret_cast<Slot>(&create_heap_x);
     if constexpr (N == 19) return reinterpret_cast<Slot>(&create_uav_x);
+    // 主机设备 17 = CreateConstantBufferView（PORTING.md）。以前同号转发到桌面
+    // CreateDepthStencilView，CBV 会被当成 DSV 建，描述符内容全错。
+    // ⚠ 实测（2026-11-26 18:40）：接上之后日志里只出现 1 次 CBV，随后进程
+    // `NtTerminateProcess exit_code 3`（**主动退出**，不是崩溃），且连续 6 次复现。
+    // 所以先用环境开关做单变量：默认关闭，XBGTASIX_CBV17=1 才启用。
+    if constexpr (N == 17) {
+        static const bool on = []() {
+            char b[8] = {0};
+            return GetEnvironmentVariableA("XBGTASIX_CBV17", b, sizeof(b)) > 0 && b[0] == '1';
+        }();
+        if (on) return reinterpret_cast<Slot>(&create_cbv);
+    }
+    // 实验记录（别重复踩）：按 docs/host-vtable-offset.md 把 15/20/21 接到
+    // GetDescriptorHandleIncrementSize / CreateRTV / CreateDSV 之后，
+    // 运行从"12711 行、崩在 vkd3d clear_uav"变成"2605 行、崩在 game+0x1F77023"——
+    // 说明**这个方向是对的（离开了 vkd3d 内部崩溃），但步进值/句柄体系没对齐**：
+    // 游戏按 64 B/条目记账，而我们返回的是驱动真值或另一套翻译，寻址立刻错位。
+    // 下一步要先钉死"槽 15 到底该返回什么"，再一起启用 20/21，否则一改就早退。
+    // 实测（2026-11-26）：单独把槽 15 接到 get_descriptor_increment_x 会让启动早退——
+    //   模式 0（返回 0x40）-> 2617 行；模式 1（返回驱动真值 0x20）-> 2655 行；
+    // 而"同号转发"能跑到 12711 行。说明这个调用点的实参**不是**堆类型枚举，
+    // 或者主机槽 15 根本不是 IncrementSize。接线已撤回，等反汇编 0x2478E2F 确认实参再动。
+    // 槽 15 / 20 / 21 按 docs/host-vtable-offset.md 的交叉验证接线。
+    // 配套改动：句柄翻译已改成**按索引**换算（host 64 B/条目 -> 驱动 32 B/条目），
+    // 所以现在返回 0x40 不再和翻译打架。
+    // 实验记录（2026-11-26）：句柄翻译改成按索引换算（host 64B -> 驱动 32B）之后，
+    // 再把 15/20/21 接上，仍然在 game+0x1F77023 早退（约 2900 行）。
+    // 说明"步长口径"只是这一环，槽 15 的真实语义（或 20/21 的实参顺序）还没对上。
+    // 先只保留索引式翻译（对已有路径更正确），三条接线继续关着。
+    // if constexpr (N == 15) return reinterpret_cast<Slot>(&get_descriptor_increment_x);
+    // if constexpr (N == 20) return reinterpret_cast<Slot>(&create_rtv);
+    // if constexpr (N == 21) return reinterpret_cast<Slot>(&create_dsv);
+    // if constexpr (N == 20) return reinterpret_cast<Slot>(&create_rtv);
+    // if constexpr (N == 21) return reinterpret_cast<Slot>(&create_dsv);
     if constexpr (N == 133) return reinterpret_cast<Slot>(&create_resource_from_address_x);
     if constexpr (N == 127) return reinterpret_cast<Slot>(&create_committed_resource3_x);
+    // 实测（2026-11-26）：按 PORTING.md 把 27/38 接成 CreateCommittedResource /
+    // GetCopyableFootprints 后，启动稳定退到 2648 行（连续 4 次），且槽 27 **一次都没被调用**，
+    // 说明游戏在那一刻之前就走了别的路径（或主机的 27 号在这个阶段另有语义）。
+    // 接线先撤回；slot 表本身是权威结论，等能稳定长跑后再逐条替换验证。
+    // if constexpr (N == 27) return reinterpret_cast<Slot>(&host_create_committed_resource);
+    // if constexpr (N == 38) return reinterpret_cast<Slot>(&host_get_copyable_footprints);
     if constexpr (N == 25) return reinterpret_cast<Slot>(&get_allocation_info_x);
+    // 槽 108 的调用点（game+0xABFE07 `call *0x360(%rax)`）与槽 25 **完全同形**：
+    //   rcx=out（16 字节 {u64 size, u64 align}）、rdx=自己、r8d=visibleMask、r9d=numDescs，
+    // 调用方紧接着 `cmpl $0,0x4(%rsi)` —— SizeInBytes 高 32 位非 0 就 int3。
+    // 所以按同一份实现接住（实现里已经对"桌面判非法"做了兜底）。
+    if constexpr (N == 108) return reinterpret_cast<Slot>(&get_allocation_info_x);
     // 根签名创建（主机槽号未定论：12 与 16 都挂上，剥离函数对非根签名数据是无操作）
     if constexpr (N == 12 || N == 16) return reinterpret_cast<Slot>(&forward_slot_strip_root<N>);
     if constexpr (N == kCustomHeapPropertiesSlot)
@@ -2253,6 +3177,17 @@ Slot device_slot() {
     // 主机扩展槽（>= 44）在 PC 设备上**不存在**，按同号转发会把参数喂给别的方法
     // （实测 slot 70 直接崩在 D3D12Core）。未实现的一律走"明确失败 + 记一次"，
     // 让游戏走它自己的降级/报错路径，而不是在驱动内部炸掉。
+    if constexpr (N == 41) return reinterpret_cast<Slot>(&create_command_signature_x);
+    if constexpr (N == 36) return reinterpret_cast<Slot>(&create_fence_x);
+    // 槽 57 探针：实测返回"哑对象"后行数反而从 12716 掉到 12439，且仍崩在同一处，
+    // 所以默认关闭。要用就 XBGTASIX_SLOT57=1（记录参数 + 给哑对象）。
+    if constexpr (N == 57) {
+        static const bool on = []() {
+            char b[8] = {0};
+            return GetEnvironmentVariableA("XBGTASIX_SLOT57", b, sizeof(b)) > 0 && b[0] == '1';
+        }();
+        if (on) return reinterpret_cast<Slot>(&slot57_probe);
+    }
     if constexpr (N == 74) return reinterpret_cast<Slot>(&slot74_ok);
     if constexpr (N == 132) return reinterpret_cast<Slot>(&slot132_ok);
     if constexpr (N >= 44) return reinterpret_cast<Slot>(&device_extension_stub_n<N>);
